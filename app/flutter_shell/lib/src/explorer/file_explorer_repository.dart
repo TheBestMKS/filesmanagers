@@ -225,6 +225,31 @@ class FileExplorerRepository {
     );
   }
 
+  Future<DirectorySnapshot> snapshotForPaths(
+    String label,
+    List<String> paths,
+  ) async {
+    final entries = <ExplorerEntry>[];
+    for (final path in paths) {
+      final entry = await entryForPath(path);
+      if (entry != null) {
+        entries.add(entry);
+      } else {
+        entries.add(
+          ExplorerEntry(
+            name: basename(path),
+            path: path,
+            kind: ExplorerEntryKind.unknown,
+            sizeBytes: 0,
+            modifiedAt: DateTime.fromMillisecondsSinceEpoch(0),
+            exists: false,
+          ),
+        );
+      }
+    }
+    return DirectorySnapshot(path: label, entries: entries);
+  }
+
   Future<FilePreview> previewFile(
     String path, {
     String? password,
@@ -455,6 +480,78 @@ class FileExplorerRepository {
     return target;
   }
 
+  Future<FileSystemEntity> copyEntityToDirectory(
+    String sourcePath,
+    String targetDirectory,
+  ) async {
+    final type = await FileSystemEntity.type(sourcePath, followLinks: false);
+    final targetDir = Directory(targetDirectory);
+    await targetDir.create(recursive: true);
+    if (type == FileSystemEntityType.directory) {
+      final target = await _availableDirectory(targetDir, basename(sourcePath));
+      await _copyDirectory(Directory(sourcePath), target);
+      return target;
+    }
+    if (type == FileSystemEntityType.file) {
+      return _copyFileToDirectory(
+        File(sourcePath),
+        targetDir,
+        preferredName: basename(sourcePath),
+      );
+    }
+    throw FileSystemException('Path not found', sourcePath);
+  }
+
+  Future<FileSystemEntity> moveEntityToDirectory(
+    String sourcePath,
+    String targetDirectory,
+  ) async {
+    final type = await FileSystemEntity.type(sourcePath, followLinks: false);
+    final targetDir = Directory(targetDirectory);
+    await targetDir.create(recursive: true);
+    if (type == FileSystemEntityType.directory) {
+      final target = await _availableDirectory(targetDir, basename(sourcePath));
+      return Directory(sourcePath).rename(target.path);
+    }
+    if (type == FileSystemEntityType.file) {
+      final target = await _availableFile(targetDir, basename(sourcePath));
+      return File(sourcePath).rename(target.path);
+    }
+    throw FileSystemException('Path not found', sourcePath);
+  }
+
+  Future<FileSystemEntity> renameEntity(String path, String newName) async {
+    final normalized = newName.trim();
+    if (normalized.isEmpty ||
+        normalized.contains('/') ||
+        normalized.contains('\\')) {
+      throw ArgumentError('Invalid file name.');
+    }
+    final parent = File(path).parent.path;
+    final nextPath = '$parent${Platform.pathSeparator}$normalized';
+    final type = await FileSystemEntity.type(path, followLinks: false);
+    if (type == FileSystemEntityType.directory) {
+      return Directory(path).rename(nextPath);
+    }
+    if (type == FileSystemEntityType.file) {
+      return File(path).rename(nextPath);
+    }
+    throw FileSystemException('Path not found', path);
+  }
+
+  Future<void> deleteEntity(String path) async {
+    final type = await FileSystemEntity.type(path, followLinks: false);
+    if (type == FileSystemEntityType.directory) {
+      await Directory(path).delete(recursive: true);
+      return;
+    }
+    if (type == FileSystemEntityType.file) {
+      await File(path).delete();
+      return;
+    }
+    throw FileSystemException('Path not found', path);
+  }
+
   ExplorerEntryKind _kindForFile(String name) {
     if (name == '.folder.cryptmeta') {
       return ExplorerEntryKind.folderMeta;
@@ -661,6 +758,34 @@ class FileExplorerRepository {
       index++;
     }
     return candidate;
+  }
+
+  Future<Directory> _availableDirectory(
+    Directory targetDir,
+    String preferredName,
+  ) async {
+    var candidate =
+        Directory('${targetDir.path}${Platform.pathSeparator}$preferredName');
+    var index = 1;
+    while (await candidate.exists()) {
+      candidate = Directory(
+          '${targetDir.path}${Platform.pathSeparator}$preferredName-$index');
+      index++;
+    }
+    return candidate;
+  }
+
+  Future<void> _copyDirectory(Directory source, Directory target) async {
+    await target.create(recursive: true);
+    await for (final entity in source.list(followLinks: false)) {
+      final name = basename(entity.path);
+      final nextPath = '${target.path}${Platform.pathSeparator}$name';
+      if (entity is Directory) {
+        await _copyDirectory(entity, Directory(nextPath));
+      } else if (entity is File) {
+        await entity.copy(nextPath);
+      }
+    }
   }
 
   String _requirePassword(String? password) {

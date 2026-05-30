@@ -27,6 +27,11 @@ class SecuritySettings {
     this.languageCode = 'ru',
     this.customLanguagePath,
     this.extensionAssociations = const <String, String>{},
+    this.favoritePaths = const <String>[],
+    this.rememberRecentFiles = true,
+    this.recentSidebarCount = 5,
+    this.recentRememberCount = 50,
+    this.recentFilePaths = const <String>[],
   });
 
   final String? appPasswordSalt;
@@ -48,6 +53,11 @@ class SecuritySettings {
   final String languageCode;
   final String? customLanguagePath;
   final Map<String, String> extensionAssociations;
+  final List<String> favoritePaths;
+  final bool rememberRecentFiles;
+  final int recentSidebarCount;
+  final int recentRememberCount;
+  final List<String> recentFilePaths;
 
   bool get hasAppPassword =>
       appPasswordSalt != null && appPasswordDigest != null;
@@ -82,6 +92,11 @@ class SecuritySettings {
     String? customLanguagePath,
     bool clearCustomLanguagePath = false,
     Map<String, String>? extensionAssociations,
+    List<String>? favoritePaths,
+    bool? rememberRecentFiles,
+    int? recentSidebarCount,
+    int? recentRememberCount,
+    List<String>? recentFilePaths,
   }) {
     return SecuritySettings(
       appPasswordSalt:
@@ -126,6 +141,11 @@ class SecuritySettings {
           : customLanguagePath ?? this.customLanguagePath,
       extensionAssociations:
           extensionAssociations ?? this.extensionAssociations,
+      favoritePaths: favoritePaths ?? this.favoritePaths,
+      rememberRecentFiles: rememberRecentFiles ?? this.rememberRecentFiles,
+      recentSidebarCount: recentSidebarCount ?? this.recentSidebarCount,
+      recentRememberCount: recentRememberCount ?? this.recentRememberCount,
+      recentFilePaths: recentFilePaths ?? this.recentFilePaths,
     );
   }
 
@@ -133,6 +153,8 @@ class SecuritySettings {
     final envelope = json['savedFilePasswordEnvelope'];
     final commonEnvelope = json['commonEncryptionEnvelope'];
     final associations = json['extensionAssociations'];
+    final favorites = json['favoritePaths'];
+    final recent = json['recentFilePaths'];
     return SecuritySettings(
       appPasswordSalt: json['appPasswordSalt'] as String?,
       appPasswordDigest: json['appPasswordDigest'] as String?,
@@ -164,6 +186,15 @@ class SecuritySettings {
           ? associations.map((key, value) =>
               MapEntry(key.toString().toLowerCase(), value.toString()))
           : const <String, String>{},
+      favoritePaths: favorites is List
+          ? favorites.map((item) => item.toString()).toList()
+          : const <String>[],
+      rememberRecentFiles: json['rememberRecentFiles'] as bool? ?? true,
+      recentSidebarCount: json['recentSidebarCount'] as int? ?? 5,
+      recentRememberCount: json['recentRememberCount'] as int? ?? 50,
+      recentFilePaths: recent is List
+          ? recent.map((item) => item.toString()).toList()
+          : const <String>[],
     );
   }
 
@@ -188,6 +219,11 @@ class SecuritySettings {
       'languageCode': languageCode,
       'customLanguagePath': customLanguagePath,
       'extensionAssociations': extensionAssociations,
+      'favoritePaths': favoritePaths,
+      'rememberRecentFiles': rememberRecentFiles,
+      'recentSidebarCount': recentSidebarCount,
+      'recentRememberCount': recentRememberCount,
+      'recentFilePaths': recentFilePaths,
     };
   }
 }
@@ -246,6 +282,57 @@ class SecuritySettingsRepository {
     );
   }
 
+  Future<SecuritySettings> updateFavorites(
+    SecuritySettings current,
+    List<String> paths,
+  ) async {
+    final deduped = _dedupePaths(paths);
+    final next = current.copyWith(favoritePaths: deduped);
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> recordRecentFile(
+    SecuritySettings current,
+    String path,
+  ) async {
+    if (!current.rememberRecentFiles) {
+      return current;
+    }
+    final nextPaths = _dedupePaths(<String>[path, ...current.recentFilePaths])
+        .take(current.recentRememberCount.clamp(0, 500).toInt())
+        .toList();
+    final next = current.copyWith(recentFilePaths: nextPaths);
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> removeRecentFile(
+    SecuritySettings current,
+    String path,
+  ) async {
+    final next = current.copyWith(
+      recentFilePaths:
+          current.recentFilePaths.where((item) => item != path).toList(),
+    );
+    await save(next);
+    return next;
+  }
+
+  List<String> _dedupePaths(Iterable<String> paths) {
+    final seen = <String>{};
+    final result = <String>[];
+    for (final path in paths) {
+      final trimmed = path.trim();
+      if (trimmed.isEmpty) continue;
+      final key = Platform.isWindows ? trimmed.toLowerCase() : trimmed;
+      if (seen.add(key)) {
+        result.add(trimmed);
+      }
+    }
+    return result;
+  }
+
   Future<SecuritySettings> setPasswords({
     required SecuritySettings current,
     required String? appPassword,
@@ -263,6 +350,9 @@ class SecuritySettingsRepository {
     String? languageCode,
     String? customLanguagePath,
     Map<String, String>? extensionAssociations,
+    bool? rememberRecentFiles,
+    int? recentSidebarCount,
+    int? recentRememberCount,
   }) async {
     var next = current.copyWith(
       useSeparateFilePassword: useSeparateFilePassword,
@@ -280,6 +370,16 @@ class SecuritySettingsRepository {
       languageCode: languageCode,
       customLanguagePath: customLanguagePath,
       extensionAssociations: extensionAssociations,
+      rememberRecentFiles: rememberRecentFiles,
+      recentSidebarCount: recentSidebarCount,
+      recentRememberCount: recentRememberCount,
+      recentFilePaths: rememberRecentFiles == false
+          ? const <String>[]
+          : current.recentFilePaths
+              .take((recentRememberCount ?? current.recentRememberCount)
+                  .clamp(0, 500)
+                  .toInt())
+              .toList(),
       failedLoginAttempts: 0,
     );
 

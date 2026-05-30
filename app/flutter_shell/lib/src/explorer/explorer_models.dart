@@ -89,6 +89,7 @@ class ExplorerEntry {
     required this.sizeBytes,
     required this.modifiedAt,
     this.containerInfo,
+    this.exists = true,
   });
 
   final String name;
@@ -97,6 +98,7 @@ class ExplorerEntry {
   final int sizeBytes;
   final DateTime modifiedAt;
   final VaultContainerInfo? containerInfo;
+  final bool exists;
 
   bool get isDirectory => kind == ExplorerEntryKind.directory;
   bool get isEncrypted =>

@@ -8,11 +8,11 @@ import 'src/explorer/file_explorer_repository.dart';
 import 'src/ffi/crypt_bindings.dart';
 import 'src/i18n/app_language.dart';
 import 'src/platform_services.dart';
-import 'src/plugins/cloud_plugin_registry.dart';
+import 'src/plugins/cloud_plugin_registry.dart' hide basename;
 import 'src/security/security_settings.dart';
 import 'src/viewer/file_viewer_service.dart';
 
-const _appVersion = '0.2.0';
+const _appVersion = '0.3.0';
 
 void main(List<String> args) => runApp(
       SecureVaultApp(initialPath: args.isEmpty ? null : args.first),
@@ -72,6 +72,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   double _sidebarWidth = 290;
   double _previewWidth = 420;
   bool _previewVisible = true;
+  String? _clipboardPath;
+  bool _clipboardCut = false;
+  bool _showingRecent = false;
 
   @override
   void initState() {
@@ -171,6 +174,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   void _openPath(String path) {
     setState(() {
       _page = ShellPage.explorer;
+      _showingRecent = false;
       _currentPath = path;
       _selected = null;
       _preview = null;
@@ -180,9 +184,17 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
 
   Future<void> _refresh() async {
     final path = _currentPath;
-    if (path == null) return;
     setState(() {
-      _snapshot = _explorer.listDirectory(path);
+      _snapshot = _showingRecent
+          ? _explorer.snapshotForPaths(
+              _language.t('recent.title'),
+              _settings.recentFilePaths
+                  .take(_settings.recentRememberCount)
+                  .toList(),
+            )
+          : path == null
+              ? null
+              : _explorer.listDirectory(path);
       if (_selected != null) {
         _preview = _explorer.previewFile(
           _selected!.path,
@@ -201,7 +213,84 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     _openPath(location.path!);
   }
 
-  void _openEntry(ExplorerEntry entry) {
+  void _openRecentFiles() {
+    setState(() {
+      _page = ShellPage.explorer;
+      _showingRecent = true;
+      _selected = null;
+      _preview = null;
+      _snapshot = _explorer.snapshotForPaths(
+        _language.t('recent.title'),
+        _settings.recentFilePaths.take(_settings.recentRememberCount).toList(),
+      );
+    });
+  }
+
+  Future<void> _openFavoritePath(String path) async {
+    final entry = await _explorer.entryForPath(path);
+    if (entry == null) {
+      _snack(_language.t('favorites.missing'));
+      return;
+    }
+    await _openEntry(entry);
+  }
+
+  Future<void> _toggleFavorite(ExplorerEntry entry) async {
+    final paths = [..._settings.favoritePaths];
+    if (paths.contains(entry.path)) {
+      paths.remove(entry.path);
+    } else {
+      paths.insert(0, entry.path);
+    }
+    final next = await _settingsRepo.updateFavorites(_settings, paths);
+    if (mounted) {
+      setState(() => _settings = next);
+    }
+  }
+
+  Future<void> _removeRecentPath(String path) async {
+    final next = await _settingsRepo.removeRecentFile(_settings, path);
+    if (mounted) {
+      setState(() {
+        _settings = next;
+        if (_showingRecent) {
+          _snapshot = _explorer.snapshotForPaths(
+            _language.t('recent.title'),
+            next.recentFilePaths.take(next.recentRememberCount).toList(),
+          );
+        }
+      });
+    }
+  }
+
+  Future<void> _offerRemoveMissingRecent(String path) async {
+    final remove = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('recent.missing.title')),
+        content: Text('${_language.t('recent.missing.body')}\n$path'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_language.t('recent.remove')),
+          ),
+        ],
+      ),
+    );
+    if (remove == true) {
+      await _removeRecentPath(path);
+    }
+  }
+
+  Future<void> _openEntry(ExplorerEntry entry) async {
+    if (!entry.exists) {
+      await _offerRemoveMissingRecent(entry.path);
+      return;
+    }
     if (entry.isDirectory) {
       _openPath(entry.path);
       return;
@@ -214,9 +303,26 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         commonPassword: _commonEncryptionPassword,
       );
     });
+    if (_settings.rememberRecentFiles) {
+      final next = await _settingsRepo.recordRecentFile(_settings, entry.path);
+      if (mounted) {
+        setState(() => _settings = next);
+      }
+    }
   }
 
   void _goUp() {
+    if (_showingRecent) {
+      setState(() {
+        _showingRecent = false;
+        _selected = null;
+        _preview = null;
+        _snapshot = _currentPath == null
+            ? null
+            : _explorer.listDirectory(_currentPath!);
+      });
+      return;
+    }
     final path = _currentPath;
     if (path == null) return;
     final parent =
@@ -287,6 +393,203 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       await _refresh();
     } catch (error) {
       _snack('${_language.t('snack.download.error')} $error');
+    }
+  }
+
+  Future<void> _handleEntryAction(
+    ExplorerEntry entry,
+    _EntryAction action,
+  ) async {
+    switch (action) {
+      case _EntryAction.open:
+        await _openEntry(entry);
+      case _EntryAction.encrypt:
+        await _encryptSelectedFile(entry);
+      case _EntryAction.decrypt:
+        await _decryptSelectedFile(entry);
+      case _EntryAction.copy:
+        setState(() {
+          _clipboardPath = entry.path;
+          _clipboardCut = false;
+        });
+        _snack(_language.t('snack.copied'));
+      case _EntryAction.cut:
+        setState(() {
+          _clipboardPath = entry.path;
+          _clipboardCut = true;
+        });
+        _snack(_language.t('snack.cut'));
+      case _EntryAction.paste:
+        await _pasteClipboard(entry.isDirectory ? entry.path : _currentPath);
+      case _EntryAction.delete:
+        await _deleteEntry(entry);
+      case _EntryAction.rename:
+        await _renameEntry(entry);
+      case _EntryAction.properties:
+        await _showEntryProperties(entry);
+      case _EntryAction.addFavorite:
+      case _EntryAction.removeFavorite:
+        await _toggleFavorite(entry);
+      case _EntryAction.removeRecent:
+        await _removeRecentPath(entry.path);
+      case _EntryAction.folderContainer:
+      case _EntryAction.folderEncrypt:
+      case _EntryAction.folderDecrypt:
+        _snack(_language.t('snack.folder.actions.next'));
+    }
+  }
+
+  Future<void> _pasteClipboard(String? targetDirectory) async {
+    final source = _clipboardPath;
+    if (source == null || targetDirectory == null) return;
+    try {
+      final result = _clipboardCut
+          ? await _explorer.moveEntityToDirectory(source, targetDirectory)
+          : await _explorer.copyEntityToDirectory(source, targetDirectory);
+      if (_clipboardCut) {
+        setState(() {
+          _clipboardPath = null;
+          _clipboardCut = false;
+        });
+      }
+      _snack('${_language.t('snack.pasted')} ${result.path}');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _deleteEntry(ExplorerEntry entry) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('explorer.delete')),
+        content:
+            Text('${_language.t('explorer.delete.confirm')}\n${entry.path}'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_language.t('explorer.delete')),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await _explorer.deleteEntity(entry.path);
+      await _removePathReferences(entry.path);
+      setState(() {
+        if (_selected?.path == entry.path) {
+          _selected = null;
+          _preview = null;
+        }
+      });
+      _snack(_language.t('snack.deleted'));
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _renameEntry(ExplorerEntry entry) async {
+    final controller = TextEditingController(text: entry.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('explorer.rename')),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(labelText: _language.t('explorer.name')),
+          onSubmitted: (_) => Navigator.pop(context, controller.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: Text(_language.t('explorer.rename')),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.trim().isEmpty || newName == entry.name) {
+      return;
+    }
+    try {
+      final renamed = await _explorer.renameEntity(entry.path, newName);
+      await _replacePathReference(entry.path, renamed.path);
+      _snack('${_language.t('snack.renamed')} ${renamed.path}');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _showEntryProperties(ExplorerEntry entry) async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('explorer.properties')),
+        content: SelectableText(
+          '${_language.t('common.path')}: ${entry.path}\n'
+          '${_language.t('explorer.name')}: ${entry.name}\n'
+          '${_language.t('explorer.type')}: ${entry.kind.name}\n'
+          '${_language.t('explorer.size')}: ${entry.sizeBytes}\n'
+          '${_language.t('explorer.modified')}: ${entry.modifiedAt}\n'
+          '${_language.t('explorer.exists')}: ${entry.exists}',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.ok')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _removePathReferences(String path) async {
+    var next = _settings;
+    if (next.favoritePaths.contains(path)) {
+      next = await _settingsRepo.updateFavorites(
+        next,
+        next.favoritePaths.where((item) => item != path).toList(),
+      );
+    }
+    if (next.recentFilePaths.contains(path)) {
+      next = await _settingsRepo.removeRecentFile(next, path);
+    }
+    if (mounted) {
+      setState(() => _settings = next);
+    }
+  }
+
+  Future<void> _replacePathReference(String oldPath, String newPath) async {
+    var next = _settings;
+    if (next.favoritePaths.contains(oldPath)) {
+      next = await _settingsRepo.updateFavorites(
+        next,
+        next.favoritePaths
+            .map((item) => item == oldPath ? newPath : item)
+            .toList(),
+      );
+    }
+    if (next.recentFilePaths.contains(oldPath)) {
+      final recent = next.recentFilePaths
+          .map((item) => item == oldPath ? newPath : item)
+          .toList();
+      next = next.copyWith(recentFilePaths: recent);
+      await _settingsRepo.save(next);
+    }
+    if (mounted) {
+      setState(() => _settings = next);
     }
   }
 
@@ -463,6 +766,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     required String languageCode,
     required String? customLanguagePath,
     required Map<String, String> extensionAssociations,
+    required bool rememberRecentFiles,
+    required int recentSidebarCount,
+    required int recentRememberCount,
   }) async {
     if (languageCode == 'custom' &&
         (customLanguagePath == null || customLanguagePath.trim().isEmpty)) {
@@ -489,6 +795,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       languageCode: languageCode,
       customLanguagePath: customLanguagePath,
       extensionAssociations: extensionAssociations,
+      rememberRecentFiles: rememberRecentFiles,
+      recentSidebarCount: recentSidebarCount,
+      recentRememberCount: recentRememberCount,
     );
     await PlatformServices.setScreenProtection(next.blockScreenCapture);
     final language = await AppLanguage.load(next);
@@ -579,9 +888,25 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
             final sidebar = _Sidebar(
               language: _language,
               locations: _locations,
+              favoritePaths: _settings.favoritePaths,
+              recentPaths: _settings.rememberRecentFiles
+                  ? _settings.recentFilePaths
+                      .take(_settings.recentSidebarCount)
+                      .toList()
+                  : const <String>[],
               currentPath: _currentPath,
               page: _page,
               onLocation: _selectLocation,
+              onFavoritePath: _openFavoritePath,
+              onRecentPath: (path) async {
+                final entry = await _explorer.entryForPath(path);
+                if (entry == null) {
+                  await _offerRemoveMissingRecent(path);
+                } else {
+                  await _openEntry(entry);
+                }
+              },
+              onRecentList: _openRecentFiles,
               onExplorer: () => setState(() => _page = ShellPage.explorer),
               onSettings: () => setState(() => _page = ShellPage.settings),
               onAbout: _showAbout,
@@ -598,7 +923,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                   )
                 : _ExplorerView(
                     language: _language,
-                    currentPath: _currentPath,
+                    currentPath: _showingRecent
+                        ? _language.t('recent.title')
+                        : _currentPath,
                     snapshot: _snapshot,
                     selected: _selected,
                     preview: _preview,
@@ -617,8 +944,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     onOpenPassword: _openWithPassword,
                     onOpenExternal: _openPreviewExternal,
                     onPreviewWindow: _showPreviewWindow,
-                    onEncryptEntry: _encryptSelectedFile,
-                    onDecryptEntry: _decryptSelectedFile,
+                    canPaste: _clipboardPath != null,
+                    favoritePaths: _settings.favoritePaths,
+                    recentPaths: _settings.recentFilePaths,
+                    onEntryAction: _handleEntryAction,
+                    onRemoveRecent: _removeRecentPath,
+                    onToggleFavorite: _toggleFavorite,
                     onEntry: _openEntry,
                   );
             if (c.maxWidth < 820) {
@@ -1032,7 +1363,23 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
 
 enum _CommonSetupDecision { cancel, unique, settings }
 
-enum _EntryAction { open, encrypt, decrypt }
+enum _EntryAction {
+  open,
+  copy,
+  cut,
+  paste,
+  delete,
+  rename,
+  properties,
+  addFavorite,
+  removeFavorite,
+  removeRecent,
+  encrypt,
+  decrypt,
+  folderContainer,
+  folderEncrypt,
+  folderDecrypt,
+}
 
 enum _PreviewAction { password, window, external, hide }
 
@@ -1138,9 +1485,14 @@ class _Sidebar extends StatelessWidget {
   const _Sidebar({
     required this.language,
     required this.locations,
+    required this.favoritePaths,
+    required this.recentPaths,
     required this.currentPath,
     required this.page,
     required this.onLocation,
+    required this.onFavoritePath,
+    required this.onRecentPath,
+    required this.onRecentList,
     required this.onExplorer,
     required this.onSettings,
     required this.onAbout,
@@ -1148,9 +1500,14 @@ class _Sidebar extends StatelessWidget {
 
   final AppLanguage language;
   final List<ExplorerLocation> locations;
+  final List<String> favoritePaths;
+  final List<String> recentPaths;
   final String? currentPath;
   final ShellPage page;
   final ValueChanged<ExplorerLocation> onLocation;
+  final ValueChanged<String> onFavoritePath;
+  final ValueChanged<String> onRecentPath;
+  final VoidCallback onRecentList;
   final VoidCallback onExplorer;
   final VoidCallback onSettings;
   final VoidCallback onAbout;
@@ -1196,6 +1553,52 @@ class _Sidebar extends StatelessWidget {
           onSettings,
         ),
         const SizedBox(height: 12),
+        if (recentPaths.isNotEmpty) ...[
+          _sectionTitle(language.t('recent.title')),
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.history),
+            title: Text(language.t('recent.open.all')),
+            onTap: onRecentList,
+          ),
+          for (final path in recentPaths)
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.insert_drive_file_outlined),
+              title: Text(
+                basename(path),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                path,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => onRecentPath(path),
+            ),
+          const SizedBox(height: 12),
+        ],
+        if (favoritePaths.isNotEmpty) ...[
+          _sectionTitle(language.t('favorites.title')),
+          for (final path in favoritePaths)
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.star_outline),
+              title: Text(
+                basename(path),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(
+                path,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => onFavoritePath(path),
+            ),
+          const SizedBox(height: 12),
+        ],
         Padding(
           padding: const EdgeInsets.all(12),
           child: Text(
@@ -1246,6 +1649,14 @@ class _Sidebar extends StatelessWidget {
         ),
       );
 
+  Widget _sectionTitle(String text) => Padding(
+        padding: const EdgeInsets.all(12),
+        child: Text(
+          text,
+          style: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1),
+        ),
+      );
+
   IconData _icon(ExplorerLocation location) => switch (location.kind) {
         ExplorerLocationKind.local => Icons.storage,
         ExplorerLocationKind.appHidden => Icons.lock_outline,
@@ -1273,8 +1684,12 @@ class _ExplorerView extends StatelessWidget {
     required this.onOpenPassword,
     required this.onOpenExternal,
     required this.onPreviewWindow,
-    required this.onEncryptEntry,
-    required this.onDecryptEntry,
+    required this.canPaste,
+    required this.favoritePaths,
+    required this.recentPaths,
+    required this.onEntryAction,
+    required this.onRemoveRecent,
+    required this.onToggleFavorite,
     required this.onEntry,
   });
 
@@ -1294,9 +1709,13 @@ class _ExplorerView extends StatelessWidget {
   final VoidCallback onOpenPassword;
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
-  final ValueChanged<ExplorerEntry> onEncryptEntry;
-  final ValueChanged<ExplorerEntry> onDecryptEntry;
-  final ValueChanged<ExplorerEntry> onEntry;
+  final bool canPaste;
+  final List<String> favoritePaths;
+  final List<String> recentPaths;
+  final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
+  final ValueChanged<String> onRemoveRecent;
+  final ValueChanged<ExplorerEntry> onToggleFavorite;
+  final Future<void> Function(ExplorerEntry) onEntry;
 
   @override
   Widget build(BuildContext context) {
@@ -1361,8 +1780,12 @@ class _ExplorerView extends StatelessWidget {
             snapshot: snapshot,
             selected: selected,
             onEntry: onEntry,
-            onEncryptEntry: onEncryptEntry,
-            onDecryptEntry: onDecryptEntry,
+            canPaste: canPaste,
+            favoritePaths: favoritePaths,
+            recentPaths: recentPaths,
+            onEntryAction: onEntryAction,
+            onRemoveRecent: onRemoveRecent,
+            onToggleFavorite: onToggleFavorite,
           );
           final pane = _PreviewPane(
             language: language,
@@ -1401,16 +1824,24 @@ class _EntryList extends StatelessWidget {
     required this.snapshot,
     required this.selected,
     required this.onEntry,
-    required this.onEncryptEntry,
-    required this.onDecryptEntry,
+    required this.canPaste,
+    required this.favoritePaths,
+    required this.recentPaths,
+    required this.onEntryAction,
+    required this.onRemoveRecent,
+    required this.onToggleFavorite,
   });
 
   final AppLanguage language;
   final Future<DirectorySnapshot>? snapshot;
   final ExplorerEntry? selected;
-  final ValueChanged<ExplorerEntry> onEntry;
-  final ValueChanged<ExplorerEntry> onEncryptEntry;
-  final ValueChanged<ExplorerEntry> onDecryptEntry;
+  final Future<void> Function(ExplorerEntry) onEntry;
+  final bool canPaste;
+  final List<String> favoritePaths;
+  final List<String> recentPaths;
+  final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
+  final ValueChanged<String> onRemoveRecent;
+  final ValueChanged<ExplorerEntry> onToggleFavorite;
 
   @override
   Widget build(BuildContext context) {
@@ -1457,7 +1888,9 @@ class _EntryList extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                subtitle: Text('${_size(entry)} • ${_date(entry.modifiedAt)}'),
+                subtitle: Text(entry.exists
+                    ? '${_size(entry)} - ${_date(entry.modifiedAt)}'
+                    : language.t('recent.missing.file')),
                 trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                   if (entry.containerInfo?.isOk == true)
                     const Icon(Icons.verified_outlined,
@@ -1504,28 +1937,88 @@ class _EntryList extends StatelessWidget {
   }
 
   List<PopupMenuEntry<_EntryAction>> _entryMenuItems(ExplorerEntry entry) {
-    if (entry.isDirectory) {
-      return [
-        PopupMenuItem(
-          value: _EntryAction.open,
-          child: Text(language.t('common.open')),
-        ),
-      ];
-    }
-    return [
+    final isFavorite = favoritePaths.contains(entry.path);
+    final isRecent = recentPaths.contains(entry.path);
+    return <PopupMenuEntry<_EntryAction>>[
       PopupMenuItem(
         value: _EntryAction.open,
         child: Text(language.t('common.open')),
       ),
-      if (!entry.isEncrypted)
+      PopupMenuItem(
+        value:
+            isFavorite ? _EntryAction.removeFavorite : _EntryAction.addFavorite,
+        child: Text(
+          isFavorite
+              ? language.t('favorites.remove')
+              : language.t('favorites.add'),
+        ),
+      ),
+      if (isRecent)
+        PopupMenuItem(
+          value: _EntryAction.removeRecent,
+          child: Text(language.t('recent.remove')),
+        ),
+      const PopupMenuDivider(),
+      PopupMenuItem(
+        value: _EntryAction.copy,
+        enabled: entry.exists,
+        child: Text(language.t('explorer.copy')),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.cut,
+        enabled: entry.exists,
+        child: Text(language.t('explorer.cut')),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.paste,
+        enabled: canPaste && entry.isDirectory && entry.exists,
+        child: Text(language.t('explorer.paste')),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.rename,
+        enabled: entry.exists,
+        child: Text(language.t('explorer.rename')),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.delete,
+        enabled: entry.exists,
+        child: Text(language.t('explorer.delete')),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.properties,
+        child: Text(language.t('explorer.properties')),
+      ),
+      if (!entry.isDirectory) const PopupMenuDivider(),
+      if (!entry.isDirectory && !entry.isEncrypted)
         PopupMenuItem(
           value: _EntryAction.encrypt,
+          enabled: entry.exists,
           child: Text(language.t('explorer.encrypt')),
         ),
-      if (entry.isEncrypted)
+      if (!entry.isDirectory && entry.isEncrypted)
         PopupMenuItem(
           value: _EntryAction.decrypt,
+          enabled: entry.exists,
           child: Text(language.t('decrypt.action')),
+        ),
+      if (entry.isDirectory) const PopupMenuDivider(),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.folderContainer,
+          enabled: entry.exists,
+          child: Text(language.t('explorer.folder.container')),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.folderEncrypt,
+          enabled: entry.exists,
+          child: Text(language.t('explorer.folder.encrypt')),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.folderDecrypt,
+          enabled: entry.exists,
+          child: Text(language.t('explorer.folder.decrypt')),
         ),
     ];
   }
@@ -1535,9 +2028,22 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.open:
         onEntry(entry);
       case _EntryAction.encrypt:
-        onEncryptEntry(entry);
       case _EntryAction.decrypt:
-        onDecryptEntry(entry);
+      case _EntryAction.copy:
+      case _EntryAction.cut:
+      case _EntryAction.paste:
+      case _EntryAction.delete:
+      case _EntryAction.rename:
+      case _EntryAction.properties:
+      case _EntryAction.folderContainer:
+      case _EntryAction.folderEncrypt:
+      case _EntryAction.folderDecrypt:
+        onEntryAction(entry, action);
+      case _EntryAction.addFavorite:
+      case _EntryAction.removeFavorite:
+        onToggleFavorite(entry);
+      case _EntryAction.removeRecent:
+        onRemoveRecent(entry.path);
     }
   }
 
@@ -1757,6 +2263,9 @@ class _SettingsView extends StatefulWidget {
     required String languageCode,
     required String? customLanguagePath,
     required Map<String, String> extensionAssociations,
+    required bool rememberRecentFiles,
+    required int recentSidebarCount,
+    required int recentRememberCount,
   }) onSave;
   final Future<void> Function() onClear;
   final Future<String> Function(String guardPassword) onRevealCommonKey;
@@ -1777,11 +2286,14 @@ class _SettingsViewState extends State<_SettingsView> {
   final _common = TextEditingController();
   late final TextEditingController _commonKeyFile;
   late final TextEditingController _graceSeconds;
+  late final TextEditingController _recentSidebarCount;
+  late final TextEditingController _recentRememberCount;
   late final TextEditingController _languagePath;
   late final TextEditingController _associations;
   late bool _separate;
   late bool _remember;
   late bool _wipe;
+  late bool _rememberRecent;
   late bool _blockScreenCapture;
   late String _languageCode;
   late String _commonAlgorithm;
@@ -1793,6 +2305,7 @@ class _SettingsViewState extends State<_SettingsView> {
     _separate = widget.settings.useSeparateFilePassword;
     _remember = widget.settings.rememberFilePasswords;
     _wipe = widget.settings.wipeSavedPasswordsOnFailedLogin;
+    _rememberRecent = widget.settings.rememberRecentFiles;
     _blockScreenCapture = widget.settings.blockScreenCapture;
     _commonAlgorithm = widget.settings.commonEncryptionAlgorithm;
     _commonKeyFile = TextEditingController(
@@ -1800,6 +2313,12 @@ class _SettingsViewState extends State<_SettingsView> {
     );
     _graceSeconds = TextEditingController(
       text: '${widget.settings.filePasswordGraceSeconds}',
+    );
+    _recentSidebarCount = TextEditingController(
+      text: '${widget.settings.recentSidebarCount}',
+    );
+    _recentRememberCount = TextEditingController(
+      text: '${widget.settings.recentRememberCount}',
     );
     _languageCode = widget.settings.languageCode;
     _languagePath = TextEditingController(
@@ -1823,6 +2342,8 @@ class _SettingsViewState extends State<_SettingsView> {
     _common.dispose();
     _commonKeyFile.dispose();
     _graceSeconds.dispose();
+    _recentSidebarCount.dispose();
+    _recentRememberCount.dispose();
     _languagePath.dispose();
     _associations.dispose();
     super.dispose();
@@ -1975,6 +2496,28 @@ class _SettingsViewState extends State<_SettingsView> {
         ),
       ]),
       const SizedBox(height: 12),
+      _settingsCard(context, language.t('settings.recent'), [
+        SwitchListTile(
+          value: _rememberRecent,
+          onChanged: (v) => setState(() => _rememberRecent = v),
+          title: Text(language.t('settings.recent.remember')),
+        ),
+        TextField(
+          controller: _recentSidebarCount,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.recent.sidebar.count'),
+          ),
+        ),
+        TextField(
+          controller: _recentRememberCount,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.recent.remember.count'),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.screen'), [
         SwitchListTile(
           value: _blockScreenCapture,
@@ -2107,6 +2650,10 @@ class _SettingsViewState extends State<_SettingsView> {
             ? null
             : _languagePath.text.trim(),
         extensionAssociations: _parseAssociations(_associations.text),
+        rememberRecentFiles: _rememberRecent,
+        recentSidebarCount: int.tryParse(_recentSidebarCount.text.trim()) ?? 5,
+        recentRememberCount:
+            int.tryParse(_recentRememberCount.text.trim()) ?? 50,
       );
     } catch (error) {
       _snack('${widget.language.t('settings.language.invalid')} $error');
