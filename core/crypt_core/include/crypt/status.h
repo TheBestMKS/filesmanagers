@@ -1,0 +1,28 @@
+#ifndef CRYPT_STATUS_H
+#define CRYPT_STATUS_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "crypt/export.h"
+
+typedef enum crypt_status_e {
+    CRYPT_STATUS_OK = 0,
+    CRYPT_STATUS_INVALID_ARGUMENT = 1,
+    CRYPT_STATUS_BUFFER_TOO_SMALL = 2,
+    CRYPT_STATUS_INVALID_MAGIC = 3,
+    CRYPT_STATUS_UNSUPPORTED_CONTAINER = 4,
+    CRYPT_STATUS_UNSUPPORTED_VERSION = 5,
+    CRYPT_STATUS_INVALID_HEADER_SIZE = 6,
+    CRYPT_STATUS_INVALID_RESERVED = 7,
+    CRYPT_STATUS_INVALID_FLAGS = 8,
+    CRYPT_STATUS_INVALID_ALGORITHM_ID = 9,
+    CRYPT_STATUS_INVALID_PREVIEW_TYPE = 10,
+    CRYPT_STATUS_INVALID_TLV = 11,
+    CRYPT_STATUS_TRUNCATED = 12,
+    CRYPT_STATUS_OVERFLOW = 13
+} crypt_status_t;
+
+CRYPT_API const char* crypt_status_string(crypt_status_t status);
+
+#endif

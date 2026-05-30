@@ -1,0 +1,34 @@
+# Build outputs
+build/
+dist/
+app/flutter_shell/build/
+app/flutter_shell/.dart_tool/
+app/flutter_shell/.flutter-plugins
+app/flutter_shell/.flutter-plugins-dependencies
+app/flutter_shell/.packages
+app/flutter_shell/pubspec.lock
+app/flutter_shell/android/.gradle/
+app/flutter_shell/android/app/build/
+
+# IDE and OS files
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Release archives
+*.apk
+*.aab
+*.zip
+*.rar
+
+# Local runtime data
+securevault_device_secret.key
+security_settings.json
+
+# Local tooling and scratch data
+tooling/
+build_manual/
+tmp_ascii/
+package-lock.json
