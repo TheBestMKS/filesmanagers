@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import '../vault/vault_models.dart';
 
@@ -134,6 +135,7 @@ class FilePreview {
   const FilePreview({
     required this.title,
     required this.subtitle,
+    this.sourcePath,
     this.text,
     this.bytes,
     this.containerInfo,
@@ -143,11 +145,28 @@ class FilePreview {
 
   final String title;
   final String subtitle;
+  final String? sourcePath;
   final String? text;
   final List<int>? bytes;
   final VaultContainerInfo? containerInfo;
   final bool decrypted;
   final FileContentKind contentKind;
+}
+
+class MediaPreviewItem {
+  const MediaPreviewItem({
+    required this.title,
+    required this.kind,
+    this.path,
+    this.bytes,
+    this.encrypted = false,
+  });
+
+  final String title;
+  final FileContentKind kind;
+  final String? path;
+  final Uint8List? bytes;
+  final bool encrypted;
 }
 
 class TransferOptions {

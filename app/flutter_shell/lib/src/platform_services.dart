@@ -6,6 +6,14 @@ class PlatformServices {
   PlatformServices._();
 
   static const MethodChannel _channel = MethodChannel('secure_vault/platform');
+  static const MethodChannel _windowChannel =
+      MethodChannel('secure_vault/window');
+
+  static Future<void> setWindowTitle(String title) async {
+    if (Platform.isWindows) {
+      await _windowChannel.invokeMethod<void>('setTitle', title);
+    }
+  }
 
   static Future<void> setScreenProtection(bool enabled) async {
     if (Platform.isAndroid) {

@@ -1,8 +1,12 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 
 import 'src/explorer/explorer_models.dart';
 import 'src/explorer/file_explorer_repository.dart';
@@ -14,11 +18,12 @@ import 'src/security/security_settings.dart';
 import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 
-const _appVersion = '0.4.0';
+const _appVersion = '0.5.0';
 
-void main(List<String> args) => runApp(
-      SecureVaultApp(initialPath: args.isEmpty ? null : args.first),
-    );
+void main(List<String> args) {
+  MediaKit.ensureInitialized();
+  runApp(SecureVaultApp(initialPath: args.isEmpty ? null : args.first));
+}
 
 class SecureVaultApp extends StatelessWidget {
   const SecureVaultApp({super.key, this.initialPath});
@@ -87,6 +92,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   ExplorerEntry? _selected;
   Future<DirectorySnapshot>? _snapshot;
   Future<FilePreview>? _preview;
+  List<MediaPreviewItem> _mediaPlaylist = const [];
   double _sidebarWidth = 290;
   double _previewWidth = 420;
   bool _previewVisible = true;
@@ -108,6 +114,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   Future<void> _boot() async {
     final settings = await _settingsRepo.load();
     final language = await AppLanguage.load(settings);
+    await PlatformServices.setWindowTitle(language.appTitle).catchError((_) {});
     final commonPassword = !settings.hasFilePassword && !settings.hasAppPassword
         ? await _settingsRepo
             .loadCommonEncryptionPassword(settings)
@@ -152,6 +159,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _currentPath = currentPath;
       _selected = selected;
       _preview = preview;
+      _mediaPlaylist = const [];
       _snapshot = currentPath == null ? null : _directorySnapshot(currentPath);
       _locked = settings.hasAppPassword;
       _loading = false;
@@ -196,6 +204,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _currentPath = path;
       _selected = null;
       _preview = null;
+      _mediaPlaylist = const [];
       _snapshot = _directorySnapshot(path);
     });
   }
@@ -253,6 +262,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _showingRecent = false;
       _selected = null;
       _preview = null;
+      _mediaPlaylist = const [];
       _snapshot = _explorer.snapshotForPaths(
         _language.t('nav.explorer'),
         paths,
@@ -311,6 +321,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _showingRecent = false;
       _selected = null;
       _preview = null;
+      _mediaPlaylist = const [];
       _snapshot = section == MediaSection.torrent
           ? AppPaths.torrentsDirectory()
               .then((dir) => _explorer.listDirectory(dir.path))
@@ -329,6 +340,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _showingRecent = true;
       _selected = null;
       _preview = null;
+      _mediaPlaylist = const [];
       _snapshot = _explorer.snapshotForPaths(
         _language.t('recent.title'),
         _settings.recentFilePaths.take(_settings.recentRememberCount).toList(),
@@ -405,14 +417,27 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _openPath(entry.path);
       return;
     }
+    final previewFuture = _explorer.previewFile(
+      entry.path,
+      password: _activeFilePassword(),
+      commonPassword: _commonEncryptionPassword,
+    );
     setState(() {
       _selected = entry;
-      _preview = _explorer.previewFile(
-        entry.path,
-        password: _activeFilePassword(),
-        commonPassword: _commonEncryptionPassword,
-      );
+      _preview = previewFuture;
+      _mediaPlaylist = const [];
     });
+    try {
+      final preview = await previewFuture;
+      final playlist = await _buildMediaPlaylist(entry, preview);
+      if (mounted && _selected?.path == entry.path) {
+        setState(() => _mediaPlaylist = playlist);
+      }
+    } catch (_) {
+      if (mounted && _selected?.path == entry.path) {
+        setState(() => _mediaPlaylist = const []);
+      }
+    }
     if (_settings.rememberRecentFiles) {
       final next = await _settingsRepo.recordRecentFile(_settings, entry.path);
       if (mounted) {
@@ -421,12 +446,96 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     }
   }
 
+  Future<List<MediaPreviewItem>> _buildMediaPlaylist(
+    ExplorerEntry selected,
+    FilePreview selectedPreview,
+  ) async {
+    final kind = selectedPreview.contentKind;
+    if (kind != FileContentKind.audio && kind != FileContentKind.video) {
+      return const [];
+    }
+
+    final selectedItem = MediaPreviewItem(
+      title: selectedPreview.title,
+      kind: kind,
+      path: selectedPreview.decrypted ? null : selected.path,
+      bytes: selectedPreview.decrypted && selectedPreview.bytes != null
+          ? Uint8List.fromList(selectedPreview.bytes!)
+          : null,
+      encrypted: selectedPreview.decrypted,
+    );
+
+    final parent = File(selected.path).parent.path;
+    final DirectorySnapshot snapshot;
+    try {
+      snapshot = await _explorer.listDirectory(
+        parent,
+        commonPassword: _commonEncryptionPassword,
+        filePassword: _activeFilePassword(),
+        decryptNames: _settings.decryptNamesInExplorer,
+      );
+    } catch (_) {
+      return [selectedItem];
+    }
+
+    final items = <MediaPreviewItem>[];
+    for (final entry in snapshot.entries) {
+      if (!entry.exists || entry.isDirectory) continue;
+      final displayedKind = FileViewerService.kindForName(entry.name);
+      final pathKind = FileViewerService.kindForName(entry.path);
+      final isSelected = entry.path == selected.path;
+      if (!isSelected && displayedKind != kind && pathKind != kind) {
+        continue;
+      }
+
+      if (isSelected) {
+        items.add(selectedItem);
+        continue;
+      }
+
+      if (entry.isEncrypted) {
+        if (displayedKind != kind) continue;
+        try {
+          final preview = await _explorer.previewFile(
+            entry.path,
+            password: _activeFilePassword(),
+            commonPassword: _commonEncryptionPassword,
+          );
+          if (preview.contentKind == kind && preview.bytes != null) {
+            items.add(MediaPreviewItem(
+              title: preview.title,
+              kind: kind,
+              bytes: Uint8List.fromList(preview.bytes!),
+              encrypted: true,
+            ));
+          }
+        } catch (_) {
+          // Keep the playlist usable even when one encrypted neighbor fails.
+        }
+        continue;
+      }
+
+      items.add(MediaPreviewItem(
+        title: entry.name,
+        kind: kind,
+        path: entry.path,
+      ));
+    }
+
+    if (!items.any((item) =>
+        item.path == selectedItem.path || item.title == selectedItem.title)) {
+      items.insert(0, selectedItem);
+    }
+    return items;
+  }
+
   void _goUp() {
     if (_showingRecent) {
       setState(() {
         _showingRecent = false;
         _selected = null;
         _preview = null;
+        _mediaPlaylist = const [];
         _snapshot =
             _currentPath == null ? null : _directorySnapshot(_currentPath!);
       });
@@ -941,6 +1050,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         if (_selected?.path == entry.path) {
           _selected = null;
           _preview = null;
+          _mediaPlaylist = const [];
         }
       });
       _snack(_language.t('snack.deleted'));
@@ -1097,6 +1207,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       setState(() {
         _selected = null;
         _preview = null;
+        _mediaPlaylist = const [];
       });
       await _refresh();
     } catch (error) {
@@ -1199,10 +1310,51 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
               ),
             ],
           ),
-          body: _PreviewContent(preview: preview, language: _language),
+          body: _PreviewContent(
+            preview: preview,
+            language: _language,
+            mediaPlaylist: _mediaPlaylist,
+          ),
         ),
       ),
     );
+  }
+
+  Future<void> _openEditor(FilePreview preview) async {
+    if (preview.contentKind == FileContentKind.image && preview.bytes != null) {
+      final savedPath = await showDialog<String>(
+        context: context,
+        builder: (context) => _ImageEditorDialog(
+          preview: preview,
+          language: _language,
+          currentDirectory: _currentPath,
+        ),
+      );
+      if (savedPath != null) {
+        _snack('${_language.t('editor.saved')} $savedPath');
+        await _refresh();
+      }
+      return;
+    }
+
+    if (preview.contentKind == FileContentKind.audio ||
+        preview.contentKind == FileContentKind.video) {
+      final savedPath = await showDialog<String>(
+        context: context,
+        builder: (context) => _FfmpegEditorDialog(
+          preview: preview,
+          language: _language,
+          currentDirectory: _currentPath,
+        ),
+      );
+      if (savedPath != null) {
+        _snack('${_language.t('editor.saved')} $savedPath');
+        await _refresh();
+      }
+      return;
+    }
+
+    _snack(_language.t('editor.unsupported'));
   }
 
   Future<void> _saveSecurity({
@@ -1284,6 +1436,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     );
     await PlatformServices.setScreenProtection(next.blockScreenCapture);
     final language = await AppLanguage.load(next);
+    await PlatformServices.setWindowTitle(language.appTitle).catchError((_) {});
     setState(() {
       _settings = next;
       _language = language;
@@ -1448,6 +1601,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     snapshot: _snapshot,
                     selected: _selected,
                     preview: _preview,
+                    mediaPlaylist: _mediaPlaylist,
                     onUp: _goUp,
                     onRefresh: _refresh,
                     onImport: _importFile,
@@ -1465,6 +1619,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     onOpenPassword: _openWithPassword,
                     onOpenExternal: _openPreviewExternal,
                     onPreviewWindow: _showPreviewWindow,
+                    onEditPreview: _openEditor,
                     canPaste: _clipboardPath != null,
                     favoritePaths: _settings.favoritePaths,
                     recentPaths: _settings.recentFilePaths,
@@ -1914,7 +2069,7 @@ enum _EntryAction {
   folderDecrypt,
 }
 
-enum _PreviewAction { password, window, external, hide }
+enum _PreviewAction { password, window, edit, external, hide }
 
 class _LockScreen extends StatefulWidget {
   const _LockScreen({
@@ -2238,6 +2393,7 @@ class _ExplorerView extends StatelessWidget {
     required this.snapshot,
     required this.selected,
     required this.preview,
+    required this.mediaPlaylist,
     required this.onUp,
     required this.onRefresh,
     required this.onImport,
@@ -2251,6 +2407,7 @@ class _ExplorerView extends StatelessWidget {
     required this.onOpenPassword,
     required this.onOpenExternal,
     required this.onPreviewWindow,
+    required this.onEditPreview,
     required this.canPaste,
     required this.favoritePaths,
     required this.recentPaths,
@@ -2269,6 +2426,7 @@ class _ExplorerView extends StatelessWidget {
   final Future<DirectorySnapshot>? snapshot;
   final ExplorerEntry? selected;
   final Future<FilePreview>? preview;
+  final List<MediaPreviewItem> mediaPlaylist;
   final VoidCallback onUp;
   final Future<void> Function() onRefresh;
   final VoidCallback onImport;
@@ -2282,6 +2440,7 @@ class _ExplorerView extends StatelessWidget {
   final VoidCallback onOpenPassword;
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
+  final ValueChanged<FilePreview> onEditPreview;
   final bool canPaste;
   final List<String> favoritePaths;
   final List<String> recentPaths;
@@ -2384,11 +2543,13 @@ class _ExplorerView extends StatelessWidget {
             language: language,
             entry: selected,
             preview: preview,
+            mediaPlaylist: mediaPlaylist,
             visible: previewVisible,
             onTogglePreview: onTogglePreview,
             onOpenPassword: onOpenPassword,
             onOpenExternal: onOpenExternal,
             onPreviewWindow: onPreviewWindow,
+            onEditPreview: onEditPreview,
           );
           if (c.maxWidth < 980) {
             return Column(children: [
@@ -2747,21 +2908,25 @@ class _PreviewPane extends StatelessWidget {
     required this.language,
     required this.entry,
     required this.preview,
+    required this.mediaPlaylist,
     required this.visible,
     required this.onTogglePreview,
     required this.onOpenPassword,
     required this.onOpenExternal,
     required this.onPreviewWindow,
+    required this.onEditPreview,
   });
 
   final AppLanguage language;
   final ExplorerEntry? entry;
   final Future<FilePreview>? preview;
+  final List<MediaPreviewItem> mediaPlaylist;
   final bool visible;
   final VoidCallback onTogglePreview;
   final VoidCallback onOpenPassword;
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
+  final ValueChanged<FilePreview> onEditPreview;
 
   @override
   Widget build(BuildContext context) {
@@ -2782,7 +2947,11 @@ class _PreviewPane extends StatelessWidget {
           Positioned.fill(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(18),
-              child: _PreviewContent(preview: p, language: language),
+              child: _PreviewContent(
+                preview: p,
+                language: language,
+                mediaPlaylist: mediaPlaylist,
+              ),
             ),
           ),
           Positioned(
@@ -2800,6 +2969,8 @@ class _PreviewPane extends StatelessWidget {
                       onOpenPassword();
                     case _PreviewAction.window:
                       onPreviewWindow(p);
+                    case _PreviewAction.edit:
+                      onEditPreview(p);
                     case _PreviewAction.external:
                       onOpenExternal(p);
                     case _PreviewAction.hide:
@@ -2816,6 +2987,13 @@ class _PreviewPane extends StatelessWidget {
                     value: _PreviewAction.window,
                     child: Text(language.t('preview.window')),
                   ),
+                  if (p.contentKind == FileContentKind.image ||
+                      p.contentKind == FileContentKind.audio ||
+                      p.contentKind == FileContentKind.video)
+                    PopupMenuItem(
+                      value: _PreviewAction.edit,
+                      child: Text(language.t('editor.open')),
+                    ),
                   PopupMenuItem(
                     value: _PreviewAction.external,
                     child: Text(language.t('preview.external')),
@@ -2835,10 +3013,15 @@ class _PreviewPane extends StatelessWidget {
 }
 
 class _PreviewContent extends StatelessWidget {
-  const _PreviewContent({required this.preview, required this.language});
+  const _PreviewContent({
+    required this.preview,
+    required this.language,
+    this.mediaPlaylist = const [],
+  });
 
   final FilePreview preview;
   final AppLanguage language;
+  final List<MediaPreviewItem> mediaPlaylist;
 
   @override
   Widget build(BuildContext context) {
@@ -2854,22 +3037,23 @@ class _PreviewContent extends StatelessWidget {
 
     if (preview.contentKind == FileContentKind.video ||
         preview.contentKind == FileContentKind.audio) {
-      return Card(
-        elevation: 0,
-        color: const Color(0xFFEAF2F8),
-        child: Padding(
-          padding: const EdgeInsets.all(18),
-          child: Row(children: [
-            Icon(
-              preview.contentKind == FileContentKind.video
-                  ? Icons.movie_outlined
-                  : Icons.audiotrack_outlined,
-              size: 38,
-            ),
-            const SizedBox(width: 12),
-            Expanded(child: Text(preview.text ?? preview.subtitle)),
-          ]),
-        ),
+      final playlist = mediaPlaylist.isEmpty
+          ? [
+              MediaPreviewItem(
+                title: preview.title,
+                kind: preview.contentKind,
+                path: preview.decrypted ? null : preview.sourcePath,
+                bytes: preview.decrypted && preview.bytes != null
+                    ? Uint8List.fromList(preview.bytes!)
+                    : null,
+                encrypted: preview.decrypted,
+              ),
+            ]
+          : mediaPlaylist;
+      return _MediaPreviewPlayer(
+        preview: preview,
+        playlist: playlist,
+        language: language,
       );
     }
 
@@ -2901,6 +3085,973 @@ class _PreviewContent extends StatelessWidget {
     );
   }
 }
+
+class _MediaPreviewPlayer extends StatefulWidget {
+  const _MediaPreviewPlayer({
+    required this.preview,
+    required this.playlist,
+    required this.language,
+  });
+
+  final FilePreview preview;
+  final List<MediaPreviewItem> playlist;
+  final AppLanguage language;
+
+  @override
+  State<_MediaPreviewPlayer> createState() => _MediaPreviewPlayerState();
+}
+
+class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
+  late final Player _player;
+  late final VideoController _controller;
+  Future<void>? _openFuture;
+  var _shuffle = false;
+  var _repeatOne = false;
+  String? _error;
+  String _playlistKey = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _player = Player();
+    _controller = VideoController(_player);
+    _playlistKey = _makePlaylistKey(widget.playlist);
+    _openFuture = _openPlaylist();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MediaPreviewPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final nextKey = _makePlaylistKey(widget.playlist);
+    if (nextKey != _playlistKey ||
+        widget.preview.title != oldWidget.preview.title) {
+      _playlistKey = nextKey;
+      _openFuture = _openPlaylist();
+    }
+  }
+
+  @override
+  void dispose() {
+    _player.dispose();
+    super.dispose();
+  }
+
+  String _makePlaylistKey(List<MediaPreviewItem> items) => items
+      .map((item) =>
+          '${item.title}|${item.path ?? ''}|${item.bytes?.length ?? 0}|${item.encrypted}')
+      .join('\n');
+
+  int _initialIndex() {
+    final index = widget.playlist.indexWhere((item) =>
+        item.title == widget.preview.title ||
+        (widget.preview.sourcePath != null &&
+            item.path == widget.preview.sourcePath));
+    return index < 0 ? 0 : index;
+  }
+
+  Future<void> _openPlaylist() async {
+    setState(() => _error = null);
+    try {
+      final medias = <Media>[];
+      for (final item in widget.playlist) {
+        if (item.bytes != null) {
+          medias.add(await Media.memory(item.bytes!));
+        } else if (item.path != null && item.path!.isNotEmpty) {
+          medias.add(Media(item.path!));
+        }
+      }
+      if (medias.isEmpty) {
+        throw StateError(widget.language.t('media.unavailable'));
+      }
+      await _player.open(Playlist(medias, index: _initialIndex()), play: true);
+      await _player.setPlaylistMode(
+        _repeatOne ? PlaylistMode.single : PlaylistMode.loop,
+      );
+      await _player.setShuffle(_shuffle);
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    }
+  }
+
+  Future<void> _toggleShuffle() async {
+    setState(() => _shuffle = !_shuffle);
+    await _player.setShuffle(_shuffle);
+  }
+
+  Future<void> _toggleRepeatOne() async {
+    setState(() => _repeatOne = !_repeatOne);
+    await _player.setPlaylistMode(
+      _repeatOne ? PlaylistMode.single : PlaylistMode.loop,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<void>(
+      future: _openFuture,
+      builder: (context, snapshot) {
+        final loading = snapshot.connectionState != ConnectionState.done;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (loading)
+              const LinearProgressIndicator(minHeight: 2)
+            else
+              const SizedBox(height: 2),
+            if (_error != null)
+              Card(
+                color: const Color(0xFFFFF3E0),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text('${widget.language.t('media.error')}\n$_error'),
+                ),
+              )
+            else if (widget.preview.contentKind == FileContentKind.video)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: Video(
+                    controller: _controller,
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              )
+            else
+              Card(
+                color: const Color(0xFFEAF2F8),
+                child: Padding(
+                  padding: const EdgeInsets.all(22),
+                  child: Column(children: [
+                    const Icon(Icons.graphic_eq, size: 56),
+                    const SizedBox(height: 8),
+                    Text(
+                      widget.preview.title,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    if (widget.preview.decrypted)
+                      Text(widget.language.t('media.decrypted.memory')),
+                  ]),
+                ),
+              ),
+            const SizedBox(height: 12),
+            _MediaTransportControls(
+              player: _player,
+              language: widget.language,
+              shuffle: _shuffle,
+              repeatOne: _repeatOne,
+              onShuffle: _toggleShuffle,
+              onRepeatOne: _toggleRepeatOne,
+            ),
+            const SizedBox(height: 12),
+            _MediaPlaylistView(
+              player: _player,
+              items: widget.playlist,
+              language: widget.language,
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _MediaTransportControls extends StatelessWidget {
+  const _MediaTransportControls({
+    required this.player,
+    required this.language,
+    required this.shuffle,
+    required this.repeatOne,
+    required this.onShuffle,
+    required this.onRepeatOne,
+  });
+
+  final Player player;
+  final AppLanguage language;
+  final bool shuffle;
+  final bool repeatOne;
+  final VoidCallback onShuffle;
+  final VoidCallback onRepeatOne;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            IconButton(
+              onPressed: player.previous,
+              icon: const Icon(Icons.skip_previous),
+              tooltip: language.t('media.previous'),
+            ),
+            StreamBuilder<bool>(
+              stream: player.stream.playing,
+              initialData: player.state.playing,
+              builder: (context, snapshot) {
+                final playing = snapshot.data ?? false;
+                return IconButton.filled(
+                  onPressed: player.playOrPause,
+                  icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                  tooltip: playing
+                      ? language.t('media.pause')
+                      : language.t('media.play'),
+                );
+              },
+            ),
+            IconButton(
+              onPressed: player.next,
+              icon: const Icon(Icons.skip_next),
+              tooltip: language.t('media.next'),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: onShuffle,
+              icon: Icon(shuffle ? Icons.shuffle_on : Icons.shuffle),
+              tooltip: language.t('media.shuffle'),
+            ),
+            IconButton(
+              onPressed: onRepeatOne,
+              icon: Icon(repeatOne ? Icons.repeat_one_on : Icons.repeat),
+              tooltip: language.t('media.repeat.one'),
+            ),
+          ]),
+          StreamBuilder<Duration>(
+            stream: player.stream.duration,
+            initialData: player.state.duration,
+            builder: (context, durationSnapshot) {
+              final duration = durationSnapshot.data ?? Duration.zero;
+              return StreamBuilder<Duration>(
+                stream: player.stream.position,
+                initialData: player.state.position,
+                builder: (context, positionSnapshot) {
+                  final position = positionSnapshot.data ?? Duration.zero;
+                  final maxMs = math.max(duration.inMilliseconds, 1);
+                  final value =
+                      position.inMilliseconds.clamp(0, maxMs).toDouble();
+                  return Row(children: [
+                    Text(_formatDuration(position)),
+                    Expanded(
+                      child: Slider(
+                        value: value,
+                        min: 0,
+                        max: maxMs.toDouble(),
+                        onChanged: (value) => player.seek(
+                          Duration(milliseconds: value.round()),
+                        ),
+                      ),
+                    ),
+                    Text(_formatDuration(duration)),
+                  ]);
+                },
+              );
+            },
+          ),
+        ]),
+      ),
+    );
+  }
+
+  String _formatDuration(Duration duration) {
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
+  }
+}
+
+class _MediaPlaylistView extends StatelessWidget {
+  const _MediaPlaylistView({
+    required this.player,
+    required this.items,
+    required this.language,
+  });
+
+  final Player player;
+  final List<MediaPreviewItem> items;
+  final AppLanguage language;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(
+            language.t(items.firstOrNull?.kind == FileContentKind.video
+                ? 'media.video.playlist'
+                : 'media.audio.playlist'),
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          const SizedBox(height: 8),
+          StreamBuilder<Playlist>(
+            stream: player.stream.playlist,
+            initialData: player.state.playlist,
+            builder: (context, snapshot) {
+              final current = snapshot.data?.index ?? 0;
+              return ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 260),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: items.length,
+                  itemBuilder: (context, index) {
+                    final item = items[index];
+                    final selected = index == current;
+                    return ListTile(
+                      dense: true,
+                      selected: selected,
+                      leading: Icon(
+                        item.kind == FileContentKind.video
+                            ? Icons.movie_outlined
+                            : Icons.audiotrack_outlined,
+                      ),
+                      title: Text(item.title, maxLines: 1),
+                      subtitle: item.encrypted
+                          ? Text(language.t('media.encrypted.item'))
+                          : null,
+                      onTap: () => player.jump(index),
+                    );
+                  },
+                ),
+              );
+            },
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+class _DrawStroke {
+  _DrawStroke({required this.color, required this.width});
+
+  final Color color;
+  final double width;
+  final points = <Offset>[];
+}
+
+class _StrokePainter extends CustomPainter {
+  const _StrokePainter(this.strokes);
+
+  final List<_DrawStroke> strokes;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final stroke in strokes) {
+      if (stroke.points.length < 2) continue;
+      final paint = Paint()
+        ..color = stroke.color
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = stroke.width;
+      for (var i = 1; i < stroke.points.length; i++) {
+        canvas.drawLine(
+          Offset(stroke.points[i - 1].dx * size.width,
+              stroke.points[i - 1].dy * size.height),
+          Offset(stroke.points[i].dx * size.width,
+              stroke.points[i].dy * size.height),
+          paint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _StrokePainter oldDelegate) => true;
+}
+
+class _ImageEditorDialog extends StatefulWidget {
+  const _ImageEditorDialog({
+    required this.preview,
+    required this.language,
+    required this.currentDirectory,
+  });
+
+  final FilePreview preview;
+  final AppLanguage language;
+  final String? currentDirectory;
+
+  @override
+  State<_ImageEditorDialog> createState() => _ImageEditorDialogState();
+}
+
+class _ImageEditorDialogState extends State<_ImageEditorDialog> {
+  late img.Image _image;
+  late Uint8List _baseBytes;
+  late final TextEditingController _outputController;
+  final _strokes = <_DrawStroke>[];
+  var _format = 'png';
+  var _busy = false;
+  Color _brushColor = Colors.red;
+  var _brushWidth = 6.0;
+  _DrawStroke? _activeStroke;
+
+  @override
+  void initState() {
+    super.initState();
+    final decoded = img.decodeImage(Uint8List.fromList(widget.preview.bytes!));
+    _image = decoded ?? img.Image(width: 1024, height: 1024);
+    _baseBytes = Uint8List.fromList(img.encodePng(_image));
+    final directory = widget.currentDirectory ??
+        (widget.preview.sourcePath == null
+            ? Directory.current.path
+            : File(widget.preview.sourcePath!).parent.path);
+    _outputController = TextEditingController(
+      text:
+          '$directory${Platform.pathSeparator}${_fileNameWithoutExtension(widget.preview.title)}_edited.png',
+    );
+  }
+
+  @override
+  void dispose() {
+    _outputController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog.fullscreen(
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.language.t('editor.image.title')),
+          actions: [
+            IconButton(
+              onPressed: _busy ? null : _save,
+              icon: const Icon(Icons.save_outlined),
+              tooltip: widget.language.t('editor.save.as'),
+            ),
+          ],
+        ),
+        body: Row(children: [
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Center(
+                child: AspectRatio(
+                  aspectRatio: _image.width / math.max(_image.height, 1),
+                  child: LayoutBuilder(builder: (context, constraints) {
+                    return GestureDetector(
+                      onPanStart: (details) {
+                        final box = context.findRenderObject() as RenderBox;
+                        _activeStroke =
+                            _DrawStroke(color: _brushColor, width: _brushWidth);
+                        _activeStroke!.points.add(_normalizePoint(
+                          box.globalToLocal(details.globalPosition),
+                          box.size,
+                        ));
+                        setState(() => _strokes.add(_activeStroke!));
+                      },
+                      onPanUpdate: (details) {
+                        final stroke = _activeStroke;
+                        if (stroke == null) return;
+                        final box = context.findRenderObject() as RenderBox;
+                        setState(() => stroke.points.add(_normalizePoint(
+                              box.globalToLocal(details.globalPosition),
+                              box.size,
+                            )));
+                      },
+                      onPanEnd: (_) => _activeStroke = null,
+                      child: Stack(fit: StackFit.expand, children: [
+                        Image.memory(_baseBytes, fit: BoxFit.contain),
+                        CustomPaint(painter: _StrokePainter(_strokes)),
+                      ]),
+                    );
+                  }),
+                ),
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 360,
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextField(
+                    controller: _outputController,
+                    decoration: InputDecoration(
+                      labelText: widget.language.t('editor.output.path'),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: _format,
+                    decoration: InputDecoration(
+                      labelText: widget.language.t('editor.output.format'),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'png', child: Text('PNG')),
+                      DropdownMenuItem(value: 'jpg', child: Text('JPG')),
+                      DropdownMenuItem(value: 'bmp', child: Text('BMP')),
+                    ],
+                    onChanged: (value) =>
+                        setState(() => _format = value ?? 'png'),
+                  ),
+                  const Divider(height: 28),
+                  Wrap(spacing: 8, runSpacing: 8, children: [
+                    OutlinedButton.icon(
+                      onPressed: _rotateRight,
+                      icon: const Icon(Icons.rotate_right),
+                      label: Text(widget.language.t('editor.rotate.right')),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _cropCenter,
+                      icon: const Icon(Icons.crop),
+                      label: Text(widget.language.t('editor.crop.center')),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _undoLayer,
+                      icon: const Icon(Icons.undo),
+                      label: Text(widget.language.t('editor.layer.undo')),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _clearLayers,
+                      icon: const Icon(Icons.layers_clear),
+                      label: Text(widget.language.t('editor.layer.clear')),
+                    ),
+                  ]),
+                  const SizedBox(height: 12),
+                  Text(widget.language.t('editor.draw.hint')),
+                  Slider(
+                    value: _brushWidth,
+                    min: 2,
+                    max: 24,
+                    label: _brushWidth.round().toString(),
+                    onChanged: (value) => setState(() => _brushWidth = value),
+                  ),
+                  SegmentedButton<Color>(
+                    segments: const [
+                      ButtonSegment(value: Colors.red, label: Text('Red')),
+                      ButtonSegment(value: Colors.blue, label: Text('Blue')),
+                      ButtonSegment(value: Colors.black, label: Text('Black')),
+                      ButtonSegment(value: Colors.white, label: Text('Erase')),
+                    ],
+                    selected: {_brushColor},
+                    onSelectionChanged: (value) =>
+                        setState(() => _brushColor = value.first),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: _busy ? null : _save,
+                    icon: _busy
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_outlined),
+                    label: Text(widget.language.t('editor.save.as')),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Offset _normalizePoint(Offset point, Size size) => Offset(
+        (point.dx / math.max(size.width, 1)).clamp(0.0, 1.0),
+        (point.dy / math.max(size.height, 1)).clamp(0.0, 1.0),
+      );
+
+  void _rotateRight() {
+    setState(() {
+      _image = img.copyRotate(_compositedImage(), angle: 90);
+      _baseBytes = Uint8List.fromList(img.encodePng(_image));
+      _strokes.clear();
+    });
+  }
+
+  void _cropCenter() {
+    final composed = _compositedImage();
+    final width = (composed.width * 0.8).round().clamp(1, composed.width);
+    final height = (composed.height * 0.8).round().clamp(1, composed.height);
+    setState(() {
+      _image = img.copyCrop(
+        composed,
+        x: ((composed.width - width) / 2).round(),
+        y: ((composed.height - height) / 2).round(),
+        width: width,
+        height: height,
+      );
+      _baseBytes = Uint8List.fromList(img.encodePng(_image));
+      _strokes.clear();
+    });
+  }
+
+  void _undoLayer() {
+    if (_strokes.isEmpty) return;
+    setState(() => _strokes.removeLast());
+  }
+
+  void _clearLayers() => setState(_strokes.clear);
+
+  img.Image _compositedImage() {
+    final output = img.Image.from(_image);
+    for (final stroke in _strokes) {
+      if (stroke.points.length < 2) continue;
+      final color = img.ColorRgba8(
+        _colorByte(stroke.color.r),
+        _colorByte(stroke.color.g),
+        _colorByte(stroke.color.b),
+        _colorByte(stroke.color.a),
+      );
+      for (var i = 1; i < stroke.points.length; i++) {
+        img.drawLine(
+          output,
+          x1: (stroke.points[i - 1].dx * output.width).round(),
+          y1: (stroke.points[i - 1].dy * output.height).round(),
+          x2: (stroke.points[i].dx * output.width).round(),
+          y2: (stroke.points[i].dy * output.height).round(),
+          color: color,
+          thickness: stroke.width,
+        );
+      }
+    }
+    return output;
+  }
+
+  int _colorByte(double value) => (value * 255).round().clamp(0, 255).toInt();
+
+  Future<void> _save() async {
+    setState(() => _busy = true);
+    try {
+      final path = _ensureExtension(_outputController.text.trim(), _format);
+      final output = _compositedImage();
+      final bytes = switch (_format) {
+        'jpg' => img.encodeJpg(output, quality: 92),
+        'bmp' => img.encodeBmp(output),
+        _ => img.encodePng(output),
+      };
+      await File(path).writeAsBytes(bytes, flush: true);
+      if (mounted) Navigator.pop(context, path);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('${widget.language.t('editor.error')} $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+}
+
+class _FfmpegEditorDialog extends StatefulWidget {
+  const _FfmpegEditorDialog({
+    required this.preview,
+    required this.language,
+    required this.currentDirectory,
+  });
+
+  final FilePreview preview;
+  final AppLanguage language;
+  final String? currentDirectory;
+
+  @override
+  State<_FfmpegEditorDialog> createState() => _FfmpegEditorDialogState();
+}
+
+class _FfmpegEditorDialogState extends State<_FfmpegEditorDialog> {
+  late final TextEditingController _outputController;
+  final _startController = TextEditingController();
+  final _endController = TextEditingController();
+  final _appendController = TextEditingController();
+  final _extraAudioController = TextEditingController();
+  final _widthController = TextEditingController();
+  final _heightController = TextEditingController();
+  final _crfController = TextEditingController(text: '23');
+  final _audioBitrateController = TextEditingController(text: '128k');
+  var _rotateVideo = false;
+  var _busy = false;
+  String? _log;
+
+  @override
+  void initState() {
+    super.initState();
+    final directory = widget.currentDirectory ??
+        (widget.preview.sourcePath == null
+            ? Directory.current.path
+            : File(widget.preview.sourcePath!).parent.path);
+    final extension =
+        widget.preview.contentKind == FileContentKind.video ? '.mp4' : '.mp3';
+    _outputController = TextEditingController(
+      text:
+          '$directory${Platform.pathSeparator}${_fileNameWithoutExtension(widget.preview.title)}_edited$extension',
+    );
+  }
+
+  @override
+  void dispose() {
+    _outputController.dispose();
+    _startController.dispose();
+    _endController.dispose();
+    _appendController.dispose();
+    _extraAudioController.dispose();
+    _widthController.dispose();
+    _heightController.dispose();
+    _crfController.dispose();
+    _audioBitrateController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isVideo = widget.preview.contentKind == FileContentKind.video;
+    return AlertDialog(
+      title: Text(widget.language
+          .t(isVideo ? 'editor.video.title' : 'editor.audio.title')),
+      content: SizedBox(
+        width: 680,
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(widget.language.t('editor.ffmpeg.note')),
+            TextField(
+              controller: _outputController,
+              decoration: InputDecoration(
+                labelText: widget.language.t('editor.output.path'),
+              ),
+            ),
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: _startController,
+                  decoration: InputDecoration(
+                    labelText: widget.language.t('editor.trim.start'),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: TextField(
+                  controller: _endController,
+                  decoration: InputDecoration(
+                    labelText: widget.language.t('editor.trim.end'),
+                  ),
+                ),
+              ),
+            ]),
+            TextField(
+              controller: _appendController,
+              decoration: InputDecoration(
+                labelText: widget.language
+                    .t(isVideo ? 'editor.video.append' : 'editor.audio.append'),
+              ),
+            ),
+            TextField(
+              controller: _extraAudioController,
+              decoration: InputDecoration(
+                labelText: widget.language.t(isVideo
+                    ? 'editor.video.replace.audio'
+                    : 'editor.audio.mix'),
+              ),
+            ),
+            if (isVideo) ...[
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: _widthController,
+                    decoration: InputDecoration(
+                      labelText: widget.language.t('editor.video.width'),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _heightController,
+                    decoration: InputDecoration(
+                      labelText: widget.language.t('editor.video.height'),
+                    ),
+                  ),
+                ),
+              ]),
+              SwitchListTile(
+                value: _rotateVideo,
+                onChanged: (value) => setState(() => _rotateVideo = value),
+                title: Text(widget.language.t('editor.video.rotate')),
+              ),
+              TextField(
+                controller: _crfController,
+                decoration: InputDecoration(
+                  labelText: widget.language.t('editor.video.quality'),
+                ),
+              ),
+            ],
+            TextField(
+              controller: _audioBitrateController,
+              decoration: InputDecoration(
+                labelText: widget.language.t('editor.audio.quality'),
+              ),
+            ),
+            if (_log != null) ...[
+              const SizedBox(height: 12),
+              SelectableText(_log!, maxLines: 8),
+            ],
+          ]),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context),
+          child: Text(widget.language.t('common.cancel')),
+        ),
+        FilledButton.icon(
+          onPressed: _busy ? null : _run,
+          icon: _busy
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.movie_creation_outlined),
+          label: Text(widget.language.t('editor.render')),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _run() async {
+    setState(() {
+      _busy = true;
+      _log = null;
+    });
+    File? tempSource;
+    try {
+      final ffmpeg = await Process.run('ffmpeg', ['-version']);
+      if (ffmpeg.exitCode != 0) {
+        throw StateError(widget.language.t('editor.ffmpeg.missing'));
+      }
+
+      var sourcePath = widget.preview.sourcePath;
+      if (widget.preview.decrypted && widget.preview.bytes != null) {
+        final tempDir =
+            await Directory.systemTemp.createTemp('secure_vault_edit_');
+        tempSource = File(
+          '${tempDir.path}${Platform.pathSeparator}${_safeFileName(widget.preview.title)}',
+        );
+        await tempSource.writeAsBytes(widget.preview.bytes!, flush: true);
+        sourcePath = tempSource.path;
+      }
+      if (sourcePath == null || sourcePath.isEmpty) {
+        throw StateError(widget.language.t('media.unavailable'));
+      }
+
+      final outputPath = _outputController.text.trim();
+      final args = _buildFfmpegArgs(sourcePath, outputPath);
+      final result = await Process.run('ffmpeg', args);
+      final log = '${result.stdout}\n${result.stderr}'.trim();
+      if (result.exitCode != 0) {
+        throw StateError(log.isEmpty ? 'ffmpeg exit ${result.exitCode}' : log);
+      }
+      if (mounted) Navigator.pop(context, outputPath);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _log = error.toString());
+      }
+    } finally {
+      try {
+        await tempSource?.parent.delete(recursive: true);
+      } catch (_) {}
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  List<String> _buildFfmpegArgs(String sourcePath, String outputPath) {
+    final isVideo = widget.preview.contentKind == FileContentKind.video;
+    final args = <String>['-y'];
+    if (_startController.text.trim().isNotEmpty) {
+      args.addAll(['-ss', _startController.text.trim()]);
+    }
+    if (_endController.text.trim().isNotEmpty) {
+      args.addAll(['-to', _endController.text.trim()]);
+    }
+    args.addAll(['-i', sourcePath]);
+
+    final append = _appendController.text.trim();
+    final extraAudio = _extraAudioController.text.trim();
+    if (append.isNotEmpty) args.addAll(['-i', append]);
+    if (extraAudio.isNotEmpty) args.addAll(['-i', extraAudio]);
+
+    final filters = <String>[];
+    if (isVideo) {
+      final width = _widthController.text.trim();
+      final height = _heightController.text.trim();
+      final videoFilters = <String>[
+        if (width.isNotEmpty && height.isNotEmpty) 'scale=$width:$height',
+        if (_rotateVideo) 'transpose=1',
+      ];
+      if (videoFilters.isNotEmpty) {
+        filters.add(videoFilters.join(','));
+      }
+    }
+
+    if (append.isNotEmpty) {
+      if (isVideo) {
+        args.addAll([
+          '-filter_complex',
+          '[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[outv][outa]',
+          '-map',
+          '[outv]',
+          '-map',
+          '[outa]',
+        ]);
+      } else {
+        args.addAll([
+          '-filter_complex',
+          '[0:a][1:a]concat=n=2:v=0:a=1[outa]',
+          '-map',
+          '[outa]',
+        ]);
+      }
+    } else if (extraAudio.isNotEmpty) {
+      if (isVideo) {
+        args.addAll(['-map', '0:v:0', '-map', '1:a:0', '-shortest']);
+      } else {
+        args.addAll([
+          '-filter_complex',
+          '[0:a][1:a]amix=inputs=2:duration=longest[outa]',
+          '-map',
+          '[outa]',
+        ]);
+      }
+    }
+
+    if (filters.isNotEmpty && append.isEmpty) {
+      args.addAll(['-vf', filters.join(',')]);
+    }
+    if (isVideo) {
+      args.addAll(['-c:v', 'libx264', '-crf', _crfController.text.trim()]);
+    }
+    args.addAll(['-b:a', _audioBitrateController.text.trim()]);
+    args.add(outputPath);
+    return args;
+  }
+}
+
+String _fileNameWithoutExtension(String name) {
+  final dot = name.lastIndexOf('.');
+  return dot <= 0 ? name : name.substring(0, dot);
+}
+
+String _ensureExtension(String path, String extension) {
+  if (path.toLowerCase().endsWith('.$extension')) return path;
+  final dot = path.lastIndexOf('.');
+  if (dot > path.lastIndexOf(Platform.pathSeparator)) {
+    return '${path.substring(0, dot)}.$extension';
+  }
+  return '$path.$extension';
+}
+
+String _safeFileName(String value) =>
+    value.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
 
 class _SettingsView extends StatefulWidget {
   const _SettingsView({

@@ -23,7 +23,7 @@ class AppLanguage {
 
   String t(String key) => strings[key] ?? _englishStrings[key] ?? key;
 
-  static const russianTitle = 'Защищенное хранилище файов';
+  static const russianTitle = 'Защищенное хранилище файлов';
   static const englishTitle = 'Secure File Vault';
 
   static const _englishStrings = <String, String>{
@@ -124,6 +124,49 @@ class AppLanguage {
     'preview.external.warning':
         'The file can be exposed to another application, temporary files, recent-file lists, thumbnails, or system caches. Continue only if you trust that app.',
     'preview.external.temp': 'Decrypted copy prepared for external opening.',
+    'media.unavailable': 'No playable media source is available.',
+    'media.error': 'Media playback error:',
+    'media.decrypted.memory':
+        'Encrypted media was decrypted only for the protected playback session.',
+    'media.previous': 'Previous',
+    'media.play': 'Play',
+    'media.pause': 'Pause',
+    'media.next': 'Next',
+    'media.shuffle': 'Shuffle playback',
+    'media.repeat.one': 'Repeat current item',
+    'media.audio.playlist': 'Audio playlist',
+    'media.video.playlist': 'Video playlist',
+    'media.encrypted.item': 'Encrypted source',
+    'editor.open': 'Edit',
+    'editor.unsupported': 'This file type is not editable yet.',
+    'editor.saved': 'Saved:',
+    'editor.error': 'Editor error:',
+    'editor.save.as': 'Save as',
+    'editor.output.path': 'Output path',
+    'editor.output.format': 'Output format',
+    'editor.image.title': 'Image editor',
+    'editor.rotate.right': 'Rotate',
+    'editor.crop.center': 'Crop center',
+    'editor.layer.undo': 'Undo layer',
+    'editor.layer.clear': 'Clear layers',
+    'editor.draw.hint':
+        'Draw directly on the image. White brush works as a simple eraser for drawn layers.',
+    'editor.audio.title': 'Audio editor',
+    'editor.video.title': 'Video editor',
+    'editor.ffmpeg.note': 'Rendering uses ffmpeg when it is available in PATH.',
+    'editor.ffmpeg.missing': 'ffmpeg is not available in PATH.',
+    'editor.trim.start': 'Trim start, e.g. 00:00:05',
+    'editor.trim.end': 'Trim end, e.g. 00:01:00',
+    'editor.audio.append': 'Append another audio file',
+    'editor.audio.mix': 'Mix/add another sound file',
+    'editor.audio.quality': 'Audio bitrate, e.g. 128k',
+    'editor.video.append': 'Append another video file',
+    'editor.video.replace.audio': 'Replace/add audio track path',
+    'editor.video.width': 'Video width',
+    'editor.video.height': 'Video height',
+    'editor.video.rotate': 'Rotate video 90 degrees',
+    'editor.video.quality': 'Video CRF quality, lower is better',
+    'editor.render': 'Render',
     'transfer.upload.title': 'Upload file',
     'transfer.upload.encrypted': 'Upload encrypted',
     'transfer.upload.plain': 'Upload decrypted/plain',

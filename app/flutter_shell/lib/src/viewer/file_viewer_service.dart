@@ -111,6 +111,7 @@ class FileViewerService {
       return FilePreview(
           title: name,
           subtitle: 'Image, $size bytes',
+          sourcePath: file.path,
           bytes: await file.readAsBytes(),
           contentKind: kind);
     }
@@ -119,6 +120,7 @@ class FileViewerService {
       return FilePreview(
           title: name,
           subtitle: 'Text, $size bytes',
+          sourcePath: file.path,
           text: _bytesToText(bytes),
           bytes: bytes,
           contentKind: kind);
@@ -128,6 +130,7 @@ class FileViewerService {
       return FilePreview(
         title: name,
         subtitle: 'HTML, $size bytes',
+        sourcePath: file.path,
         text: _htmlSummary(_bytesToText(bytes)),
         bytes: bytes,
         contentKind: kind,
@@ -138,6 +141,7 @@ class FileViewerService {
       return FilePreview(
         title: name,
         subtitle: 'ZIP archive, $size bytes',
+        sourcePath: file.path,
         text: _zipSummary(bytes),
         bytes: bytes,
         contentKind: kind,
@@ -149,6 +153,7 @@ class FileViewerService {
       return FilePreview(
         title: name,
         subtitle: 'Document, $size bytes',
+        sourcePath: file.path,
         text: text.isEmpty
             ? 'No preview text was extracted from this file.'
             : text,
@@ -162,6 +167,7 @@ class FileViewerService {
       return FilePreview(
         title: name,
         subtitle: _kindSubtitle(kind, size),
+        sourcePath: file.path,
         text: _mediaSummary(name, bytes),
         bytes: bytes,
         contentKind: kind,
@@ -170,6 +176,7 @@ class FileViewerService {
     return FilePreview(
         title: name,
         subtitle: _kindSubtitle(kind, size),
+        sourcePath: file.path,
         text: _fallbackText(kind),
         contentKind: kind);
   }
@@ -178,6 +185,7 @@ class FileViewerService {
     required String name,
     required Uint8List bytes,
     required String subtitle,
+    String? sourcePath,
     VaultContainerInfo? containerInfo,
   }) async {
     final kind = kindForName(name);
@@ -185,6 +193,7 @@ class FileViewerService {
       return FilePreview(
           title: name,
           subtitle: subtitle,
+          sourcePath: sourcePath,
           bytes: bytes,
           containerInfo: containerInfo,
           decrypted: true,
@@ -194,6 +203,7 @@ class FileViewerService {
       return FilePreview(
           title: name,
           subtitle: subtitle,
+          sourcePath: sourcePath,
           text: _bytesToText(bytes),
           bytes: bytes,
           containerInfo: containerInfo,
@@ -204,6 +214,7 @@ class FileViewerService {
       return FilePreview(
           title: name,
           subtitle: subtitle,
+          sourcePath: sourcePath,
           text: _htmlSummary(_bytesToText(bytes)),
           bytes: bytes,
           containerInfo: containerInfo,
@@ -214,6 +225,7 @@ class FileViewerService {
       return FilePreview(
           title: name,
           subtitle: subtitle,
+          sourcePath: sourcePath,
           text: _zipSummary(bytes),
           bytes: bytes,
           containerInfo: containerInfo,
@@ -225,6 +237,7 @@ class FileViewerService {
       return FilePreview(
           title: name,
           subtitle: subtitle,
+          sourcePath: sourcePath,
           text: text.isEmpty
               ? 'No preview text was extracted from this file.'
               : text,
@@ -237,6 +250,7 @@ class FileViewerService {
       return FilePreview(
           title: name,
           subtitle: subtitle,
+          sourcePath: sourcePath,
           text: _mediaSummary(name, bytes),
           bytes: bytes,
           containerInfo: containerInfo,
@@ -246,6 +260,7 @@ class FileViewerService {
     return FilePreview(
         title: name,
         subtitle: subtitle,
+        sourcePath: sourcePath,
         text: _fallbackText(kind),
         bytes: bytes,
         containerInfo: containerInfo,

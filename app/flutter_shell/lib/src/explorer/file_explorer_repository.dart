@@ -336,6 +336,7 @@ class FileExplorerRepository {
           name: opened.name,
           subtitle: 'Расшифровано: ${opened.payload.length} байт',
           bytes: opened.payload,
+          sourcePath: file.path,
           containerInfo: info,
         );
       } catch (error) {

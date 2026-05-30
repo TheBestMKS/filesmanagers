@@ -27,7 +27,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"Защищенное хранилище файлов", origin, size)) {
+  if (!window.Create(
+          L"\u0417\u0430\u0449\u0438\u0449\u0435\u043d\u043d\u043e\u0435 "
+          L"\u0445\u0440\u0430\u043d\u0438\u043b\u0438\u0449\u0435 "
+          L"\u0444\u0430\u0439\u043b\u043e\u0432",
+          origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
