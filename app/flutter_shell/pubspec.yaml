@@ -1,7 +1,7 @@
 name: secure_vault_shell
 description: Flutter shell for the secure vault explorer.
 publish_to: "none"
-version: 0.3.0
+version: 0.4.0
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -16,6 +16,7 @@ dependencies:
   archive: ^4.0.9
   xml: 6.5.0
   syncfusion_flutter_pdf: ^33.2.8
+  image: ^4.5.4
 
 dev_dependencies:
   flutter_test:

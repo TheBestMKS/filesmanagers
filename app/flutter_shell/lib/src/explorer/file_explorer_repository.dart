@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
+
 import '../ffi/crypt_bindings.dart';
 import '../plugins/cloud_plugin_registry.dart' hide basename;
 import '../security/vault_crypto.dart';
@@ -134,7 +136,12 @@ class FileExplorerRepository {
     return locations;
   }
 
-  Future<DirectorySnapshot> listDirectory(String path) async {
+  Future<DirectorySnapshot> listDirectory(
+    String path, {
+    String? commonPassword,
+    String? filePassword,
+    bool decryptNames = true,
+  }) async {
     final directory = Directory(path);
     if (!await directory.exists()) {
       return DirectorySnapshot(
@@ -161,13 +168,27 @@ class FileExplorerRepository {
         if (entity is File) {
           final kind = _kindForFile(name);
           VaultContainerInfo? info;
+          var displayName = name;
           if (kind == ExplorerEntryKind.encryptedFile ||
               kind == ExplorerEntryKind.folderMeta) {
             info = await _inspectContainer(entity, kind);
+            if (decryptNames && kind == ExplorerEntryKind.encryptedFile) {
+              final password = await _passwordForAutoName(
+                entity,
+                commonPassword: commonPassword,
+                filePassword: filePassword,
+              );
+              if (password != null) {
+                displayName = await _decryptAppCryptName(
+                        await entity.readAsBytes(),
+                        password: password)
+                    .catchError((_) => name);
+              }
+            }
           }
           entries.add(
             ExplorerEntry(
-              name: name,
+              name: displayName,
               path: entity.path,
               kind: kind,
               sizeBytes: stat.size,
@@ -247,6 +268,36 @@ class FileExplorerRepository {
         );
       }
     }
+    return DirectorySnapshot(path: label, entries: entries);
+  }
+
+  Future<DirectorySnapshot> mediaSnapshot({
+    required String label,
+    required List<String> roots,
+    required Set<String> extensions,
+    String exclusions = '',
+  }) async {
+    final entries = <ExplorerEntry>[];
+    final rules = _exclusionRules(exclusions);
+    for (final root in roots.where((item) => item.trim().isNotEmpty)) {
+      final directory = Directory(root.trim());
+      if (!await directory.exists()) continue;
+      await for (final entity
+          in directory.list(recursive: true, followLinks: false)) {
+        if (entity is! File) continue;
+        final name = basename(entity.path);
+        if (!extensions.contains(FileViewerService.extensionForName(name))) {
+          continue;
+        }
+        if (_isExcluded(entity.path, name, rules)) {
+          continue;
+        }
+        final entry = await entryForPath(entity.path);
+        if (entry != null) entries.add(entry);
+      }
+    }
+    entries
+        .sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     return DirectorySnapshot(path: label, entries: entries);
   }
 
@@ -480,6 +531,37 @@ class FileExplorerRepository {
     return target;
   }
 
+  Future<Directory> extractZipToDirectory(
+    File source,
+    Directory targetDir,
+  ) async {
+    await targetDir.create(recursive: true);
+    final outDir = await _availableDirectory(
+      targetDir,
+      basename(source.path)
+          .replaceFirst(RegExp(r'\.zip$', caseSensitive: false), ''),
+    );
+    await outDir.create(recursive: true);
+    final archive = ZipDecoder().decodeBytes(await source.readAsBytes());
+    for (final item in archive.files) {
+      final safeName = item.name
+          .replaceAll('\\', '/')
+          .split('/')
+          .where((part) => part.isNotEmpty && part != '..')
+          .join(Platform.pathSeparator);
+      if (safeName.isEmpty) continue;
+      final outPath = '${outDir.path}${Platform.pathSeparator}$safeName';
+      if (item.isFile) {
+        final file = File(outPath);
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes(item.content as List<int>, flush: true);
+      } else {
+        await Directory(outPath).create(recursive: true);
+      }
+    }
+    return outDir;
+  }
+
   Future<FileSystemEntity> copyEntityToDirectory(
     String sourcePath,
     String targetDirectory,
@@ -624,6 +706,73 @@ class FileExplorerRepository {
       algorithm: algorithm,
     );
     return _OpenedCryptFile(name: name, payload: payload);
+  }
+
+  Future<String> _decryptAppCryptName(List<int> bytes,
+      {required String password}) async {
+    final data = Uint8List.fromList(bytes);
+    final layout = _readCryptPayloadLayout(data);
+    final params = layout.params;
+    if (params['schema'] != 'securevault.fileCrypto.v1') {
+      throw const FormatException('Legacy container.');
+    }
+    final saltText = params['salt'] as String?;
+    if (saltText == null) {
+      throw const FormatException('Missing salt.');
+    }
+    final algorithm =
+        params['cipher'] as String? ?? EncryptionAlgorithm.xchacha20Poly1305;
+    final encryptedHeader = data.sublist(
+      layout.payloadOffset,
+      layout.payloadOffset + layout.encryptedHeaderLength,
+    );
+    final headerJsonBytes = await VaultCrypto.decryptBytes(
+      encryptedHeader,
+      password: password,
+      salt: base64Url.decode(saltText),
+      aad: utf8.encode('securevault.file.header.v1'),
+      algorithm: algorithm,
+    );
+    final headerJson = jsonDecode(utf8.decode(headerJsonBytes));
+    if (headerJson is! Map<String, Object?>) {
+      throw const FormatException('Invalid header.');
+    }
+    return headerJson['name'] as String? ?? 'decrypted-file.bin';
+  }
+
+  Future<String?> _passwordForAutoName(
+    File file, {
+    String? commonPassword,
+    String? filePassword,
+  }) async {
+    final params = await encryptedFileParameters(file.path);
+    if (params == null) return null;
+    if (params.usesCommonKey &&
+        commonPassword != null &&
+        commonPassword.isNotEmpty) {
+      return commonPassword;
+    }
+    if (!params.usesCommonKey &&
+        filePassword != null &&
+        filePassword.isNotEmpty) {
+      return filePassword;
+    }
+    return null;
+  }
+
+  List<RegExp> _exclusionRules(String raw) => raw
+          .split(RegExp(r'[\r\n]+'))
+          .map((line) => line.trim())
+          .where((line) => line.isNotEmpty)
+          .map((line) {
+        final escaped = RegExp.escape(line).replaceAll(r'\*', '.*');
+        return RegExp('^$escaped\$', caseSensitive: false);
+      }).toList();
+
+  bool _isExcluded(String path, String name, List<RegExp> rules) {
+    final normalized = path.replaceAll('\\', '/');
+    return rules
+        .any((rule) => rule.hasMatch(name) || rule.hasMatch(normalized));
   }
 
   EncryptedFileParameters? _readCryptParameters(List<int> bytes) {

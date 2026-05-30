@@ -42,9 +42,16 @@ class FileViewerService {
     '.kt',
     '.js',
     '.ts',
-    '.html',
     '.css',
     '.sql'
+  };
+  static const htmlExtensions = {
+    '.html',
+    '.htm',
+    '.xhtml',
+  };
+  static const archiveExtensions = {
+    '.zip',
   };
   static const documentExtensions = {
     '.docx',
@@ -80,6 +87,8 @@ class FileViewerService {
   static FileContentKind kindForName(String name) {
     final extension = extensionForName(name);
     if (imageExtensions.contains(extension)) return FileContentKind.image;
+    if (htmlExtensions.contains(extension)) return FileContentKind.html;
+    if (archiveExtensions.contains(extension)) return FileContentKind.archive;
     if (textExtensions.contains(extension)) return FileContentKind.text;
     if (documentExtensions.contains(extension)) return FileContentKind.document;
     if (videoExtensions.contains(extension)) return FileContentKind.video;
@@ -113,6 +122,26 @@ class FileViewerService {
           text: _bytesToText(bytes),
           bytes: bytes,
           contentKind: kind);
+    }
+    if (kind == FileContentKind.html && size <= 2 * 1024 * 1024) {
+      final bytes = await file.readAsBytes();
+      return FilePreview(
+        title: name,
+        subtitle: 'HTML, $size bytes',
+        text: _htmlSummary(_bytesToText(bytes)),
+        bytes: bytes,
+        contentKind: kind,
+      );
+    }
+    if (kind == FileContentKind.archive && size <= 80 * 1024 * 1024) {
+      final bytes = await file.readAsBytes();
+      return FilePreview(
+        title: name,
+        subtitle: 'ZIP archive, $size bytes',
+        text: _zipSummary(bytes),
+        bytes: bytes,
+        contentKind: kind,
+      );
     }
     if (kind == FileContentKind.document && size <= 40 * 1024 * 1024) {
       final bytes = await file.readAsBytes();
@@ -171,6 +200,26 @@ class FileViewerService {
           decrypted: true,
           contentKind: kind);
     }
+    if (kind == FileContentKind.html && bytes.length <= 2 * 1024 * 1024) {
+      return FilePreview(
+          title: name,
+          subtitle: subtitle,
+          text: _htmlSummary(_bytesToText(bytes)),
+          bytes: bytes,
+          containerInfo: containerInfo,
+          decrypted: true,
+          contentKind: kind);
+    }
+    if (kind == FileContentKind.archive && bytes.length <= 80 * 1024 * 1024) {
+      return FilePreview(
+          title: name,
+          subtitle: subtitle,
+          text: _zipSummary(bytes),
+          bytes: bytes,
+          containerInfo: containerInfo,
+          decrypted: true,
+          contentKind: kind);
+    }
     if (kind == FileContentKind.document) {
       final text = await _extractDocumentText(name, bytes);
       return FilePreview(
@@ -209,6 +258,8 @@ class FileViewerService {
       FileContentKind.video => 'Video file, $size bytes',
       FileContentKind.audio => 'Audio file, $size bytes',
       FileContentKind.document => 'Document file, $size bytes',
+      FileContentKind.html => 'HTML page, $size bytes',
+      FileContentKind.archive => 'Archive file, $size bytes',
       FileContentKind.image => 'Image file, $size bytes',
       FileContentKind.text => 'Text file, $size bytes',
       FileContentKind.unknown => 'Unknown file type, $size bytes',
@@ -223,6 +274,10 @@ class FileViewerService {
         'Audio preview is protected in memory. Native playback plugins require Windows symlink support on this machine, so SecureVault does not write decrypted audio to disk automatically.',
       FileContentKind.document =>
         'This document type is recognized. Text extraction is built in for PDF, DOCX, ODT, XLSX, PPTX, and RTF where possible.',
+      FileContentKind.html =>
+        'HTML pages are rendered as a safe in-app text preview. External browser opening is available after the disclosure warning.',
+      FileContentKind.archive =>
+        'ZIP archives can be inspected and extracted from the file context menu.',
       FileContentKind.unknown =>
         'No built-in viewer association exists yet. Add an extension association in settings or open externally.',
       _ => '',
@@ -241,6 +296,49 @@ class FileViewerService {
           .map((b) => b.toRadixString(16).padLeft(2, '0'))
           .join(' ');
       return 'Binary file. First bytes:\n$sample';
+    }
+  }
+
+  static String _htmlSummary(String html) {
+    final titleMatch = RegExp(
+      r'<title[^>]*>(.*?)</title>',
+      caseSensitive: false,
+      dotAll: true,
+    ).firstMatch(html);
+    final title = titleMatch == null
+        ? ''
+        : titleMatch.group(1)!.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final text = html
+        .replaceAll(
+            RegExp(r'<script[\s\S]*?</script>', caseSensitive: false), ' ')
+        .replaceAll(
+            RegExp(r'<style[\s\S]*?</style>', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'<[^>]+>'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    final preview = text.length > 12000 ? text.substring(0, 12000) : text;
+    return [
+      if (title.isNotEmpty) 'Title: $title',
+      'Safe HTML text preview:',
+      preview,
+    ].join('\n\n');
+  }
+
+  static String _zipSummary(List<int> bytes) {
+    try {
+      final archive = ZipDecoder().decodeBytes(bytes, verify: false);
+      final lines = <String>[
+        'ZIP archive entries: ${archive.files.length}',
+        '',
+        for (final file in archive.files.take(300))
+          '${file.isFile ? 'file' : 'dir '}  ${file.size.toString().padLeft(10)}  ${file.name}',
+      ];
+      if (archive.files.length > 300) {
+        lines.add('...trimmed...');
+      }
+      return lines.join('\n');
+    } catch (error) {
+      return 'ZIP archive could not be read: $error';
     }
   }
 

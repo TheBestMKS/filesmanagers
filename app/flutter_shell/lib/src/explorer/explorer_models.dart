@@ -44,7 +44,17 @@ enum FileContentKind {
   video,
   audio,
   document,
+  html,
+  archive,
   unknown,
+}
+
+enum MediaSection {
+  gallery,
+  music,
+  video,
+  documents,
+  torrent,
 }
 
 enum EncryptionKeyMode {

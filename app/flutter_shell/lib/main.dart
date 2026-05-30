@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
 
 import 'src/explorer/explorer_models.dart';
 import 'src/explorer/file_explorer_repository.dart';
@@ -10,9 +11,10 @@ import 'src/i18n/app_language.dart';
 import 'src/platform_services.dart';
 import 'src/plugins/cloud_plugin_registry.dart' hide basename;
 import 'src/security/security_settings.dart';
+import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 
-const _appVersion = '0.3.0';
+const _appVersion = '0.4.0';
 
 void main(List<String> args) => runApp(
       SecureVaultApp(initialPath: args.isEmpty ? null : args.first),
@@ -37,7 +39,23 @@ class SecureVaultApp extends StatelessWidget {
   }
 }
 
-enum ShellPage { explorer, settings }
+enum ShellPage { explorer, gallery, music, video, documents, torrent, settings }
+
+enum _CreateFileKind {
+  plain,
+  encryptedPlain,
+  csv,
+  encryptedCsv,
+  image,
+  encryptedImage
+}
+
+class _CreatedFileSpec {
+  const _CreatedFileSpec({required this.name, required this.bytes});
+
+  final String name;
+  final Uint8List bytes;
+}
 
 class VaultHomeScreen extends StatefulWidget {
   const VaultHomeScreen({super.key, this.initialOpenPath});
@@ -75,6 +93,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   String? _clipboardPath;
   bool _clipboardCut = false;
   bool _showingRecent = false;
+  String _searchQuery = '';
 
   @override
   void initState() {
@@ -133,8 +152,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _currentPath = currentPath;
       _selected = selected;
       _preview = preview;
-      _snapshot =
-          currentPath == null ? null : _explorer.listDirectory(currentPath);
+      _snapshot = currentPath == null ? null : _directorySnapshot(currentPath);
       _locked = settings.hasAppPassword;
       _loading = false;
     });
@@ -178,9 +196,17 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _currentPath = path;
       _selected = null;
       _preview = null;
-      _snapshot = _explorer.listDirectory(path);
+      _snapshot = _directorySnapshot(path);
     });
   }
+
+  Future<DirectorySnapshot> _directorySnapshot(String path) =>
+      _explorer.listDirectory(
+        path,
+        commonPassword: _commonEncryptionPassword,
+        filePassword: _activeFilePassword(),
+        decryptNames: _settings.decryptNamesInExplorer,
+      );
 
   Future<void> _refresh() async {
     final path = _currentPath;
@@ -194,7 +220,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
             )
           : path == null
               ? null
-              : _explorer.listDirectory(path);
+              : _directorySnapshot(path);
       if (_selected != null) {
         _preview = _explorer.previewFile(
           _selected!.path,
@@ -211,6 +237,90 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       return;
     }
     _openPath(location.path!);
+  }
+
+  void _openExplorerHome() {
+    final paths = <String>[
+      for (final location in _locations)
+        if (location.enabled && location.path != null) location.path!,
+      ..._settings.galleryFolders,
+      ..._settings.musicFolders,
+      ..._settings.videoFolders,
+      ..._settings.documentFolders,
+    ];
+    setState(() {
+      _page = ShellPage.explorer;
+      _showingRecent = false;
+      _selected = null;
+      _preview = null;
+      _snapshot = _explorer.snapshotForPaths(
+        _language.t('nav.explorer'),
+        paths,
+      );
+    });
+  }
+
+  void _openMediaSection(MediaSection section) {
+    if (section == MediaSection.torrent && !_settings.torrentEnabled) {
+      _snack(_language.t('settings.torrent.disabled'));
+      return;
+    }
+    final (page, label, roots, extensions, exclusions) = switch (section) {
+      MediaSection.gallery => (
+          ShellPage.gallery,
+          _language.t('nav.gallery'),
+          _settings.galleryFolders,
+          FileViewerService.imageExtensions,
+          _settings.galleryExclusions,
+        ),
+      MediaSection.music => (
+          ShellPage.music,
+          _language.t('nav.music'),
+          _settings.musicFolders,
+          FileViewerService.audioExtensions,
+          _settings.musicExclusions,
+        ),
+      MediaSection.video => (
+          ShellPage.video,
+          _language.t('nav.video'),
+          _settings.videoFolders,
+          FileViewerService.videoExtensions,
+          _settings.videoExclusions,
+        ),
+      MediaSection.documents => (
+          ShellPage.documents,
+          _language.t('nav.documents'),
+          _settings.documentFolders,
+          {
+            ...FileViewerService.documentExtensions,
+            ...FileViewerService.textExtensions,
+            ...FileViewerService.htmlExtensions,
+          },
+          _settings.documentExclusions,
+        ),
+      MediaSection.torrent => (
+          ShellPage.torrent,
+          _language.t('nav.torrent'),
+          const <String>[],
+          {'.torrent'},
+          '',
+        ),
+    };
+    setState(() {
+      _page = page;
+      _showingRecent = false;
+      _selected = null;
+      _preview = null;
+      _snapshot = section == MediaSection.torrent
+          ? AppPaths.torrentsDirectory()
+              .then((dir) => _explorer.listDirectory(dir.path))
+          : _explorer.mediaSnapshot(
+              label: label,
+              roots: roots,
+              extensions: extensions,
+              exclusions: exclusions,
+            );
+    });
   }
 
   void _openRecentFiles() {
@@ -317,9 +427,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         _showingRecent = false;
         _selected = null;
         _preview = null;
-        _snapshot = _currentPath == null
-            ? null
-            : _explorer.listDirectory(_currentPath!);
+        _snapshot =
+            _currentPath == null ? null : _directorySnapshot(_currentPath!);
       });
       return;
     }
@@ -351,6 +460,92 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         commonPassword: _commonEncryptionPassword,
       );
     });
+  }
+
+  Future<void> _editPathDialog() async {
+    final controller = TextEditingController(text: _currentPath ?? '');
+    final path = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('path.edit')),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(labelText: _language.t('common.path')),
+          onSubmitted: (_) => Navigator.pop(context, controller.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: Text(_language.t('common.open')),
+          ),
+        ],
+      ),
+    );
+    if (path == null || path.trim().isEmpty) return;
+    final type = await FileSystemEntity.type(path.trim(), followLinks: false);
+    if (type == FileSystemEntityType.notFound) {
+      _snack(_language.t('path.unavailable'));
+      return;
+    }
+    if (type == FileSystemEntityType.directory) {
+      _openPath(path.trim());
+    } else {
+      final entry = await _explorer.entryForPath(path.trim());
+      if (entry == null) {
+        _snack(_language.t('path.unavailable'));
+      } else {
+        await _openEntry(entry);
+      }
+    }
+  }
+
+  Future<void> _searchDialog() async {
+    final controller = TextEditingController(text: _searchQuery);
+    final query = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('search.title')),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(labelText: _language.t('search.query')),
+          onSubmitted: (_) => Navigator.pop(context, controller.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, ''),
+            child: Text(_language.t('search.clear')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: Text(_language.t('search.apply')),
+          ),
+        ],
+      ),
+    );
+    if (query == null) return;
+    setState(() => _searchQuery = query.trim());
+  }
+
+  Future<void> _searchFiltersDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('search.filters')),
+        content: Text(_language.t('search.filters.note')),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.ok')),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _importFile() async {
@@ -403,6 +598,18 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     switch (action) {
       case _EntryAction.open:
         await _openEntry(entry);
+      case _EntryAction.createPlain:
+        await _createFile(entry, _CreateFileKind.plain);
+      case _EntryAction.createEncryptedPlain:
+        await _createFile(entry, _CreateFileKind.encryptedPlain);
+      case _EntryAction.createCsv:
+        await _createFile(entry, _CreateFileKind.csv);
+      case _EntryAction.createEncryptedCsv:
+        await _createFile(entry, _CreateFileKind.encryptedCsv);
+      case _EntryAction.createImage:
+        await _createFile(entry, _CreateFileKind.image);
+      case _EntryAction.createEncryptedImage:
+        await _createFile(entry, _CreateFileKind.encryptedImage);
       case _EntryAction.encrypt:
         await _encryptSelectedFile(entry);
       case _EntryAction.decrypt:
@@ -427,6 +634,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         await _renameEntry(entry);
       case _EntryAction.properties:
         await _showEntryProperties(entry);
+      case _EntryAction.send:
+        _snack(_language.t('snack.send.next'));
+      case _EntryAction.unzip:
+        await _unzipEntry(entry);
       case _EntryAction.addFavorite:
       case _EntryAction.removeFavorite:
         await _toggleFavorite(entry);
@@ -453,6 +664,250 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         });
       }
       _snack('${_language.t('snack.pasted')} ${result.path}');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _createFile(ExplorerEntry entry, _CreateFileKind kind) async {
+    final targetDir = entry.isDirectory ? entry.path : _currentPath;
+    if (targetDir == null) return;
+    final spec = await _createFileDialog(kind);
+    if (spec == null) return;
+    try {
+      final file = File('$targetDir${Platform.pathSeparator}${spec.name}');
+      final target = await _availableCreatedFile(file);
+      await target.writeAsBytes(spec.bytes, flush: true);
+      if (kind == _CreateFileKind.encryptedPlain ||
+          kind == _CreateFileKind.encryptedCsv ||
+          kind == _CreateFileKind.encryptedImage) {
+        final password = await _passwordForGeneratedEncryption();
+        if (password == null || password.isEmpty) {
+          await target.delete();
+          return;
+        }
+        final encrypted = await _explorer.encryptFileToDirectory(
+          target,
+          Directory(targetDir),
+          password: password,
+          keyMode: _settings.hasCommonEncryption
+              ? EncryptionKeyMode.common
+              : EncryptionKeyMode.unique,
+          algorithm: _settings.commonEncryptionAlgorithm,
+        );
+        await target.delete();
+        _snack('${_language.t('snack.created')} ${encrypted.path}');
+      } else {
+        _snack('${_language.t('snack.created')} ${target.path}');
+      }
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<_CreatedFileSpec?> _createFileDialog(_CreateFileKind kind) async {
+    final nameController = TextEditingController(
+        text: switch (kind) {
+      _CreateFileKind.plain || _CreateFileKind.encryptedPlain => 'new.txt',
+      _CreateFileKind.csv || _CreateFileKind.encryptedCsv => 'table.csv',
+      _ => 'image.png',
+    });
+    final separatorController = TextEditingController(text: ';');
+    final widthController = TextEditingController(text: '1024');
+    final heightController = TextEditingController(text: '1024');
+    final colorController = TextEditingController(text: '#FFFFFF');
+    var imageFormat = 'png';
+    var transparent = false;
+    final result = await showDialog<_CreatedFileSpec>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(_language.t('explorer.create')),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                TextField(
+                  controller: nameController,
+                  decoration:
+                      InputDecoration(labelText: _language.t('explorer.name')),
+                ),
+                if (kind == _CreateFileKind.csv ||
+                    kind == _CreateFileKind.encryptedCsv)
+                  TextField(
+                    controller: separatorController,
+                    decoration: InputDecoration(
+                      labelText: _language.t('create.csv.separator'),
+                      helperText: _language.t('create.csv.separator.note'),
+                    ),
+                  ),
+                if (kind == _CreateFileKind.image ||
+                    kind == _CreateFileKind.encryptedImage) ...[
+                  DropdownButtonFormField<String>(
+                    initialValue: imageFormat,
+                    decoration: InputDecoration(
+                        labelText: _language.t('create.image.format')),
+                    items: const [
+                      DropdownMenuItem(value: 'png', child: Text('PNG')),
+                      DropdownMenuItem(value: 'jpg', child: Text('JPG')),
+                      DropdownMenuItem(value: 'bmp', child: Text('BMP')),
+                    ],
+                    onChanged: (value) => setDialogState(() {
+                      imageFormat = value ?? 'png';
+                      final name = nameController.text.trim();
+                      nameController.text = name.replaceFirst(
+                        RegExp(r'\.[^.]+$'),
+                        '.$imageFormat',
+                      );
+                    }),
+                  ),
+                  TextField(
+                    controller: widthController,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                        labelText: _language.t('create.image.width')),
+                  ),
+                  TextField(
+                    controller: heightController,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                        labelText: _language.t('create.image.height')),
+                  ),
+                  TextField(
+                    controller: colorController,
+                    decoration: InputDecoration(
+                        labelText: _language.t('create.image.background')),
+                  ),
+                  CheckboxListTile(
+                    value: transparent,
+                    onChanged: imageFormat == 'jpg'
+                        ? null
+                        : (value) =>
+                            setDialogState(() => transparent = value ?? false),
+                    title: Text(_language.t('create.image.transparent')),
+                  ),
+                ],
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_language.t('common.cancel')),
+            ),
+            FilledButton(
+              onPressed: () {
+                final name = nameController.text.trim();
+                if (name.isEmpty) return;
+                final bytes = switch (kind) {
+                  _CreateFileKind.plain ||
+                  _CreateFileKind.encryptedPlain =>
+                    Uint8List.fromList(const []),
+                  _CreateFileKind.csv ||
+                  _CreateFileKind.encryptedCsv =>
+                    Uint8List.fromList(
+                        'Column1${_csvSeparator(separatorController.text)}Column2\r\n'
+                            .codeUnits),
+                  _ => _imageBytes(
+                      width: int.tryParse(widthController.text.trim()) ?? 1024,
+                      height:
+                          int.tryParse(heightController.text.trim()) ?? 1024,
+                      format: imageFormat,
+                      color: colorController.text.trim(),
+                      transparent: transparent,
+                    ),
+                };
+                Navigator.pop(
+                    context, _CreatedFileSpec(name: name, bytes: bytes));
+              },
+              child: Text(_language.t('explorer.create')),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result;
+  }
+
+  String _csvSeparator(String text) {
+    final value = text.trim();
+    if (value.toLowerCase() == r'\t' || value.toLowerCase() == 'tab') {
+      return '\t';
+    }
+    return value.isEmpty ? ';' : value;
+  }
+
+  Uint8List _imageBytes({
+    required int width,
+    required int height,
+    required String format,
+    required String color,
+    required bool transparent,
+  }) {
+    final parsedColor = _parseHexColor(color);
+    final image = img.Image(
+      width: width.clamp(1, 8192),
+      height: height.clamp(1, 8192),
+      numChannels: 4,
+    );
+    final fill = transparent
+        ? img.ColorRgba8(255, 255, 255, 0)
+        : img.ColorRgba8(parsedColor.$1, parsedColor.$2, parsedColor.$3, 255);
+    img.fill(image, color: fill);
+    final bytes = switch (format) {
+      'jpg' || 'jpeg' => img.encodeJpg(image),
+      'bmp' => img.encodeBmp(image),
+      _ => img.encodePng(image),
+    };
+    return Uint8List.fromList(bytes);
+  }
+
+  (int, int, int) _parseHexColor(String value) {
+    final normalized = value.replaceAll('#', '').trim();
+    if (normalized.length == 6) {
+      final parsed = int.tryParse(normalized, radix: 16);
+      if (parsed != null) {
+        return ((parsed >> 16) & 0xFF, (parsed >> 8) & 0xFF, parsed & 0xFF);
+      }
+    }
+    return (255, 255, 255);
+  }
+
+  Future<File> _availableCreatedFile(File desired) async {
+    if (!await desired.exists()) return desired;
+    final parent = desired.parent;
+    final name = basename(desired.path);
+    final dot = name.lastIndexOf('.');
+    final stem = dot <= 0 ? name : name.substring(0, dot);
+    final ext = dot <= 0 ? '' : name.substring(dot);
+    var index = 1;
+    while (true) {
+      final candidate =
+          File('${parent.path}${Platform.pathSeparator}$stem-$index$ext');
+      if (!await candidate.exists()) return candidate;
+      index++;
+    }
+  }
+
+  Future<String?> _passwordForGeneratedEncryption() async {
+    if (_settings.hasCommonEncryption &&
+        !_settings.hasFilePassword &&
+        _commonEncryptionPassword != null &&
+        _commonEncryptionPassword!.isNotEmpty) {
+      return _commonEncryptionPassword;
+    }
+    return _passwordDialog(_language.t('encrypt.password.unique'));
+  }
+
+  Future<void> _unzipEntry(ExplorerEntry entry) async {
+    try {
+      final target = await _explorer.extractZipToDirectory(
+        File(entry.path),
+        Directory(File(entry.path).parent.path),
+      );
+      _snack('${_language.t('snack.unzipped')} ${target.path}');
       await _refresh();
     } catch (error) {
       _snack('${_language.t('snack.operation.error')} $error');
@@ -769,6 +1224,20 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     required bool rememberRecentFiles,
     required int recentSidebarCount,
     required int recentRememberCount,
+    required int favoriteSidebarCount,
+    required bool decryptNamesInExplorer,
+    required bool autoScaleForDpi,
+    required double fileTextScale,
+    required double fileIconScale,
+    required List<String> galleryFolders,
+    required String galleryExclusions,
+    required List<String> musicFolders,
+    required String musicExclusions,
+    required List<String> videoFolders,
+    required String videoExclusions,
+    required List<String> documentFolders,
+    required String documentExclusions,
+    required bool torrentEnabled,
   }) async {
     if (languageCode == 'custom' &&
         (customLanguagePath == null || customLanguagePath.trim().isEmpty)) {
@@ -798,6 +1267,20 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       rememberRecentFiles: rememberRecentFiles,
       recentSidebarCount: recentSidebarCount,
       recentRememberCount: recentRememberCount,
+      favoriteSidebarCount: favoriteSidebarCount,
+      decryptNamesInExplorer: decryptNamesInExplorer,
+      autoScaleForDpi: autoScaleForDpi,
+      fileTextScale: fileTextScale,
+      fileIconScale: fileIconScale,
+      galleryFolders: galleryFolders,
+      galleryExclusions: galleryExclusions,
+      musicFolders: musicFolders,
+      musicExclusions: musicExclusions,
+      videoFolders: videoFolders,
+      videoExclusions: videoExclusions,
+      documentFolders: documentFolders,
+      documentExclusions: documentExclusions,
+      torrentEnabled: torrentEnabled,
     );
     await PlatformServices.setScreenProtection(next.blockScreenCapture);
     final language = await AppLanguage.load(next);
@@ -835,6 +1318,23 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     return _language.t('settings.language.valid');
   }
 
+  Future<String> _installLanguageFile(String path) async {
+    final language = await AppLanguage.fromFile(path);
+    final dir = await AppPaths.languagesDirectory();
+    final target = File(
+      '${dir.path}${Platform.pathSeparator}${language.code}_${basename(path)}',
+    );
+    await File(path).copy(target.path);
+    return '${_language.t('settings.language.installed')} ${target.path}';
+  }
+
+  Future<String> _installPluginZip(String path) async {
+    final dir = await _plugins.installPluginZip(path);
+    final pluginDefs = await _plugins.loadPlugins();
+    setState(() => _pluginDefs = pluginDefs);
+    return '${_language.t('settings.plugin.installed')} ${dir.path}';
+  }
+
   Future<String> _exportLanguageSample() => AppLanguage.exportEnglishSample();
 
   Future<String> _revealCommonEncryptionPassword(String guardPassword) {
@@ -842,6 +1342,20 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       settings: _settings,
       guardPassword: guardPassword,
     );
+  }
+
+  double _effectiveTextScale(BuildContext context) {
+    final dpi = _settings.autoScaleForDpi
+        ? (MediaQuery.of(context).devicePixelRatio / 2.5).clamp(0.9, 1.35)
+        : 1.0;
+    return (_settings.fileTextScale * dpi).clamp(0.75, 2.2);
+  }
+
+  double _effectiveIconScale(BuildContext context) {
+    final dpi = _settings.autoScaleForDpi
+        ? (MediaQuery.of(context).devicePixelRatio / 2.5).clamp(0.9, 1.35)
+        : 1.0;
+    return (_settings.fileIconScale * dpi).clamp(0.75, 2.5);
   }
 
   Future<void> _showAbout() async {
@@ -888,7 +1402,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
             final sidebar = _Sidebar(
               language: _language,
               locations: _locations,
-              favoritePaths: _settings.favoritePaths,
+              favoritePaths: _settings.favoritePaths
+                  .take(_settings.favoriteSidebarCount)
+                  .toList(),
               recentPaths: _settings.rememberRecentFiles
                   ? _settings.recentFilePaths
                       .take(_settings.recentSidebarCount)
@@ -907,7 +1423,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                 }
               },
               onRecentList: _openRecentFiles,
-              onExplorer: () => setState(() => _page = ShellPage.explorer),
+              onExplorer: _openExplorerHome,
+              onMediaSection: _openMediaSection,
               onSettings: () => setState(() => _page = ShellPage.settings),
               onAbout: _showAbout,
             );
@@ -919,6 +1436,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     onClear: _clearRemembered,
                     onRevealCommonKey: _revealCommonEncryptionPassword,
                     onValidateLanguageFile: _validateLanguageFile,
+                    onInstallLanguageFile: _installLanguageFile,
+                    onInstallPluginZip: _installPluginZip,
                     onExportLanguageSample: _exportLanguageSample,
                   )
                 : _ExplorerView(
@@ -935,9 +1454,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     onExport: _exportFile,
                     previewWidth: _previewWidth,
                     previewVisible: _previewVisible,
+                    fileTextScale: _effectiveTextScale(context),
+                    fileIconScale: _effectiveIconScale(context),
                     onPreviewResize: (delta) => setState(
                       () => _previewWidth =
-                          (_previewWidth - delta).clamp(280.0, 760.0),
+                          (_previewWidth - delta).clamp(280.0, 1800.0),
                     ),
                     onTogglePreview: () =>
                         setState(() => _previewVisible = !_previewVisible),
@@ -947,6 +1468,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     canPaste: _clipboardPath != null,
                     favoritePaths: _settings.favoritePaths,
                     recentPaths: _settings.recentFilePaths,
+                    searchQuery: _searchQuery,
+                    onPathEdit: _editPathDialog,
+                    onSearch: _searchDialog,
+                    onSearchFilters: _searchFiltersDialog,
                     onEntryAction: _handleEntryAction,
                     onRemoveRecent: _removeRecentPath,
                     onToggleFavorite: _toggleFavorite,
@@ -1365,12 +1890,20 @@ enum _CommonSetupDecision { cancel, unique, settings }
 
 enum _EntryAction {
   open,
+  createPlain,
+  createEncryptedPlain,
+  createCsv,
+  createEncryptedCsv,
+  createImage,
+  createEncryptedImage,
   copy,
   cut,
   paste,
   delete,
   rename,
   properties,
+  send,
+  unzip,
   addFavorite,
   removeFavorite,
   removeRecent,
@@ -1494,6 +2027,7 @@ class _Sidebar extends StatelessWidget {
     required this.onRecentPath,
     required this.onRecentList,
     required this.onExplorer,
+    required this.onMediaSection,
     required this.onSettings,
     required this.onAbout,
   });
@@ -1509,6 +2043,7 @@ class _Sidebar extends StatelessWidget {
   final ValueChanged<String> onRecentPath;
   final VoidCallback onRecentList;
   final VoidCallback onExplorer;
+  final ValueChanged<MediaSection> onMediaSection;
   final VoidCallback onSettings;
   final VoidCallback onAbout;
 
@@ -1545,6 +2080,36 @@ class _Sidebar extends StatelessWidget {
           language.t('nav.explorer'),
           page == ShellPage.explorer,
           onExplorer,
+        ),
+        _nav(
+          Icons.photo_library_outlined,
+          language.t('nav.gallery'),
+          page == ShellPage.gallery,
+          () => onMediaSection(MediaSection.gallery),
+        ),
+        _nav(
+          Icons.music_note_outlined,
+          language.t('nav.music'),
+          page == ShellPage.music,
+          () => onMediaSection(MediaSection.music),
+        ),
+        _nav(
+          Icons.movie_outlined,
+          language.t('nav.video'),
+          page == ShellPage.video,
+          () => onMediaSection(MediaSection.video),
+        ),
+        _nav(
+          Icons.description_outlined,
+          language.t('nav.documents'),
+          page == ShellPage.documents,
+          () => onMediaSection(MediaSection.documents),
+        ),
+        _nav(
+          Icons.hub_outlined,
+          language.t('nav.torrent'),
+          page == ShellPage.torrent,
+          () => onMediaSection(MediaSection.torrent),
         ),
         _nav(
           Icons.tune,
@@ -1679,6 +2244,8 @@ class _ExplorerView extends StatelessWidget {
     required this.onExport,
     required this.previewWidth,
     required this.previewVisible,
+    required this.fileTextScale,
+    required this.fileIconScale,
     required this.onPreviewResize,
     required this.onTogglePreview,
     required this.onOpenPassword,
@@ -1687,6 +2254,10 @@ class _ExplorerView extends StatelessWidget {
     required this.canPaste,
     required this.favoritePaths,
     required this.recentPaths,
+    required this.searchQuery,
+    required this.onPathEdit,
+    required this.onSearch,
+    required this.onSearchFilters,
     required this.onEntryAction,
     required this.onRemoveRecent,
     required this.onToggleFavorite,
@@ -1704,6 +2275,8 @@ class _ExplorerView extends StatelessWidget {
   final VoidCallback onExport;
   final double previewWidth;
   final bool previewVisible;
+  final double fileTextScale;
+  final double fileIconScale;
   final ValueChanged<double> onPreviewResize;
   final VoidCallback onTogglePreview;
   final VoidCallback onOpenPassword;
@@ -1712,6 +2285,10 @@ class _ExplorerView extends StatelessWidget {
   final bool canPaste;
   final List<String> favoritePaths;
   final List<String> recentPaths;
+  final String searchQuery;
+  final VoidCallback onPathEdit;
+  final VoidCallback onSearch;
+  final VoidCallback onSearchFilters;
   final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
   final ValueChanged<String> onRemoveRecent;
   final ValueChanged<ExplorerEntry> onToggleFavorite;
@@ -1743,21 +2320,34 @@ class _ExplorerView extends StatelessWidget {
             ),
             SizedBox(
               width: 420,
-              child: Text(
-                currentPath ?? language.t('explorer.choose.location'),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              child: GestureDetector(
+                onDoubleTap: onPathEdit,
+                child: Text(
+                  currentPath ?? language.t('explorer.choose.location'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
             ),
-            FilledButton.icon(
+            IconButton.filled(
               onPressed: onImport,
               icon: const Icon(Icons.file_upload_outlined),
-              label: Text(language.t('explorer.upload')),
+              tooltip: language.t('explorer.upload'),
             ),
-            OutlinedButton.icon(
+            IconButton.outlined(
               onPressed: onExport,
               icon: const Icon(Icons.file_download_outlined),
-              label: Text(language.t('explorer.download')),
+              tooltip: language.t('explorer.download'),
+            ),
+            IconButton(
+              onPressed: onSearch,
+              icon: Icon(searchQuery.isEmpty ? Icons.search : Icons.search_off),
+              tooltip: language.t('search.title'),
+            ),
+            IconButton(
+              onPressed: onSearchFilters,
+              icon: const Icon(Icons.tune_outlined),
+              tooltip: language.t('search.filters'),
             ),
             IconButton(
               onPressed: onTogglePreview,
@@ -1779,10 +2369,13 @@ class _ExplorerView extends StatelessWidget {
             language: language,
             snapshot: snapshot,
             selected: selected,
+            fileTextScale: fileTextScale,
+            fileIconScale: fileIconScale,
             onEntry: onEntry,
             canPaste: canPaste,
             favoritePaths: favoritePaths,
             recentPaths: recentPaths,
+            searchQuery: searchQuery,
             onEntryAction: onEntryAction,
             onRemoveRecent: onRemoveRecent,
             onToggleFavorite: onToggleFavorite,
@@ -1823,10 +2416,13 @@ class _EntryList extends StatelessWidget {
     required this.language,
     required this.snapshot,
     required this.selected,
+    required this.fileTextScale,
+    required this.fileIconScale,
     required this.onEntry,
     required this.canPaste,
     required this.favoritePaths,
     required this.recentPaths,
+    required this.searchQuery,
     required this.onEntryAction,
     required this.onRemoveRecent,
     required this.onToggleFavorite,
@@ -1835,10 +2431,13 @@ class _EntryList extends StatelessWidget {
   final AppLanguage language;
   final Future<DirectorySnapshot>? snapshot;
   final ExplorerEntry? selected;
+  final double fileTextScale;
+  final double fileIconScale;
   final Future<void> Function(ExplorerEntry) onEntry;
   final bool canPaste;
   final List<String> favoritePaths;
   final List<String> recentPaths;
+  final String searchQuery;
   final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
   final ValueChanged<String> onRemoveRecent;
   final ValueChanged<ExplorerEntry> onToggleFavorite;
@@ -1864,15 +2463,22 @@ class _EntryList extends StatelessWidget {
             ),
           );
         }
-        if (data.entries.isEmpty) {
+        final entries = searchQuery.isEmpty
+            ? data.entries
+            : data.entries
+                .where((entry) => entry.name
+                    .toLowerCase()
+                    .contains(searchQuery.toLowerCase()))
+                .toList();
+        if (entries.isEmpty) {
           return Center(child: Text(language.t('explorer.empty')));
         }
         return ListView.separated(
           padding: const EdgeInsets.all(12),
-          itemCount: data.entries.length,
+          itemCount: entries.length,
           separatorBuilder: (_, __) => const Divider(height: 1),
           itemBuilder: (context, i) {
-            final entry = data.entries[i];
+            final entry = entries[i];
             return GestureDetector(
               onSecondaryTapDown: (details) =>
                   _showEntryContextMenu(context, entry, details.globalPosition),
@@ -1882,11 +2488,16 @@ class _EntryList extends StatelessWidget {
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
-                leading: Icon(_icon(entry), color: _color(entry)),
+                leading: Icon(
+                  _icon(entry),
+                  color: _color(entry),
+                  size: 24 * fileIconScale,
+                ),
                 title: Text(
                   entry.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 14 * fileTextScale),
                 ),
                 subtitle: Text(entry.exists
                     ? '${_size(entry)} - ${_date(entry.modifiedAt)}'
@@ -1944,6 +2555,43 @@ class _EntryList extends StatelessWidget {
         value: _EntryAction.open,
         child: Text(language.t('common.open')),
       ),
+      const PopupMenuDivider(),
+      PopupMenuItem(
+        value: _EntryAction.createPlain,
+        enabled: entry.exists && entry.isDirectory,
+        child: Text(
+            '${language.t('explorer.create')} > ${language.t('create.plain')}'),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.createEncryptedPlain,
+        enabled: entry.exists && entry.isDirectory,
+        child: Text(
+            '${language.t('explorer.create')} > ${language.t('create.encrypted.plain')}'),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.createCsv,
+        enabled: entry.exists && entry.isDirectory,
+        child: Text(
+            '${language.t('explorer.create')} > ${language.t('create.csv')}'),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.createEncryptedCsv,
+        enabled: entry.exists && entry.isDirectory,
+        child: Text(
+            '${language.t('explorer.create')} > ${language.t('create.encrypted.csv')}'),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.createImage,
+        enabled: entry.exists && entry.isDirectory,
+        child: Text(
+            '${language.t('explorer.create')} > ${language.t('create.image')}'),
+      ),
+      PopupMenuItem(
+        value: _EntryAction.createEncryptedImage,
+        enabled: entry.exists && entry.isDirectory,
+        child: Text(
+            '${language.t('explorer.create')} > ${language.t('create.encrypted.image')}'),
+      ),
       PopupMenuItem(
         value:
             isFavorite ? _EntryAction.removeFavorite : _EntryAction.addFavorite,
@@ -1988,7 +2636,19 @@ class _EntryList extends StatelessWidget {
         value: _EntryAction.properties,
         child: Text(language.t('explorer.properties')),
       ),
+      PopupMenuItem(
+        value: _EntryAction.send,
+        enabled: entry.exists,
+        child: Text(language.t('explorer.send')),
+      ),
       if (!entry.isDirectory) const PopupMenuDivider(),
+      if (!entry.isDirectory &&
+          FileViewerService.extensionForName(entry.path) == '.zip')
+        PopupMenuItem(
+          value: _EntryAction.unzip,
+          enabled: entry.exists,
+          child: Text(language.t('explorer.unzip')),
+        ),
       if (!entry.isDirectory && !entry.isEncrypted)
         PopupMenuItem(
           value: _EntryAction.encrypt,
@@ -2027,6 +2687,12 @@ class _EntryList extends StatelessWidget {
     switch (action) {
       case _EntryAction.open:
         onEntry(entry);
+      case _EntryAction.createPlain:
+      case _EntryAction.createEncryptedPlain:
+      case _EntryAction.createCsv:
+      case _EntryAction.createEncryptedCsv:
+      case _EntryAction.createImage:
+      case _EntryAction.createEncryptedImage:
       case _EntryAction.encrypt:
       case _EntryAction.decrypt:
       case _EntryAction.copy:
@@ -2035,6 +2701,8 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.delete:
       case _EntryAction.rename:
       case _EntryAction.properties:
+      case _EntryAction.send:
+      case _EntryAction.unzip:
       case _EntryAction.folderContainer:
       case _EntryAction.folderEncrypt:
       case _EntryAction.folderDecrypt:
@@ -2242,6 +2910,8 @@ class _SettingsView extends StatefulWidget {
     required this.onClear,
     required this.onRevealCommonKey,
     required this.onValidateLanguageFile,
+    required this.onInstallLanguageFile,
+    required this.onInstallPluginZip,
     required this.onExportLanguageSample,
   });
 
@@ -2266,10 +2936,26 @@ class _SettingsView extends StatefulWidget {
     required bool rememberRecentFiles,
     required int recentSidebarCount,
     required int recentRememberCount,
+    required int favoriteSidebarCount,
+    required bool decryptNamesInExplorer,
+    required bool autoScaleForDpi,
+    required double fileTextScale,
+    required double fileIconScale,
+    required List<String> galleryFolders,
+    required String galleryExclusions,
+    required List<String> musicFolders,
+    required String musicExclusions,
+    required List<String> videoFolders,
+    required String videoExclusions,
+    required List<String> documentFolders,
+    required String documentExclusions,
+    required bool torrentEnabled,
   }) onSave;
   final Future<void> Function() onClear;
   final Future<String> Function(String guardPassword) onRevealCommonKey;
   final Future<String> Function(String path) onValidateLanguageFile;
+  final Future<String> Function(String path) onInstallLanguageFile;
+  final Future<String> Function(String path) onInstallPluginZip;
   final Future<String> Function() onExportLanguageSample;
 
   @override
@@ -2288,12 +2974,27 @@ class _SettingsViewState extends State<_SettingsView> {
   late final TextEditingController _graceSeconds;
   late final TextEditingController _recentSidebarCount;
   late final TextEditingController _recentRememberCount;
+  late final TextEditingController _favoriteSidebarCount;
+  late final TextEditingController _fileTextScale;
+  late final TextEditingController _fileIconScale;
+  late final TextEditingController _galleryFolders;
+  late final TextEditingController _galleryExclusions;
+  late final TextEditingController _musicFolders;
+  late final TextEditingController _musicExclusions;
+  late final TextEditingController _videoFolders;
+  late final TextEditingController _videoExclusions;
+  late final TextEditingController _documentFolders;
+  late final TextEditingController _documentExclusions;
   late final TextEditingController _languagePath;
+  late final TextEditingController _pluginZipPath;
   late final TextEditingController _associations;
   late bool _separate;
   late bool _remember;
   late bool _wipe;
   late bool _rememberRecent;
+  late bool _decryptNamesInExplorer;
+  late bool _autoScaleForDpi;
+  late bool _torrentEnabled;
   late bool _blockScreenCapture;
   late String _languageCode;
   late String _commonAlgorithm;
@@ -2306,6 +3007,9 @@ class _SettingsViewState extends State<_SettingsView> {
     _remember = widget.settings.rememberFilePasswords;
     _wipe = widget.settings.wipeSavedPasswordsOnFailedLogin;
     _rememberRecent = widget.settings.rememberRecentFiles;
+    _decryptNamesInExplorer = widget.settings.decryptNamesInExplorer;
+    _autoScaleForDpi = widget.settings.autoScaleForDpi;
+    _torrentEnabled = widget.settings.torrentEnabled;
     _blockScreenCapture = widget.settings.blockScreenCapture;
     _commonAlgorithm = widget.settings.commonEncryptionAlgorithm;
     _commonKeyFile = TextEditingController(
@@ -2320,10 +3024,44 @@ class _SettingsViewState extends State<_SettingsView> {
     _recentRememberCount = TextEditingController(
       text: '${widget.settings.recentRememberCount}',
     );
+    _favoriteSidebarCount = TextEditingController(
+      text: '${widget.settings.favoriteSidebarCount}',
+    );
+    _fileTextScale = TextEditingController(
+      text: widget.settings.fileTextScale.toStringAsFixed(2),
+    );
+    _fileIconScale = TextEditingController(
+      text: widget.settings.fileIconScale.toStringAsFixed(2),
+    );
+    _galleryFolders = TextEditingController(
+      text: widget.settings.galleryFolders.join('\n'),
+    );
+    _galleryExclusions = TextEditingController(
+      text: widget.settings.galleryExclusions,
+    );
+    _musicFolders = TextEditingController(
+      text: widget.settings.musicFolders.join('\n'),
+    );
+    _musicExclusions = TextEditingController(
+      text: widget.settings.musicExclusions,
+    );
+    _videoFolders = TextEditingController(
+      text: widget.settings.videoFolders.join('\n'),
+    );
+    _videoExclusions = TextEditingController(
+      text: widget.settings.videoExclusions,
+    );
+    _documentFolders = TextEditingController(
+      text: widget.settings.documentFolders.join('\n'),
+    );
+    _documentExclusions = TextEditingController(
+      text: widget.settings.documentExclusions,
+    );
     _languageCode = widget.settings.languageCode;
     _languagePath = TextEditingController(
       text: widget.settings.customLanguagePath ?? '',
     );
+    _pluginZipPath = TextEditingController();
     _associations = TextEditingController(
       text: widget.settings.extensionAssociations.entries
           .map((entry) => '${entry.key}=${entry.value}')
@@ -2344,7 +3082,19 @@ class _SettingsViewState extends State<_SettingsView> {
     _graceSeconds.dispose();
     _recentSidebarCount.dispose();
     _recentRememberCount.dispose();
+    _favoriteSidebarCount.dispose();
+    _fileTextScale.dispose();
+    _fileIconScale.dispose();
+    _galleryFolders.dispose();
+    _galleryExclusions.dispose();
+    _musicFolders.dispose();
+    _musicExclusions.dispose();
+    _videoFolders.dispose();
+    _videoExclusions.dispose();
+    _documentFolders.dispose();
+    _documentExclusions.dispose();
     _languagePath.dispose();
+    _pluginZipPath.dispose();
     _associations.dispose();
     super.dispose();
   }
@@ -2516,6 +3266,56 @@ class _SettingsViewState extends State<_SettingsView> {
             labelText: language.t('settings.recent.remember.count'),
           ),
         ),
+        TextField(
+          controller: _favoriteSidebarCount,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.favorite.sidebar.count'),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 12),
+      _settingsCard(context, language.t('settings.explorer.view'), [
+        SwitchListTile(
+          value: _decryptNamesInExplorer,
+          onChanged: (v) => setState(() => _decryptNamesInExplorer = v),
+          title: Text(language.t('settings.decrypt.names')),
+        ),
+        SwitchListTile(
+          value: _autoScaleForDpi,
+          onChanged: (v) => setState(() => _autoScaleForDpi = v),
+          title: Text(language.t('settings.auto.dpi')),
+        ),
+        TextField(
+          controller: _fileTextScale,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.file.text.scale'),
+          ),
+        ),
+        TextField(
+          controller: _fileIconScale,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.file.icon.scale'),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 12),
+      _settingsCard(context, language.t('settings.media.sections'), [
+        _folderField(language.t('nav.gallery'), _galleryFolders),
+        _folderField(language.t('settings.exclusions'), _galleryExclusions),
+        _folderField(language.t('nav.music'), _musicFolders),
+        _folderField(language.t('settings.exclusions'), _musicExclusions),
+        _folderField(language.t('nav.video'), _videoFolders),
+        _folderField(language.t('settings.exclusions'), _videoExclusions),
+        _folderField(language.t('nav.documents'), _documentFolders),
+        _folderField(language.t('settings.exclusions'), _documentExclusions),
+        SwitchListTile(
+          value: _torrentEnabled,
+          onChanged: (v) => setState(() => _torrentEnabled = v),
+          title: Text(language.t('settings.torrent.enabled')),
+        ),
       ]),
       const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.screen'), [
@@ -2565,6 +3365,11 @@ class _SettingsViewState extends State<_SettingsView> {
             label: Text(language.t('settings.language.validate')),
           ),
           OutlinedButton.icon(
+            onPressed: _installLanguage,
+            icon: const Icon(Icons.add_circle_outline),
+            label: Text(language.t('settings.language.install')),
+          ),
+          OutlinedButton.icon(
             onPressed: _exportSample,
             icon: const Icon(Icons.file_download_outlined),
             label: Text(language.t('settings.language.export')),
@@ -2580,6 +3385,22 @@ class _SettingsViewState extends State<_SettingsView> {
           decoration: InputDecoration(
             hintText: language.t('settings.associations.hint'),
           ),
+        ),
+      ]),
+      const SizedBox(height: 12),
+      _settingsCard(context, language.t('settings.plugins'), [
+        Text(language.t('settings.plugins.note')),
+        TextField(
+          controller: _pluginZipPath,
+          decoration: InputDecoration(
+            labelText: language.t('settings.plugin.zip.path'),
+          ),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: _installPlugin,
+          icon: const Icon(Icons.extension_outlined),
+          label: Text(language.t('settings.plugin.install')),
         ),
       ]),
       const SizedBox(height: 16),
@@ -2611,6 +3432,17 @@ class _SettingsViewState extends State<_SettingsView> {
             const SizedBox(height: 12),
             ...children,
           ]),
+        ),
+      );
+
+  Widget _folderField(String label, TextEditingController controller) =>
+      TextField(
+        controller: controller,
+        minLines: 1,
+        maxLines: 4,
+        decoration: InputDecoration(
+          labelText: label,
+          helperText: widget.language.t('settings.paths.one.per.line'),
         ),
       );
 
@@ -2654,6 +3486,21 @@ class _SettingsViewState extends State<_SettingsView> {
         recentSidebarCount: int.tryParse(_recentSidebarCount.text.trim()) ?? 5,
         recentRememberCount:
             int.tryParse(_recentRememberCount.text.trim()) ?? 50,
+        favoriteSidebarCount:
+            int.tryParse(_favoriteSidebarCount.text.trim()) ?? 10,
+        decryptNamesInExplorer: _decryptNamesInExplorer,
+        autoScaleForDpi: _autoScaleForDpi,
+        fileTextScale: double.tryParse(_fileTextScale.text.trim()) ?? 1.0,
+        fileIconScale: double.tryParse(_fileIconScale.text.trim()) ?? 1.0,
+        galleryFolders: _parseLines(_galleryFolders.text),
+        galleryExclusions: _galleryExclusions.text,
+        musicFolders: _parseLines(_musicFolders.text),
+        musicExclusions: _musicExclusions.text,
+        videoFolders: _parseLines(_videoFolders.text),
+        videoExclusions: _videoExclusions.text,
+        documentFolders: _parseLines(_documentFolders.text),
+        documentExclusions: _documentExclusions.text,
+        torrentEnabled: _torrentEnabled,
       );
     } catch (error) {
       _snack('${widget.language.t('settings.language.invalid')} $error');
@@ -2666,6 +3513,28 @@ class _SettingsViewState extends State<_SettingsView> {
     try {
       final message = await widget.onValidateLanguageFile(
         _languagePath.text.trim(),
+      );
+      _snack(message);
+    } catch (error) {
+      _snack('${widget.language.t('settings.language.invalid')} $error');
+    }
+  }
+
+  Future<void> _installLanguage() async {
+    try {
+      final message = await widget.onInstallLanguageFile(
+        _languagePath.text.trim(),
+      );
+      _snack(message);
+    } catch (error) {
+      _snack('${widget.language.t('settings.language.invalid')} $error');
+    }
+  }
+
+  Future<void> _installPlugin() async {
+    try {
+      final message = await widget.onInstallPluginZip(
+        _pluginZipPath.text.trim(),
       );
       _snack(message);
     } catch (error) {
@@ -2757,6 +3626,12 @@ class _SettingsViewState extends State<_SettingsView> {
     }
     return result;
   }
+
+  List<String> _parseLines(String text) => text
+      .split(RegExp(r'[\r\n]+'))
+      .map((line) => line.trim())
+      .where((line) => line.isNotEmpty)
+      .toList();
 
   void _snack(String text) {
     if (mounted) {

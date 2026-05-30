@@ -32,6 +32,20 @@ class SecuritySettings {
     this.recentSidebarCount = 5,
     this.recentRememberCount = 50,
     this.recentFilePaths = const <String>[],
+    this.favoriteSidebarCount = 10,
+    this.decryptNamesInExplorer = true,
+    this.autoScaleForDpi = true,
+    this.fileTextScale = 1.0,
+    this.fileIconScale = 1.0,
+    this.galleryFolders = const <String>[],
+    this.galleryExclusions = '',
+    this.musicFolders = const <String>[],
+    this.musicExclusions = '',
+    this.videoFolders = const <String>[],
+    this.videoExclusions = '',
+    this.documentFolders = const <String>[],
+    this.documentExclusions = '',
+    this.torrentEnabled = true,
   });
 
   final String? appPasswordSalt;
@@ -58,6 +72,20 @@ class SecuritySettings {
   final int recentSidebarCount;
   final int recentRememberCount;
   final List<String> recentFilePaths;
+  final int favoriteSidebarCount;
+  final bool decryptNamesInExplorer;
+  final bool autoScaleForDpi;
+  final double fileTextScale;
+  final double fileIconScale;
+  final List<String> galleryFolders;
+  final String galleryExclusions;
+  final List<String> musicFolders;
+  final String musicExclusions;
+  final List<String> videoFolders;
+  final String videoExclusions;
+  final List<String> documentFolders;
+  final String documentExclusions;
+  final bool torrentEnabled;
 
   bool get hasAppPassword =>
       appPasswordSalt != null && appPasswordDigest != null;
@@ -97,6 +125,20 @@ class SecuritySettings {
     int? recentSidebarCount,
     int? recentRememberCount,
     List<String>? recentFilePaths,
+    int? favoriteSidebarCount,
+    bool? decryptNamesInExplorer,
+    bool? autoScaleForDpi,
+    double? fileTextScale,
+    double? fileIconScale,
+    List<String>? galleryFolders,
+    String? galleryExclusions,
+    List<String>? musicFolders,
+    String? musicExclusions,
+    List<String>? videoFolders,
+    String? videoExclusions,
+    List<String>? documentFolders,
+    String? documentExclusions,
+    bool? torrentEnabled,
   }) {
     return SecuritySettings(
       appPasswordSalt:
@@ -146,6 +188,21 @@ class SecuritySettings {
       recentSidebarCount: recentSidebarCount ?? this.recentSidebarCount,
       recentRememberCount: recentRememberCount ?? this.recentRememberCount,
       recentFilePaths: recentFilePaths ?? this.recentFilePaths,
+      favoriteSidebarCount: favoriteSidebarCount ?? this.favoriteSidebarCount,
+      decryptNamesInExplorer:
+          decryptNamesInExplorer ?? this.decryptNamesInExplorer,
+      autoScaleForDpi: autoScaleForDpi ?? this.autoScaleForDpi,
+      fileTextScale: fileTextScale ?? this.fileTextScale,
+      fileIconScale: fileIconScale ?? this.fileIconScale,
+      galleryFolders: galleryFolders ?? this.galleryFolders,
+      galleryExclusions: galleryExclusions ?? this.galleryExclusions,
+      musicFolders: musicFolders ?? this.musicFolders,
+      musicExclusions: musicExclusions ?? this.musicExclusions,
+      videoFolders: videoFolders ?? this.videoFolders,
+      videoExclusions: videoExclusions ?? this.videoExclusions,
+      documentFolders: documentFolders ?? this.documentFolders,
+      documentExclusions: documentExclusions ?? this.documentExclusions,
+      torrentEnabled: torrentEnabled ?? this.torrentEnabled,
     );
   }
 
@@ -155,6 +212,13 @@ class SecuritySettings {
     final associations = json['extensionAssociations'];
     final favorites = json['favoritePaths'];
     final recent = json['recentFilePaths'];
+    List<String> listField(String key) {
+      final value = json[key];
+      return value is List
+          ? value.map((item) => item.toString()).toList()
+          : const <String>[];
+    }
+
     return SecuritySettings(
       appPasswordSalt: json['appPasswordSalt'] as String?,
       appPasswordDigest: json['appPasswordDigest'] as String?,
@@ -195,6 +259,20 @@ class SecuritySettings {
       recentFilePaths: recent is List
           ? recent.map((item) => item.toString()).toList()
           : const <String>[],
+      favoriteSidebarCount: json['favoriteSidebarCount'] as int? ?? 10,
+      decryptNamesInExplorer: json['decryptNamesInExplorer'] as bool? ?? true,
+      autoScaleForDpi: json['autoScaleForDpi'] as bool? ?? true,
+      fileTextScale: (json['fileTextScale'] as num?)?.toDouble() ?? 1.0,
+      fileIconScale: (json['fileIconScale'] as num?)?.toDouble() ?? 1.0,
+      galleryFolders: listField('galleryFolders'),
+      galleryExclusions: json['galleryExclusions'] as String? ?? '',
+      musicFolders: listField('musicFolders'),
+      musicExclusions: json['musicExclusions'] as String? ?? '',
+      videoFolders: listField('videoFolders'),
+      videoExclusions: json['videoExclusions'] as String? ?? '',
+      documentFolders: listField('documentFolders'),
+      documentExclusions: json['documentExclusions'] as String? ?? '',
+      torrentEnabled: json['torrentEnabled'] as bool? ?? true,
     );
   }
 
@@ -224,6 +302,20 @@ class SecuritySettings {
       'recentSidebarCount': recentSidebarCount,
       'recentRememberCount': recentRememberCount,
       'recentFilePaths': recentFilePaths,
+      'favoriteSidebarCount': favoriteSidebarCount,
+      'decryptNamesInExplorer': decryptNamesInExplorer,
+      'autoScaleForDpi': autoScaleForDpi,
+      'fileTextScale': fileTextScale,
+      'fileIconScale': fileIconScale,
+      'galleryFolders': galleryFolders,
+      'galleryExclusions': galleryExclusions,
+      'musicFolders': musicFolders,
+      'musicExclusions': musicExclusions,
+      'videoFolders': videoFolders,
+      'videoExclusions': videoExclusions,
+      'documentFolders': documentFolders,
+      'documentExclusions': documentExclusions,
+      'torrentEnabled': torrentEnabled,
     };
   }
 }
@@ -353,6 +445,20 @@ class SecuritySettingsRepository {
     bool? rememberRecentFiles,
     int? recentSidebarCount,
     int? recentRememberCount,
+    int? favoriteSidebarCount,
+    bool? decryptNamesInExplorer,
+    bool? autoScaleForDpi,
+    double? fileTextScale,
+    double? fileIconScale,
+    List<String>? galleryFolders,
+    String? galleryExclusions,
+    List<String>? musicFolders,
+    String? musicExclusions,
+    List<String>? videoFolders,
+    String? videoExclusions,
+    List<String>? documentFolders,
+    String? documentExclusions,
+    bool? torrentEnabled,
   }) async {
     var next = current.copyWith(
       useSeparateFilePassword: useSeparateFilePassword,
@@ -373,6 +479,20 @@ class SecuritySettingsRepository {
       rememberRecentFiles: rememberRecentFiles,
       recentSidebarCount: recentSidebarCount,
       recentRememberCount: recentRememberCount,
+      favoriteSidebarCount: favoriteSidebarCount,
+      decryptNamesInExplorer: decryptNamesInExplorer,
+      autoScaleForDpi: autoScaleForDpi,
+      fileTextScale: fileTextScale,
+      fileIconScale: fileIconScale,
+      galleryFolders: galleryFolders,
+      galleryExclusions: galleryExclusions,
+      musicFolders: musicFolders,
+      musicExclusions: musicExclusions,
+      videoFolders: videoFolders,
+      videoExclusions: videoExclusions,
+      documentFolders: documentFolders,
+      documentExclusions: documentExclusions,
+      torrentEnabled: torrentEnabled,
       recentFilePaths: rememberRecentFiles == false
           ? const <String>[]
           : current.recentFilePaths

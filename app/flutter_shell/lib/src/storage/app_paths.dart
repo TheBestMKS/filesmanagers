@@ -37,6 +37,24 @@ class AppPaths {
     return dir;
   }
 
+  static Future<Directory> languagesDirectory() async {
+    final appData = await appDataDirectory();
+    final dir = Directory('${appData.path}${Platform.pathSeparator}languages');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  static Future<Directory> torrentsDirectory() async {
+    final appData = await appDataDirectory();
+    final dir = Directory('${appData.path}${Platform.pathSeparator}torrents');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
   static String _firstEnvironmentPath(List<String> keys) {
     for (final key in keys) {
       final value = Platform.environment[key];
