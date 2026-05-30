@@ -282,18 +282,22 @@ class FileExplorerRepository {
     for (final root in roots.where((item) => item.trim().isNotEmpty)) {
       final directory = Directory(root.trim());
       if (!await directory.exists()) continue;
-      await for (final entity
-          in directory.list(recursive: true, followLinks: false)) {
-        if (entity is! File) continue;
-        final name = basename(entity.path);
-        if (!extensions.contains(FileViewerService.extensionForName(name))) {
-          continue;
+      try {
+        await for (final entity
+            in directory.list(recursive: true, followLinks: false)) {
+          if (entity is! File) continue;
+          final name = basename(entity.path);
+          if (!extensions.contains(FileViewerService.extensionForName(name))) {
+            continue;
+          }
+          if (_isExcluded(entity.path, name, rules)) {
+            continue;
+          }
+          final entry = await entryForPath(entity.path);
+          if (entry != null) entries.add(entry);
         }
-        if (_isExcluded(entity.path, name, rules)) {
-          continue;
-        }
-        final entry = await entryForPath(entity.path);
-        if (entry != null) entries.add(entry);
+      } on FileSystemException {
+        continue;
       }
     }
     entries

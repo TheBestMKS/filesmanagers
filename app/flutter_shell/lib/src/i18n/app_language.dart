@@ -238,6 +238,8 @@ class AppLanguage {
     'settings.explorer.view': 'Explorer view',
     'settings.decrypt.names':
         'Decrypt encrypted names in the explorer when possible',
+    'settings.fullscreen.hidden.preview.tap':
+        'Open files full-window by single tap when preview pane is hidden',
     'settings.auto.dpi': 'Auto-adjust file text and icon size by device DPI',
     'settings.file.text.scale': 'File text scale',
     'settings.file.icon.scale': 'File icon scale',
@@ -246,6 +248,12 @@ class AppLanguage {
     'settings.paths.one.per.line': 'One path, folder, or mask per line.',
     'settings.torrent.enabled': 'Enable torrent section',
     'settings.torrent.disabled': 'Torrent section is disabled in settings.',
+    'settings.android.storage.request': 'Request Android file access again',
+    'android.storage.title': 'File access is limited',
+    'android.storage.body':
+        'SecureVault can show more folders and media if Android grants media or all-files access. You can decline now and request it later in settings.',
+    'android.storage.open': 'Open permissions',
+    'android.storage.requested': 'Android permission request opened.',
     'settings.wipe.failed': 'Delete remembered passwords on failed login',
     'settings.clear.now': 'Delete remembered passwords now',
     'settings.screen': 'Screen protection',
@@ -528,6 +536,8 @@ class AppLanguage {
     'settings.explorer.view': 'Вид проводника',
     'settings.decrypt.names':
         'Расшифровывать имена в проводнике, когда это возможно',
+    'settings.fullscreen.hidden.preview.tap':
+        'Открывать файлы во все окно одиночным нажатием, если область просмотра скрыта',
     'settings.auto.dpi':
         'Автоматически подстраивать размер текста и иконок под DPI устройства',
     'settings.file.text.scale': 'Масштаб текста файлов',
@@ -537,6 +547,13 @@ class AppLanguage {
     'settings.paths.one.per.line': 'Один путь, папка или маска в строке.',
     'settings.torrent.enabled': 'Включить раздел торрентов',
     'settings.torrent.disabled': 'Раздел торрентов отключен в настройках.',
+    'settings.android.storage.request':
+        'Повторно запросить доступ к файлам Android',
+    'android.storage.title': 'Доступ к файлам ограничен',
+    'android.storage.body':
+        'SecureVault сможет показать больше папок и медиафайлов, если Android предоставит доступ к медиа или ко всем файлам. Можно отказаться сейчас и повторно запросить доступ в настройках.',
+    'android.storage.open': 'Открыть разрешения',
+    'android.storage.requested': 'Запрос разрешений Android открыт.',
     'settings.wipe.failed': 'Удалять сохранённые пароли при неправильном входе',
     'settings.clear.now': 'Удалить сохранённые пароли сейчас',
     'settings.screen': 'Защита экрана',

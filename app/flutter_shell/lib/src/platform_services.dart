@@ -2,6 +2,50 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+class AndroidStorageAccessStatus {
+  const AndroidStorageAccessStatus({
+    required this.isAndroid,
+    required this.sdkInt,
+    required this.hasAllFilesAccess,
+    required this.hasMediaImages,
+    required this.hasMediaVideo,
+    required this.hasMediaAudio,
+  });
+
+  final bool isAndroid;
+  final int sdkInt;
+  final bool hasAllFilesAccess;
+  final bool hasMediaImages;
+  final bool hasMediaVideo;
+  final bool hasMediaAudio;
+
+  bool get hasUsefulMediaAccess =>
+      hasAllFilesAccess || (hasMediaImages && hasMediaVideo && hasMediaAudio);
+
+  bool get needsRequest => isAndroid && !hasUsefulMediaAccess;
+
+  factory AndroidStorageAccessStatus.notAndroid() =>
+      const AndroidStorageAccessStatus(
+        isAndroid: false,
+        sdkInt: 0,
+        hasAllFilesAccess: true,
+        hasMediaImages: true,
+        hasMediaVideo: true,
+        hasMediaAudio: true,
+      );
+
+  factory AndroidStorageAccessStatus.fromMap(Map<Object?, Object?> map) {
+    return AndroidStorageAccessStatus(
+      isAndroid: map['isAndroid'] as bool? ?? false,
+      sdkInt: map['sdkInt'] as int? ?? 0,
+      hasAllFilesAccess: map['hasAllFilesAccess'] as bool? ?? false,
+      hasMediaImages: map['hasMediaImages'] as bool? ?? false,
+      hasMediaVideo: map['hasMediaVideo'] as bool? ?? false,
+      hasMediaAudio: map['hasMediaAudio'] as bool? ?? false,
+    );
+  }
+}
+
 class PlatformServices {
   PlatformServices._();
 
@@ -26,6 +70,33 @@ class PlatformServices {
       return _channel.invokeMethod<String>('getInitialOpenPath');
     }
     return null;
+  }
+
+  static Future<AndroidStorageAccessStatus> androidStorageAccessStatus() async {
+    if (!Platform.isAndroid) {
+      return AndroidStorageAccessStatus.notAndroid();
+    }
+    final raw = await _channel.invokeMethod<Object?>('storageAccessStatus');
+    if (raw is Map) {
+      return AndroidStorageAccessStatus.fromMap(raw);
+    }
+    return AndroidStorageAccessStatus.notAndroid();
+  }
+
+  static Future<void> requestAndroidStorageAccess() async {
+    if (Platform.isAndroid) {
+      await _channel.invokeMethod<void>('requestStorageAccess');
+    }
+  }
+
+  static Future<Uint8List?> readMediaArtwork(String path) async {
+    if (!Platform.isAndroid) return null;
+    return _channel.invokeMethod<Uint8List>('readMediaArtwork', path);
+  }
+
+  static Future<Uint8List?> readVideoThumbnail(String path) async {
+    if (!Platform.isAndroid) return null;
+    return _channel.invokeMethod<Uint8List>('readVideoThumbnail', path);
   }
 
   static Future<void> openExternal(String path) async {

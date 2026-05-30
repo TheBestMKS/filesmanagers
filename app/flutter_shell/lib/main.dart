@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -17,8 +17,9 @@ import 'src/plugins/cloud_plugin_registry.dart' hide basename;
 import 'src/security/security_settings.dart';
 import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
+import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.5.1';
+const _appVersion = '0.6.0';
 
 void main(List<String> args) {
   MediaKit.ensureInitialized();
@@ -93,6 +94,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   Future<DirectorySnapshot>? _snapshot;
   Future<FilePreview>? _preview;
   List<MediaPreviewItem> _mediaPlaylist = const [];
+  List<MediaPreviewItem> _imagePlaylist = const [];
   double _sidebarWidth = 290;
   double _previewWidth = 420;
   bool _previewVisible = true;
@@ -160,10 +162,65 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _selected = selected;
       _preview = preview;
       _mediaPlaylist = const [];
+      _imagePlaylist = const [];
       _snapshot = currentPath == null ? null : _directorySnapshot(currentPath);
       _locked = settings.hasAppPassword;
       _loading = false;
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_maybeRequestAndroidStorageAccess());
+    });
+  }
+
+  Future<void> _maybeRequestAndroidStorageAccess() async {
+    if (!Platform.isAndroid ||
+        _locked ||
+        _settings.androidStoragePermissionPromptDismissed ||
+        !mounted) {
+      return;
+    }
+    final status = await PlatformServices.androidStorageAccessStatus()
+        .catchError((_) => AndroidStorageAccessStatus.notAndroid());
+    if (!mounted || !status.needsRequest) return;
+    final allow = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('android.storage.title')),
+        content: Text(_language.t('android.storage.body')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_language.t('android.storage.open')),
+          ),
+        ],
+      ),
+    );
+    if (allow == true) {
+      await PlatformServices.requestAndroidStorageAccess().catchError((_) {});
+      final next = await _settingsRepo
+          .setAndroidStoragePermissionPromptDismissed(_settings, true);
+      if (mounted) setState(() => _settings = next);
+    } else {
+      final next = await _settingsRepo
+          .setAndroidStoragePermissionPromptDismissed(_settings, true);
+      if (mounted) setState(() => _settings = next);
+    }
+  }
+
+  Future<void> _requestAndroidStorageAccessFromSettings() async {
+    await PlatformServices.requestAndroidStorageAccess().catchError((_) {});
+    final next = await _settingsRepo.setAndroidStoragePermissionPromptDismissed(
+      _settings,
+      true,
+    );
+    if (mounted) {
+      setState(() => _settings = next);
+      _snack(_language.t('android.storage.requested'));
+    }
   }
 
   Future<void> _unlock(String password) async {
@@ -189,6 +246,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         _setSessionFilePassword(remembered);
       }
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_maybeRequestAndroidStorageAccess());
+    });
     if (!_settings.hasFilePassword) {
       final common = await _settingsRepo
           .loadCommonEncryptionPassword(_settings)
@@ -205,6 +265,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _selected = null;
       _preview = null;
       _mediaPlaylist = const [];
+      _imagePlaylist = const [];
       _snapshot = _directorySnapshot(path);
     });
   }
@@ -218,6 +279,18 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       );
 
   Future<void> _refresh() async {
+    final mediaSection = switch (_page) {
+      ShellPage.gallery => MediaSection.gallery,
+      ShellPage.music => MediaSection.music,
+      ShellPage.video => MediaSection.video,
+      ShellPage.documents => MediaSection.documents,
+      ShellPage.torrent => MediaSection.torrent,
+      _ => null,
+    };
+    if (mediaSection != null) {
+      _openMediaSection(mediaSection);
+      return;
+    }
     final path = _currentPath;
     setState(() {
       _snapshot = _showingRecent
@@ -263,6 +336,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _selected = null;
       _preview = null;
       _mediaPlaylist = const [];
+      _imagePlaylist = const [];
       _snapshot = _explorer.snapshotForPaths(
         _language.t('nav.explorer'),
         paths,
@@ -271,16 +345,24 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   }
 
   void _openMediaSection(MediaSection section) {
+    unawaited(_openMediaSectionAsync(section));
+  }
+
+  Future<void> _openMediaSectionAsync(MediaSection section) async {
     if (section == MediaSection.torrent && !_settings.torrentEnabled) {
       _snack(_language.t('settings.torrent.disabled'));
       return;
     }
-    final (page, label, roots, extensions, exclusions) = switch (section) {
+    final (page, label, configuredRoots, extensions, exclusions) =
+        switch (section) {
       MediaSection.gallery => (
           ShellPage.gallery,
           _language.t('nav.gallery'),
           _settings.galleryFolders,
-          FileViewerService.imageExtensions,
+          {
+            ...FileViewerService.imageExtensions,
+            ...FileViewerService.videoExtensions,
+          },
           _settings.galleryExclusions,
         ),
       MediaSection.music => (
@@ -316,23 +398,105 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
           '',
         ),
     };
+    final roots = section == MediaSection.torrent
+        ? const <String>[]
+        : _mediaRootsFor(configuredRoots);
+    final snapshotFuture = section == MediaSection.torrent
+        ? AppPaths.torrentsDirectory().then((dir) => _explorer.listDirectory(
+              dir.path,
+              commonPassword: _commonEncryptionPassword,
+              filePassword: _activeFilePassword(),
+              decryptNames: _settings.decryptNamesInExplorer,
+            ))
+        : _explorer.mediaSnapshot(
+            label: label,
+            roots: roots,
+            extensions: extensions,
+            exclusions: exclusions,
+          );
     setState(() {
       _page = page;
       _showingRecent = false;
+      _currentPath = label;
       _selected = null;
       _preview = null;
       _mediaPlaylist = const [];
-      _snapshot = section == MediaSection.torrent
-          ? AppPaths.torrentsDirectory()
-              .then((dir) => _explorer.listDirectory(dir.path))
-          : _explorer.mediaSnapshot(
-              label: label,
-              roots: roots,
-              extensions: extensions,
-              exclusions: exclusions,
-            );
+      _imagePlaylist = const [];
+      _snapshot = snapshotFuture;
     });
+    if (section != MediaSection.music && section != MediaSection.video) {
+      return;
+    }
+    final snapshot = await snapshotFuture;
+    if (!mounted || _page != page || snapshot.entries.isEmpty) return;
+    final kind = section == MediaSection.video
+        ? FileContentKind.video
+        : FileContentKind.audio;
+    final first = snapshot.entries.firstWhere(
+      (entry) => FileViewerService.kindForName(entry.name) == kind,
+      orElse: () => snapshot.entries.first,
+    );
+    final previewFuture = _explorer.previewFile(
+      first.path,
+      password: _activeFilePassword(),
+      commonPassword: _commonEncryptionPassword,
+    );
+    setState(() {
+      _selected = first;
+      _preview = previewFuture;
+      _mediaPlaylist = _mediaItemsFromEntries(snapshot.entries, kind);
+      _imagePlaylist = const [];
+    });
+    if (_settings.rememberRecentFiles) {
+      final next = await _settingsRepo.recordRecentFile(_settings, first.path);
+      if (mounted) setState(() => _settings = next);
+    }
   }
+
+  List<String> _mediaRootsFor(List<String> configuredRoots) {
+    final configured = configuredRoots
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
+    if (configured.isNotEmpty) return configured;
+
+    final roots = <String>[];
+    for (final location in _locations) {
+      final path = location.path;
+      if (!location.enabled || path == null || path.isEmpty) continue;
+      if (Platform.isAndroid &&
+          location.kind == ExplorerLocationKind.local &&
+          path == '/') {
+        continue;
+      }
+      roots.add(path);
+    }
+    if (roots.isEmpty && Platform.isAndroid) {
+      roots.add('/storage/emulated/0');
+    }
+    final seen = <String>{};
+    return [
+      for (final root in roots)
+        if (seen.add(Platform.isWindows ? root.toLowerCase() : root)) root,
+    ];
+  }
+
+  List<MediaPreviewItem> _mediaItemsFromEntries(
+    List<ExplorerEntry> entries,
+    FileContentKind kind,
+  ) =>
+      [
+        for (final entry in entries)
+          if (!entry.isDirectory &&
+              (FileViewerService.kindForName(entry.name) == kind ||
+                  FileViewerService.kindForName(entry.path) == kind))
+            MediaPreviewItem(
+              title: entry.name,
+              kind: kind,
+              path: entry.path,
+              encrypted: entry.isEncrypted,
+            ),
+      ];
 
   void _openRecentFiles() {
     setState(() {
@@ -341,6 +505,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _selected = null;
       _preview = null;
       _mediaPlaylist = const [];
+      _imagePlaylist = const [];
       _snapshot = _explorer.snapshotForPaths(
         _language.t('recent.title'),
         _settings.recentFilePaths.take(_settings.recentRememberCount).toList(),
@@ -408,7 +573,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     }
   }
 
-  Future<void> _openEntry(ExplorerEntry entry) async {
+  Future<void> _openEntry(
+    ExplorerEntry entry, {
+    bool forceFullScreen = false,
+  }) async {
     if (!entry.exists) {
       await _offerRemoveMissingRecent(entry.path);
       return;
@@ -426,23 +594,134 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _selected = entry;
       _preview = previewFuture;
       _mediaPlaylist = const [];
+      _imagePlaylist = const [];
     });
+    FilePreview? openedPreview;
     try {
       final preview = await previewFuture;
+      openedPreview = preview;
       final playlist = await _buildMediaPlaylist(entry, preview);
+      final imagePlaylist = await _buildImagePlaylist(entry, preview);
       if (mounted && _selected?.path == entry.path) {
-        setState(() => _mediaPlaylist = playlist);
+        setState(() {
+          _mediaPlaylist = playlist;
+          _imagePlaylist = imagePlaylist;
+        });
       }
     } catch (_) {
       if (mounted && _selected?.path == entry.path) {
-        setState(() => _mediaPlaylist = const []);
+        setState(() {
+          _mediaPlaylist = const [];
+          _imagePlaylist = const [];
+        });
       }
+    }
+    if (mounted &&
+        openedPreview != null &&
+        (forceFullScreen ||
+            (!_previewVisible && _settings.openFullscreenOnHiddenPreviewTap))) {
+      _showPreviewWindow(openedPreview);
     }
     if (_settings.rememberRecentFiles) {
       final next = await _settingsRepo.recordRecentFile(_settings, entry.path);
       if (mounted) {
         setState(() => _settings = next);
       }
+    }
+  }
+
+  Future<List<MediaPreviewItem>> _buildImagePlaylist(
+    ExplorerEntry selected,
+    FilePreview selectedPreview,
+  ) async {
+    if (selectedPreview.contentKind != FileContentKind.image) {
+      return const [];
+    }
+
+    final selectedItem = MediaPreviewItem(
+      title: selectedPreview.title,
+      kind: FileContentKind.image,
+      path: selected.path,
+      bytes: selectedPreview.decrypted && selectedPreview.bytes != null
+          ? Uint8List.fromList(selectedPreview.bytes!)
+          : null,
+      encrypted: selectedPreview.decrypted,
+    );
+
+    final parent = File(selected.path).parent.path;
+    final DirectorySnapshot snapshot;
+    try {
+      snapshot = await _explorer.listDirectory(
+        parent,
+        commonPassword: _commonEncryptionPassword,
+        filePassword: _activeFilePassword(),
+        decryptNames: _settings.decryptNamesInExplorer,
+      );
+    } catch (_) {
+      return [selectedItem];
+    }
+
+    final items = <MediaPreviewItem>[];
+    for (final entry in snapshot.entries) {
+      if (!entry.exists || entry.isDirectory) continue;
+      final displayedKind = FileViewerService.kindForName(entry.name);
+      final pathKind = FileViewerService.kindForName(entry.path);
+      final isSelected = entry.path == selected.path;
+      if (!isSelected &&
+          displayedKind != FileContentKind.image &&
+          pathKind != FileContentKind.image) {
+        continue;
+      }
+      if (isSelected) {
+        items.add(selectedItem);
+        continue;
+      }
+      items.add(MediaPreviewItem(
+        title: entry.name,
+        kind: FileContentKind.image,
+        path: entry.path,
+        encrypted: entry.isEncrypted,
+      ));
+    }
+
+    if (!items.any((item) => item.path == selectedItem.path)) {
+      items.insert(0, selectedItem);
+    }
+    return items;
+  }
+
+  Future<FilePreview?> _navigateImage(int delta) async {
+    final selectedPath = _selected?.path;
+    if (selectedPath == null || _imagePlaylist.isEmpty) return null;
+    var index = _imagePlaylist.indexWhere((item) => item.path == selectedPath);
+    if (index < 0) index = 0;
+    final nextIndex = (index + delta) % _imagePlaylist.length;
+    final normalizedIndex =
+        nextIndex < 0 ? nextIndex + _imagePlaylist.length : nextIndex;
+    final item = _imagePlaylist[normalizedIndex];
+    final path = item.path;
+    if (path == null || path.isEmpty) return null;
+    final entry = await _explorer.entryForPath(path);
+    if (entry == null) return null;
+    final previewFuture = _explorer.previewFile(
+      entry.path,
+      password: _activeFilePassword(),
+      commonPassword: _commonEncryptionPassword,
+    );
+    setState(() {
+      _selected = entry;
+      _preview = previewFuture;
+      _mediaPlaylist = const [];
+    });
+    try {
+      final preview = await previewFuture;
+      final imagePlaylist = await _buildImagePlaylist(entry, preview);
+      if (mounted && _selected?.path == entry.path) {
+        setState(() => _imagePlaylist = imagePlaylist);
+      }
+      return preview;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -536,6 +815,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         _selected = null;
         _preview = null;
         _mediaPlaylist = const [];
+        _imagePlaylist = const [];
         _snapshot =
             _currentPath == null ? null : _directorySnapshot(_currentPath!);
       });
@@ -1051,6 +1331,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
           _selected = null;
           _preview = null;
           _mediaPlaylist = const [];
+          _imagePlaylist = const [];
         }
       });
       _snack(_language.t('snack.deleted'));
@@ -1208,6 +1489,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         _selected = null;
         _preview = null;
         _mediaPlaylist = const [];
+        _imagePlaylist = const [];
       });
       await _refresh();
     } catch (error) {
@@ -1296,24 +1578,35 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   }
 
   void _showPreviewWindow(FilePreview preview) {
+    var currentPreview = preview;
     showDialog<void>(
       context: context,
-      builder: (context) => Dialog.fullscreen(
-        child: Scaffold(
-          appBar: AppBar(
-            title: Text(preview.title),
-            actions: [
-              IconButton(
-                onPressed: () => _openPreviewExternal(preview),
-                icon: const Icon(Icons.open_in_new),
-                tooltip: _language.t('preview.external'),
-              ),
-            ],
-          ),
-          body: _PreviewContent(
-            preview: preview,
-            language: _language,
-            mediaPlaylist: _mediaPlaylist,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => Dialog.fullscreen(
+          child: Scaffold(
+            appBar: AppBar(
+              title: Text(currentPreview.title),
+              actions: [
+                IconButton(
+                  onPressed: () => _openPreviewExternal(currentPreview),
+                  icon: const Icon(Icons.open_in_new),
+                  tooltip: _language.t('preview.external'),
+                ),
+              ],
+            ),
+            body: _PreviewContent(
+              preview: currentPreview,
+              language: _language,
+              mediaPlaylist: _mediaPlaylist,
+              imagePlaylist: _imagePlaylist,
+              fillAvailable: true,
+              onImageNavigate: (delta) async {
+                final next = await _navigateImage(delta);
+                if (next != null) {
+                  setDialogState(() => currentPreview = next);
+                }
+              },
+            ),
           ),
         ),
       ),
@@ -1378,6 +1671,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     required int recentRememberCount,
     required int favoriteSidebarCount,
     required bool decryptNamesInExplorer,
+    required bool openFullscreenOnHiddenPreviewTap,
     required bool autoScaleForDpi,
     required double fileTextScale,
     required double fileIconScale,
@@ -1421,6 +1715,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       recentRememberCount: recentRememberCount,
       favoriteSidebarCount: favoriteSidebarCount,
       decryptNamesInExplorer: decryptNamesInExplorer,
+      openFullscreenOnHiddenPreviewTap: openFullscreenOnHiddenPreviewTap,
       autoScaleForDpi: autoScaleForDpi,
       fileTextScale: fileTextScale,
       fileIconScale: fileIconScale,
@@ -1586,6 +1881,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     language: _language,
                     settings: _settings,
                     onSave: _saveSecurity,
+                    onRequestAndroidStorageAccess:
+                        _requestAndroidStorageAccessFromSettings,
                     onClear: _clearRemembered,
                     onRevealCommonKey: _revealCommonEncryptionPassword,
                     onValidateLanguageFile: _validateLanguageFile,
@@ -1593,45 +1890,78 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     onInstallPluginZip: _installPluginZip,
                     onExportLanguageSample: _exportLanguageSample,
                   )
-                : _ExplorerView(
-                    language: _language,
-                    currentPath: _showingRecent
-                        ? _language.t('recent.title')
-                        : _currentPath,
-                    snapshot: _snapshot,
-                    selected: _selected,
-                    preview: _preview,
-                    mediaPlaylist: _mediaPlaylist,
-                    onUp: _goUp,
-                    onRefresh: _refresh,
-                    onImport: _importFile,
-                    onExport: _exportFile,
-                    previewWidth: _previewWidth,
-                    previewVisible: _previewVisible,
-                    fileTextScale: _effectiveTextScale(context),
-                    fileIconScale: _effectiveIconScale(context),
-                    onPreviewResize: (delta) => setState(
-                      () => _previewWidth =
-                          (_previewWidth - delta).clamp(280.0, 1800.0),
-                    ),
-                    onTogglePreview: () =>
-                        setState(() => _previewVisible = !_previewVisible),
-                    onOpenPassword: _openWithPassword,
-                    onOpenExternal: _openPreviewExternal,
-                    onPreviewWindow: _showPreviewWindow,
-                    onEditPreview: _openEditor,
-                    canPaste: _clipboardPath != null,
-                    favoritePaths: _settings.favoritePaths,
-                    recentPaths: _settings.recentFilePaths,
-                    searchQuery: _searchQuery,
-                    onPathEdit: _editPathDialog,
-                    onSearch: _searchDialog,
-                    onSearchFilters: _searchFiltersDialog,
-                    onEntryAction: _handleEntryAction,
-                    onRemoveRecent: _removeRecentPath,
-                    onToggleFavorite: _toggleFavorite,
-                    onEntry: _openEntry,
-                  );
+                : _page == ShellPage.gallery
+                    ? _GalleryLibraryView(
+                        language: _language,
+                        snapshot: _snapshot,
+                        selected: _selected,
+                        searchQuery: _searchQuery,
+                        onRefresh: _refresh,
+                        onSearch: _searchDialog,
+                        onSearchFilters: _searchFiltersDialog,
+                        onEntry: _openEntry,
+                        onEntryFullscreen: (entry) =>
+                            _openEntry(entry, forceFullScreen: true),
+                      )
+                    : (_page == ShellPage.music || _page == ShellPage.video)
+                        ? _MediaOnlyView(
+                            language: _language,
+                            entry: _selected,
+                            preview: _preview,
+                            mediaPlaylist: _mediaPlaylist,
+                            snapshot: _snapshot,
+                            isVideo: _page == ShellPage.video,
+                            onRefresh: _refresh,
+                            onSearch: _searchDialog,
+                            onSearchFilters: _searchFiltersDialog,
+                            onOpenPassword: _openWithPassword,
+                            onOpenExternal: _openPreviewExternal,
+                            onPreviewWindow: _showPreviewWindow,
+                            onEditPreview: _openEditor,
+                          )
+                        : _ExplorerView(
+                            language: _language,
+                            currentPath: _showingRecent
+                                ? _language.t('recent.title')
+                                : _currentPath,
+                            snapshot: _snapshot,
+                            selected: _selected,
+                            preview: _preview,
+                            mediaPlaylist: _mediaPlaylist,
+                            imagePlaylist: _imagePlaylist,
+                            onUp: _goUp,
+                            onRefresh: _refresh,
+                            onImport: _importFile,
+                            onExport: _exportFile,
+                            previewWidth: _previewWidth,
+                            previewVisible: _previewVisible,
+                            fileTextScale: _effectiveTextScale(context),
+                            fileIconScale: _effectiveIconScale(context),
+                            onPreviewResize: (delta) => setState(
+                              () => _previewWidth =
+                                  (_previewWidth - delta).clamp(280.0, 1800.0),
+                            ),
+                            onTogglePreview: () => setState(
+                                () => _previewVisible = !_previewVisible),
+                            onOpenPassword: _openWithPassword,
+                            onOpenExternal: _openPreviewExternal,
+                            onPreviewWindow: _showPreviewWindow,
+                            onEditPreview: _openEditor,
+                            onImageNavigate: _navigateImage,
+                            canPaste: _clipboardPath != null,
+                            favoritePaths: _settings.favoritePaths,
+                            recentPaths: _settings.recentFilePaths,
+                            searchQuery: _searchQuery,
+                            onPathEdit: _editPathDialog,
+                            onSearch: _searchDialog,
+                            onSearchFilters: _searchFiltersDialog,
+                            onEntryAction: _handleEntryAction,
+                            onRemoveRecent: _removeRecentPath,
+                            onToggleFavorite: _toggleFavorite,
+                            onEntry: _openEntry,
+                            onEntryFullscreen: (entry) =>
+                                _openEntry(entry, forceFullScreen: true),
+                          );
             if (c.maxWidth < 820) {
               return Scaffold(
                 appBar: AppBar(title: Text(_language.appTitle)),
@@ -2386,6 +2716,326 @@ class _Sidebar extends StatelessWidget {
       };
 }
 
+class _GalleryLibraryView extends StatelessWidget {
+  const _GalleryLibraryView({
+    required this.language,
+    required this.snapshot,
+    required this.selected,
+    required this.searchQuery,
+    required this.onRefresh,
+    required this.onSearch,
+    required this.onSearchFilters,
+    required this.onEntry,
+    required this.onEntryFullscreen,
+  });
+
+  final AppLanguage language;
+  final Future<DirectorySnapshot>? snapshot;
+  final ExplorerEntry? selected;
+  final String searchQuery;
+  final Future<void> Function() onRefresh;
+  final VoidCallback onSearch;
+  final VoidCallback onSearchFilters;
+  final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry) onEntryFullscreen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      _MediaHeader(
+        title: language.t('nav.gallery'),
+        language: language,
+        onRefresh: onRefresh,
+        onSearch: onSearch,
+        onSearchFilters: onSearchFilters,
+        searchQuery: searchQuery,
+      ),
+      Expanded(
+        child: FutureBuilder<DirectorySnapshot>(
+          future: snapshot,
+          builder: (context, snap) {
+            if (!snap.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snap.data!.hasError) {
+              return Center(
+                child: Text(
+                  '${language.t('explorer.access.error')}\n${snap.data!.error}',
+                  textAlign: TextAlign.center,
+                ),
+              );
+            }
+            final entries = _filtered(snap.data!.entries);
+            if (entries.isEmpty) {
+              return Center(child: Text(language.t('explorer.empty')));
+            }
+            return LayoutBuilder(builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              final columns = (width / 170).floor().clamp(2, 8);
+              return GridView.builder(
+                padding: const EdgeInsets.all(14),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: columns,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: .82,
+                ),
+                itemCount: entries.length,
+                itemBuilder: (context, index) {
+                  final entry = entries[index];
+                  final kind = FileViewerService.kindForName(entry.name);
+                  return GestureDetector(
+                    onTap: () => unawaited(onEntry(entry)),
+                    onDoubleTap: () => unawaited(onEntryFullscreen(entry)),
+                    child: Card(
+                      clipBehavior: Clip.antiAlias,
+                      elevation: selected?.path == entry.path ? 4 : 0,
+                      child: Column(children: [
+                        Expanded(
+                          child: _MediaThumbnail(
+                            entry: entry,
+                            kind: kind,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Row(children: [
+                            Icon(
+                              kind == FileContentKind.video
+                                  ? Icons.play_circle_outline
+                                  : Icons.image_outlined,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                entry.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ]),
+                        ),
+                      ]),
+                    ),
+                  );
+                },
+              );
+            });
+          },
+        ),
+      ),
+    ]);
+  }
+
+  List<ExplorerEntry> _filtered(List<ExplorerEntry> entries) {
+    if (searchQuery.isEmpty) return entries;
+    final query = searchQuery.toLowerCase();
+    return entries
+        .where((entry) => entry.name.toLowerCase().contains(query))
+        .toList();
+  }
+}
+
+class _MediaOnlyView extends StatelessWidget {
+  const _MediaOnlyView({
+    required this.language,
+    required this.entry,
+    required this.preview,
+    required this.mediaPlaylist,
+    required this.snapshot,
+    required this.isVideo,
+    required this.onRefresh,
+    required this.onSearch,
+    required this.onSearchFilters,
+    required this.onOpenPassword,
+    required this.onOpenExternal,
+    required this.onPreviewWindow,
+    required this.onEditPreview,
+  });
+
+  final AppLanguage language;
+  final ExplorerEntry? entry;
+  final Future<FilePreview>? preview;
+  final List<MediaPreviewItem> mediaPlaylist;
+  final Future<DirectorySnapshot>? snapshot;
+  final bool isVideo;
+  final Future<void> Function() onRefresh;
+  final VoidCallback onSearch;
+  final VoidCallback onSearchFilters;
+  final VoidCallback onOpenPassword;
+  final ValueChanged<FilePreview> onOpenExternal;
+  final ValueChanged<FilePreview> onPreviewWindow;
+  final ValueChanged<FilePreview> onEditPreview;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      _MediaHeader(
+        title: language.t(isVideo ? 'nav.video' : 'nav.music'),
+        language: language,
+        onRefresh: onRefresh,
+        onSearch: onSearch,
+        onSearchFilters: onSearchFilters,
+        searchQuery: '',
+      ),
+      Expanded(
+        child: FutureBuilder<DirectorySnapshot>(
+          future: snapshot,
+          builder: (context, snap) {
+            if (!snap.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            if (snap.data!.hasError) {
+              return Center(
+                child: Text(
+                  '${language.t('explorer.access.error')}\n${snap.data!.error}',
+                  textAlign: TextAlign.center,
+                ),
+              );
+            }
+            if (snap.data!.entries.isEmpty) {
+              return Center(child: Text(language.t('explorer.empty')));
+            }
+            if (preview == null) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            return Padding(
+              padding: const EdgeInsets.all(14),
+              child: _PreviewPane(
+                language: language,
+                entry: entry,
+                preview: preview,
+                mediaPlaylist: mediaPlaylist,
+                imagePlaylist: const [],
+                visible: true,
+                onTogglePreview: () {},
+                onOpenPassword: onOpenPassword,
+                onOpenExternal: onOpenExternal,
+                onPreviewWindow: onPreviewWindow,
+                onEditPreview: onEditPreview,
+                onImageNavigate: (_) async => null,
+              ),
+            );
+          },
+        ),
+      ),
+    ]);
+  }
+}
+
+class _MediaHeader extends StatelessWidget {
+  const _MediaHeader({
+    required this.title,
+    required this.language,
+    required this.onRefresh,
+    required this.onSearch,
+    required this.onSearchFilters,
+    required this.searchQuery,
+  });
+
+  final String title;
+  final AppLanguage language;
+  final Future<void> Function() onRefresh;
+  final VoidCallback onSearch;
+  final VoidCallback onSearchFilters;
+  final String searchQuery;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: Color(0xFFDDE6F0))),
+      ),
+      child: Row(children: [
+        Expanded(
+          child: Text(
+            title,
+            style: Theme.of(context)
+                .textTheme
+                .titleLarge
+                ?.copyWith(fontWeight: FontWeight.w800),
+          ),
+        ),
+        IconButton(
+          onPressed: onRefresh,
+          icon: const Icon(Icons.refresh),
+          tooltip: language.t('explorer.refresh'),
+        ),
+        IconButton(
+          onPressed: onSearch,
+          icon: Icon(searchQuery.isEmpty ? Icons.search : Icons.search_off),
+          tooltip: language.t('search.title'),
+        ),
+        IconButton(
+          onPressed: onSearchFilters,
+          icon: const Icon(Icons.tune_outlined),
+          tooltip: language.t('search.filters'),
+        ),
+      ]),
+    );
+  }
+}
+
+class _MediaThumbnail extends StatelessWidget {
+  const _MediaThumbnail({
+    required this.entry,
+    required this.kind,
+    this.fit = BoxFit.cover,
+  });
+
+  final ExplorerEntry entry;
+  final FileContentKind kind;
+  final BoxFit fit;
+
+  @override
+  Widget build(BuildContext context) {
+    if (kind == FileContentKind.image) {
+      return Image.file(
+        File(entry.path),
+        width: double.infinity,
+        height: double.infinity,
+        fit: fit,
+        errorBuilder: (_, __, ___) => _fallback(context),
+      );
+    }
+    if (kind == FileContentKind.video) {
+      return FutureBuilder<Uint8List?>(
+        future: MediaArtworkService.videoThumbnail(entry.path),
+        builder: (context, snapshot) {
+          final bytes = snapshot.data;
+          if (bytes != null && bytes.isNotEmpty) {
+            return Stack(fit: StackFit.expand, children: [
+              Image.memory(bytes, fit: fit),
+              const Center(
+                child: Icon(Icons.play_circle_fill,
+                    color: Colors.white70, size: 42),
+              ),
+            ]);
+          }
+          return _fallback(context);
+        },
+      );
+    }
+    return _fallback(context);
+  }
+
+  Widget _fallback(BuildContext context) => Container(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        child: Center(
+          child: Icon(
+            kind == FileContentKind.video
+                ? Icons.movie_outlined
+                : Icons.image_outlined,
+            size: 42,
+          ),
+        ),
+      );
+}
+
 class _ExplorerView extends StatelessWidget {
   const _ExplorerView({
     required this.language,
@@ -2394,6 +3044,7 @@ class _ExplorerView extends StatelessWidget {
     required this.selected,
     required this.preview,
     required this.mediaPlaylist,
+    required this.imagePlaylist,
     required this.onUp,
     required this.onRefresh,
     required this.onImport,
@@ -2408,6 +3059,7 @@ class _ExplorerView extends StatelessWidget {
     required this.onOpenExternal,
     required this.onPreviewWindow,
     required this.onEditPreview,
+    required this.onImageNavigate,
     required this.canPaste,
     required this.favoritePaths,
     required this.recentPaths,
@@ -2419,6 +3071,7 @@ class _ExplorerView extends StatelessWidget {
     required this.onRemoveRecent,
     required this.onToggleFavorite,
     required this.onEntry,
+    required this.onEntryFullscreen,
   });
 
   final AppLanguage language;
@@ -2427,6 +3080,7 @@ class _ExplorerView extends StatelessWidget {
   final ExplorerEntry? selected;
   final Future<FilePreview>? preview;
   final List<MediaPreviewItem> mediaPlaylist;
+  final List<MediaPreviewItem> imagePlaylist;
   final VoidCallback onUp;
   final Future<void> Function() onRefresh;
   final VoidCallback onImport;
@@ -2441,6 +3095,7 @@ class _ExplorerView extends StatelessWidget {
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
+  final Future<FilePreview?> Function(int delta) onImageNavigate;
   final bool canPaste;
   final List<String> favoritePaths;
   final List<String> recentPaths;
@@ -2452,6 +3107,7 @@ class _ExplorerView extends StatelessWidget {
   final ValueChanged<String> onRemoveRecent;
   final ValueChanged<ExplorerEntry> onToggleFavorite;
   final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry) onEntryFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -2531,6 +3187,7 @@ class _ExplorerView extends StatelessWidget {
             fileTextScale: fileTextScale,
             fileIconScale: fileIconScale,
             onEntry: onEntry,
+            onEntryFullscreen: onEntryFullscreen,
             canPaste: canPaste,
             favoritePaths: favoritePaths,
             recentPaths: recentPaths,
@@ -2544,12 +3201,14 @@ class _ExplorerView extends StatelessWidget {
             entry: selected,
             preview: preview,
             mediaPlaylist: mediaPlaylist,
+            imagePlaylist: imagePlaylist,
             visible: previewVisible,
             onTogglePreview: onTogglePreview,
             onOpenPassword: onOpenPassword,
             onOpenExternal: onOpenExternal,
             onPreviewWindow: onPreviewWindow,
             onEditPreview: onEditPreview,
+            onImageNavigate: onImageNavigate,
           );
           if (c.maxWidth < 980) {
             return Column(children: [
@@ -2580,6 +3239,7 @@ class _EntryList extends StatelessWidget {
     required this.fileTextScale,
     required this.fileIconScale,
     required this.onEntry,
+    required this.onEntryFullscreen,
     required this.canPaste,
     required this.favoritePaths,
     required this.recentPaths,
@@ -2595,6 +3255,7 @@ class _EntryList extends StatelessWidget {
   final double fileTextScale;
   final double fileIconScale;
   final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry) onEntryFullscreen;
   final bool canPaste;
   final List<String> favoritePaths;
   final List<String> recentPaths;
@@ -2644,6 +3305,9 @@ class _EntryList extends StatelessWidget {
               onSecondaryTapDown: (details) =>
                   _showEntryContextMenu(context, entry, details.globalPosition),
               onLongPress: () => _showEntryContextMenu(context, entry, null),
+              onDoubleTap: entry.isDirectory
+                  ? null
+                  : () => unawaited(onEntryFullscreen(entry)),
               child: ListTile(
                 selected: selected?.path == entry.path,
                 shape: RoundedRectangleBorder(
@@ -2909,24 +3573,28 @@ class _PreviewPane extends StatelessWidget {
     required this.entry,
     required this.preview,
     required this.mediaPlaylist,
+    required this.imagePlaylist,
     required this.visible,
     required this.onTogglePreview,
     required this.onOpenPassword,
     required this.onOpenExternal,
     required this.onPreviewWindow,
     required this.onEditPreview,
+    required this.onImageNavigate,
   });
 
   final AppLanguage language;
   final ExplorerEntry? entry;
   final Future<FilePreview>? preview;
   final List<MediaPreviewItem> mediaPlaylist;
+  final List<MediaPreviewItem> imagePlaylist;
   final bool visible;
   final VoidCallback onTogglePreview;
   final VoidCallback onOpenPassword;
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
+  final Future<FilePreview?> Function(int delta) onImageNavigate;
 
   @override
   Widget build(BuildContext context) {
@@ -2951,6 +3619,10 @@ class _PreviewPane extends StatelessWidget {
                 preview: p,
                 language: language,
                 mediaPlaylist: mediaPlaylist,
+                imagePlaylist: imagePlaylist,
+                onImageNavigate: (delta) async {
+                  await onImageNavigate(delta);
+                },
               ),
             ),
           ),
@@ -3017,21 +3689,26 @@ class _PreviewContent extends StatelessWidget {
     required this.preview,
     required this.language,
     this.mediaPlaylist = const [],
+    this.imagePlaylist = const [],
+    this.onImageNavigate,
+    this.fillAvailable = false,
   });
 
   final FilePreview preview;
   final AppLanguage language;
   final List<MediaPreviewItem> mediaPlaylist;
+  final List<MediaPreviewItem> imagePlaylist;
+  final Future<void> Function(int delta)? onImageNavigate;
+  final bool fillAvailable;
 
   @override
   Widget build(BuildContext context) {
     if (preview.contentKind == FileContentKind.image && preview.bytes != null) {
-      return Center(
-        child: InteractiveViewer(
-          minScale: 0.25,
-          maxScale: 6,
-          child: Image.memory(Uint8List.fromList(preview.bytes!)),
-        ),
+      return _ImagePreviewNavigator(
+        preview: preview,
+        imagePlaylist: imagePlaylist,
+        onNavigate: onImageNavigate,
+        fillAvailable: fillAvailable,
       );
     }
 
@@ -3082,6 +3759,115 @@ class _PreviewContent extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Text(preview.subtitle),
       ),
+    );
+  }
+}
+
+class _ImagePreviewNavigator extends StatefulWidget {
+  const _ImagePreviewNavigator({
+    required this.preview,
+    required this.imagePlaylist,
+    required this.onNavigate,
+    required this.fillAvailable,
+  });
+
+  final FilePreview preview;
+  final List<MediaPreviewItem> imagePlaylist;
+  final Future<void> Function(int delta)? onNavigate;
+  final bool fillAvailable;
+
+  @override
+  State<_ImagePreviewNavigator> createState() => _ImagePreviewNavigatorState();
+}
+
+class _ImagePreviewNavigatorState extends State<_ImagePreviewNavigator> {
+  late final FocusNode _focusNode;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode = FocusNode(debugLabel: 'image-preview-navigator');
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  bool get _canNavigate =>
+      widget.onNavigate != null && widget.imagePlaylist.length > 1;
+
+  Future<void> _navigate(int delta) async {
+    if (!_canNavigate) return;
+    await widget.onNavigate!(delta);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final image = Center(
+      child: InteractiveViewer(
+        minScale: 0.25,
+        maxScale: 6,
+        child: Image.memory(Uint8List.fromList(widget.preview.bytes!)),
+      ),
+    );
+    final content = Focus(
+      autofocus: true,
+      focusNode: _focusNode,
+      onKeyEvent: (_, event) {
+        if (event is! KeyDownEvent || !_canNavigate) {
+          return KeyEventResult.ignored;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+          unawaited(_navigate(-1));
+          return KeyEventResult.handled;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+          unawaited(_navigate(1));
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragEnd: (details) {
+          if (!_canNavigate) return;
+          final velocity = details.primaryVelocity ?? 0;
+          if (velocity < -180) {
+            unawaited(_navigate(1));
+          } else if (velocity > 180) {
+            unawaited(_navigate(-1));
+          }
+        },
+        child: Stack(children: [
+          Positioned.fill(child: image),
+          if (_canNavigate) ...[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: IconButton.filledTonal(
+                onPressed: () => unawaited(_navigate(-1)),
+                icon: const Icon(Icons.chevron_left),
+              ),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: IconButton.filledTonal(
+                onPressed: () => unawaited(_navigate(1)),
+                icon: const Icon(Icons.chevron_right),
+              ),
+            ),
+          ],
+        ]),
+      ),
+    );
+    if (widget.fillAvailable) {
+      return SizedBox.expand(child: content);
+    }
+    final height = math.max(320.0, MediaQuery.sizeOf(context).height * .62);
+    return SizedBox(
+      height: height,
+      child: content,
     );
   }
 }
@@ -3264,7 +4050,10 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
                 child: Padding(
                   padding: const EdgeInsets.all(22),
                   child: Column(children: [
-                    const Icon(Icons.graphic_eq, size: 56),
+                    _AudioArtworkForCurrent(
+                      player: _player,
+                      items: widget.playlist,
+                    ),
                     const SizedBox(height: 8),
                     Text(
                       widget.preview.title,
@@ -3401,6 +4190,60 @@ class _MediaTransportControls extends StatelessWidget {
     final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
     return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
   }
+}
+
+class _AudioArtworkForCurrent extends StatelessWidget {
+  const _AudioArtworkForCurrent({
+    required this.player,
+    required this.items,
+  });
+
+  final Player player;
+  final List<MediaPreviewItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<Playlist>(
+      stream: player.stream.playlist,
+      initialData: player.state.playlist,
+      builder: (context, snapshot) {
+        if (items.isEmpty) return _fallback(context);
+        final index =
+            (snapshot.data?.index ?? 0).clamp(0, items.length - 1).toInt();
+        final item = items[index];
+        return FutureBuilder<Uint8List?>(
+          future: MediaArtworkService.audioArtwork(
+            path: item.path,
+            bytes: item.bytes,
+          ),
+          builder: (context, artSnapshot) {
+            final bytes = artSnapshot.data;
+            if (bytes == null || bytes.isEmpty) return _fallback(context);
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: Image.memory(
+                bytes,
+                width: 180,
+                height: 180,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => _fallback(context),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _fallback(BuildContext context) => Container(
+        width: 180,
+        height: 180,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        ),
+        child: const Icon(Icons.graphic_eq, size: 64),
+      );
 }
 
 class _MediaPlaylistView extends StatelessWidget {
@@ -4099,6 +4942,7 @@ class _SettingsView extends StatefulWidget {
     required this.language,
     required this.settings,
     required this.onSave,
+    required this.onRequestAndroidStorageAccess,
     required this.onClear,
     required this.onRevealCommonKey,
     required this.onValidateLanguageFile,
@@ -4130,6 +4974,7 @@ class _SettingsView extends StatefulWidget {
     required int recentRememberCount,
     required int favoriteSidebarCount,
     required bool decryptNamesInExplorer,
+    required bool openFullscreenOnHiddenPreviewTap,
     required bool autoScaleForDpi,
     required double fileTextScale,
     required double fileIconScale,
@@ -4143,6 +4988,7 @@ class _SettingsView extends StatefulWidget {
     required String documentExclusions,
     required bool torrentEnabled,
   }) onSave;
+  final Future<void> Function() onRequestAndroidStorageAccess;
   final Future<void> Function() onClear;
   final Future<String> Function(String guardPassword) onRevealCommonKey;
   final Future<String> Function(String path) onValidateLanguageFile;
@@ -4185,6 +5031,7 @@ class _SettingsViewState extends State<_SettingsView> {
   late bool _wipe;
   late bool _rememberRecent;
   late bool _decryptNamesInExplorer;
+  late bool _openFullscreenOnHiddenPreviewTap;
   late bool _autoScaleForDpi;
   late bool _torrentEnabled;
   late bool _blockScreenCapture;
@@ -4200,6 +5047,8 @@ class _SettingsViewState extends State<_SettingsView> {
     _wipe = widget.settings.wipeSavedPasswordsOnFailedLogin;
     _rememberRecent = widget.settings.rememberRecentFiles;
     _decryptNamesInExplorer = widget.settings.decryptNamesInExplorer;
+    _openFullscreenOnHiddenPreviewTap =
+        widget.settings.openFullscreenOnHiddenPreviewTap;
     _autoScaleForDpi = widget.settings.autoScaleForDpi;
     _torrentEnabled = widget.settings.torrentEnabled;
     _blockScreenCapture = widget.settings.blockScreenCapture;
@@ -4474,6 +5323,12 @@ class _SettingsViewState extends State<_SettingsView> {
           title: Text(language.t('settings.decrypt.names')),
         ),
         SwitchListTile(
+          value: _openFullscreenOnHiddenPreviewTap,
+          onChanged: (v) =>
+              setState(() => _openFullscreenOnHiddenPreviewTap = v),
+          title: Text(language.t('settings.fullscreen.hidden.preview.tap')),
+        ),
+        SwitchListTile(
           value: _autoScaleForDpi,
           onChanged: (v) => setState(() => _autoScaleForDpi = v),
           title: Text(language.t('settings.auto.dpi')),
@@ -4517,6 +5372,14 @@ class _SettingsViewState extends State<_SettingsView> {
           title: Text(language.t('settings.block.capture')),
         ),
         Text(language.t('settings.block.capture.note')),
+        if (Platform.isAndroid) ...[
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: widget.onRequestAndroidStorageAccess,
+            icon: const Icon(Icons.folder_special_outlined),
+            label: Text(language.t('settings.android.storage.request')),
+          ),
+        ],
       ]),
       const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.language'), [
@@ -4681,6 +5544,7 @@ class _SettingsViewState extends State<_SettingsView> {
         favoriteSidebarCount:
             int.tryParse(_favoriteSidebarCount.text.trim()) ?? 10,
         decryptNamesInExplorer: _decryptNamesInExplorer,
+        openFullscreenOnHiddenPreviewTap: _openFullscreenOnHiddenPreviewTap,
         autoScaleForDpi: _autoScaleForDpi,
         fileTextScale: double.tryParse(_fileTextScale.text.trim()) ?? 1.0,
         fileIconScale: double.tryParse(_fileIconScale.text.trim()) ?? 1.0,

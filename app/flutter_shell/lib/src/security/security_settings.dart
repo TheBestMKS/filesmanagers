@@ -34,6 +34,7 @@ class SecuritySettings {
     this.recentFilePaths = const <String>[],
     this.favoriteSidebarCount = 10,
     this.decryptNamesInExplorer = true,
+    this.openFullscreenOnHiddenPreviewTap = true,
     this.autoScaleForDpi = true,
     this.fileTextScale = 1.0,
     this.fileIconScale = 1.0,
@@ -46,6 +47,7 @@ class SecuritySettings {
     this.documentFolders = const <String>[],
     this.documentExclusions = '',
     this.torrentEnabled = true,
+    this.androidStoragePermissionPromptDismissed = false,
   });
 
   final String? appPasswordSalt;
@@ -74,6 +76,7 @@ class SecuritySettings {
   final List<String> recentFilePaths;
   final int favoriteSidebarCount;
   final bool decryptNamesInExplorer;
+  final bool openFullscreenOnHiddenPreviewTap;
   final bool autoScaleForDpi;
   final double fileTextScale;
   final double fileIconScale;
@@ -86,6 +89,7 @@ class SecuritySettings {
   final List<String> documentFolders;
   final String documentExclusions;
   final bool torrentEnabled;
+  final bool androidStoragePermissionPromptDismissed;
 
   bool get hasAppPassword =>
       appPasswordSalt != null && appPasswordDigest != null;
@@ -127,6 +131,7 @@ class SecuritySettings {
     List<String>? recentFilePaths,
     int? favoriteSidebarCount,
     bool? decryptNamesInExplorer,
+    bool? openFullscreenOnHiddenPreviewTap,
     bool? autoScaleForDpi,
     double? fileTextScale,
     double? fileIconScale,
@@ -139,6 +144,7 @@ class SecuritySettings {
     List<String>? documentFolders,
     String? documentExclusions,
     bool? torrentEnabled,
+    bool? androidStoragePermissionPromptDismissed,
   }) {
     return SecuritySettings(
       appPasswordSalt:
@@ -191,6 +197,8 @@ class SecuritySettings {
       favoriteSidebarCount: favoriteSidebarCount ?? this.favoriteSidebarCount,
       decryptNamesInExplorer:
           decryptNamesInExplorer ?? this.decryptNamesInExplorer,
+      openFullscreenOnHiddenPreviewTap: openFullscreenOnHiddenPreviewTap ??
+          this.openFullscreenOnHiddenPreviewTap,
       autoScaleForDpi: autoScaleForDpi ?? this.autoScaleForDpi,
       fileTextScale: fileTextScale ?? this.fileTextScale,
       fileIconScale: fileIconScale ?? this.fileIconScale,
@@ -203,6 +211,9 @@ class SecuritySettings {
       documentFolders: documentFolders ?? this.documentFolders,
       documentExclusions: documentExclusions ?? this.documentExclusions,
       torrentEnabled: torrentEnabled ?? this.torrentEnabled,
+      androidStoragePermissionPromptDismissed:
+          androidStoragePermissionPromptDismissed ??
+              this.androidStoragePermissionPromptDismissed,
     );
   }
 
@@ -261,6 +272,8 @@ class SecuritySettings {
           : const <String>[],
       favoriteSidebarCount: json['favoriteSidebarCount'] as int? ?? 10,
       decryptNamesInExplorer: json['decryptNamesInExplorer'] as bool? ?? true,
+      openFullscreenOnHiddenPreviewTap:
+          json['openFullscreenOnHiddenPreviewTap'] as bool? ?? true,
       autoScaleForDpi: json['autoScaleForDpi'] as bool? ?? true,
       fileTextScale: (json['fileTextScale'] as num?)?.toDouble() ?? 1.0,
       fileIconScale: (json['fileIconScale'] as num?)?.toDouble() ?? 1.0,
@@ -273,6 +286,8 @@ class SecuritySettings {
       documentFolders: listField('documentFolders'),
       documentExclusions: json['documentExclusions'] as String? ?? '',
       torrentEnabled: json['torrentEnabled'] as bool? ?? true,
+      androidStoragePermissionPromptDismissed:
+          json['androidStoragePermissionPromptDismissed'] as bool? ?? false,
     );
   }
 
@@ -304,6 +319,7 @@ class SecuritySettings {
       'recentFilePaths': recentFilePaths,
       'favoriteSidebarCount': favoriteSidebarCount,
       'decryptNamesInExplorer': decryptNamesInExplorer,
+      'openFullscreenOnHiddenPreviewTap': openFullscreenOnHiddenPreviewTap,
       'autoScaleForDpi': autoScaleForDpi,
       'fileTextScale': fileTextScale,
       'fileIconScale': fileIconScale,
@@ -316,6 +332,8 @@ class SecuritySettings {
       'documentFolders': documentFolders,
       'documentExclusions': documentExclusions,
       'torrentEnabled': torrentEnabled,
+      'androidStoragePermissionPromptDismissed':
+          androidStoragePermissionPromptDismissed,
     };
   }
 }
@@ -411,6 +429,16 @@ class SecuritySettingsRepository {
     return next;
   }
 
+  Future<SecuritySettings> setAndroidStoragePermissionPromptDismissed(
+    SecuritySettings current,
+    bool dismissed,
+  ) async {
+    final next =
+        current.copyWith(androidStoragePermissionPromptDismissed: dismissed);
+    await save(next);
+    return next;
+  }
+
   List<String> _dedupePaths(Iterable<String> paths) {
     final seen = <String>{};
     final result = <String>[];
@@ -447,6 +475,7 @@ class SecuritySettingsRepository {
     int? recentRememberCount,
     int? favoriteSidebarCount,
     bool? decryptNamesInExplorer,
+    bool? openFullscreenOnHiddenPreviewTap,
     bool? autoScaleForDpi,
     double? fileTextScale,
     double? fileIconScale,
@@ -459,6 +488,7 @@ class SecuritySettingsRepository {
     List<String>? documentFolders,
     String? documentExclusions,
     bool? torrentEnabled,
+    bool? androidStoragePermissionPromptDismissed,
   }) async {
     var next = current.copyWith(
       useSeparateFilePassword: useSeparateFilePassword,
@@ -481,6 +511,7 @@ class SecuritySettingsRepository {
       recentRememberCount: recentRememberCount,
       favoriteSidebarCount: favoriteSidebarCount,
       decryptNamesInExplorer: decryptNamesInExplorer,
+      openFullscreenOnHiddenPreviewTap: openFullscreenOnHiddenPreviewTap,
       autoScaleForDpi: autoScaleForDpi,
       fileTextScale: fileTextScale,
       fileIconScale: fileIconScale,
@@ -493,6 +524,8 @@ class SecuritySettingsRepository {
       documentFolders: documentFolders,
       documentExclusions: documentExclusions,
       torrentEnabled: torrentEnabled,
+      androidStoragePermissionPromptDismissed:
+          androidStoragePermissionPromptDismissed,
       recentFilePaths: rememberRecentFiles == false
           ? const <String>[]
           : current.recentFilePaths

@@ -1,14 +1,24 @@
 ﻿package com.securevault.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.view.WindowManager
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -16,6 +26,7 @@ import java.util.UUID
 class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "secure_vault/platform"
+        private const val STORAGE_PERMISSION_REQUEST = 7301
 
         init {
             System.loadLibrary("crypt_core")
@@ -43,6 +54,19 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "getInitialOpenPath" -> result.success(resolveIntentToLocalPath(intent))
+                "storageAccessStatus" -> result.success(storageAccessStatus())
+                "requestStorageAccess" -> {
+                    requestStorageAccess()
+                    result.success(null)
+                }
+                "readMediaArtwork" -> {
+                    val path = call.arguments as? String
+                    result.success(if (path.isNullOrBlank()) null else readMediaArtwork(path))
+                }
+                "readVideoThumbnail" -> {
+                    val path = call.arguments as? String
+                    result.success(if (path.isNullOrBlank()) null else readVideoThumbnail(path))
+                }
                 "openExternal" -> {
                     val path = call.arguments as? String
                     if (path.isNullOrBlank()) {
@@ -94,6 +118,108 @@ class MainActivity : FlutterActivity() {
             "content" -> copyContentUri(uri)
             else -> null
         }
+    }
+
+    private fun storageAccessStatus(): Map<String, Any> =
+        mapOf(
+            "isAndroid" to true,
+            "sdkInt" to Build.VERSION.SDK_INT,
+            "hasAllFilesAccess" to hasAllFilesAccess(),
+            "hasMediaImages" to hasPermissionFor(Manifest.permission.READ_MEDIA_IMAGES, 33),
+            "hasMediaVideo" to hasPermissionFor(Manifest.permission.READ_MEDIA_VIDEO, 33),
+            "hasMediaAudio" to hasPermissionFor(Manifest.permission.READ_MEDIA_AUDIO, 33),
+        )
+
+    private fun hasAllFilesAccess(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            hasPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
+    private fun hasPermissionFor(permission: String, minSdk: Int): Boolean =
+        if (Build.VERSION.SDK_INT >= minSdk) {
+            hasPermission(permission)
+        } else {
+            hasPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
+    private fun hasPermission(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    private fun requestStorageAccess() {
+        val permissions = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (!hasPermission(Manifest.permission.READ_MEDIA_IMAGES)) {
+                permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
+            }
+            if (!hasPermission(Manifest.permission.READ_MEDIA_VIDEO)) {
+                permissions.add(Manifest.permission.READ_MEDIA_VIDEO)
+            }
+            if (!hasPermission(Manifest.permission.READ_MEDIA_AUDIO)) {
+                permissions.add(Manifest.permission.READ_MEDIA_AUDIO)
+            }
+        } else if (!hasPermission(Manifest.permission.READ_EXTERNAL_STORAGE)) {
+            permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+
+        if (permissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                permissions.toTypedArray(),
+                STORAGE_PERMISSION_REQUEST
+            )
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:$packageName")
+                })
+            } catch (_: Exception) {
+                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+            }
+        }
+    }
+
+    private fun readMediaArtwork(path: String): ByteArray? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(path)
+            retriever.embeddedPicture
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun readVideoThumbnail(path: String): ByteArray? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(path)
+            val bitmap = retriever.getFrameAtTime(
+                0,
+                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+            ) ?: return null
+            bitmapToJpeg(bitmap)
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun bitmapToJpeg(bitmap: Bitmap): ByteArray {
+        val stream = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 82, stream)
+        return stream.toByteArray()
     }
 
     private fun copyContentUri(uri: Uri): String? {
