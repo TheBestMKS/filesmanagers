@@ -18,7 +18,7 @@ import 'src/security/security_settings.dart';
 import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 
-const _appVersion = '0.5.0';
+const _appVersion = '0.5.1';
 
 void main(List<String> args) {
   MediaKit.ensureInitialized();
@@ -3105,6 +3105,8 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   late final Player _player;
   late final VideoController _controller;
   Future<void>? _openFuture;
+  StreamSubscription<String>? _errorSubscription;
+  Directory? _tempMediaDirectory;
   var _shuffle = false;
   var _repeatOne = false;
   String? _error;
@@ -3115,6 +3117,9 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     super.initState();
     _player = Player();
     _controller = VideoController(_player);
+    _errorSubscription = _player.stream.error.listen((error) {
+      if (mounted) setState(() => _error = error);
+    });
     _playlistKey = _makePlaylistKey(widget.playlist);
     _openFuture = _openPlaylist();
   }
@@ -3132,7 +3137,9 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
 
   @override
   void dispose() {
+    _errorSubscription?.cancel();
     _player.dispose();
+    unawaited(_clearTempMedia());
     super.dispose();
   }
 
@@ -3152,12 +3159,15 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   Future<void> _openPlaylist() async {
     setState(() => _error = null);
     try {
+      await _clearTempMedia();
       final medias = <Media>[];
-      for (final item in widget.playlist) {
+      for (var i = 0; i < widget.playlist.length; i++) {
+        final item = widget.playlist[i];
         if (item.bytes != null) {
-          medias.add(await Media.memory(item.bytes!));
+          final path = await _writeTempMedia(item, i);
+          medias.add(Media(Uri.file(path).toString()));
         } else if (item.path != null && item.path!.isNotEmpty) {
-          medias.add(Media(item.path!));
+          medias.add(Media(Uri.file(item.path!).toString()));
         }
       }
       if (medias.isEmpty) {
@@ -3170,6 +3180,37 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
       await _player.setShuffle(_shuffle);
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
+    }
+  }
+
+  Future<String> _writeTempMedia(MediaPreviewItem item, int index) async {
+    final directory =
+        _tempMediaDirectory ??= await Directory.systemTemp.createTemp(
+      'secure_vault_media_',
+    );
+    final extension = FileViewerService.extensionForName(item.title);
+    final fallbackExtension =
+        item.kind == FileContentKind.video ? '.mp4' : '.mp3';
+    final safeName = _safeFileName(item.title).trim().isEmpty
+        ? 'media_$index${extension.isEmpty ? fallbackExtension : extension}'
+        : _safeFileName(item.title);
+    final file = File(
+      '${directory.path}${Platform.pathSeparator}${index.toString().padLeft(3, '0')}_$safeName',
+    );
+    await file.writeAsBytes(item.bytes!, flush: true);
+    return file.path;
+  }
+
+  Future<void> _clearTempMedia() async {
+    final directory = _tempMediaDirectory;
+    _tempMediaDirectory = null;
+    if (directory == null) return;
+    try {
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+    } catch (_) {
+      // Temporary preview files are best-effort cleanup.
     }
   }
 
