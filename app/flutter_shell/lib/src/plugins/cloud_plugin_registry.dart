@@ -294,10 +294,14 @@ class CloudPluginRegistry {
             'https://raw.githubusercontent.com/example/securevault-yandex-disk/main/plugin.json',
         'authType': 'password-or-app-password',
         'variables': <String, Object?>{
-          'username': <String, Object?>{'label': 'Yandex login'},
+          'username': <String, Object?>{
+            'label': 'Yandex login',
+            'env': 'SECUREVAULT_YANDEX_DISK_WEBDAV_USERNAME',
+          },
           'password': <String, Object?>{
             'label': 'App password or WebDAV password',
-            'secret': true
+            'secret': true,
+            'env': 'SECUREVAULT_YANDEX_DISK_WEBDAV_PASSWORD',
           },
         },
         'capabilities': ['listFiles', 'fileInfo', 'fileStream', 'freeSpace'],
@@ -351,12 +355,17 @@ class CloudPluginRegistry {
         'authType': 'password-or-app-password',
         'variables': <String, Object?>{
           'baseUrl': <String, Object?>{
-            'label': 'Server URL, e.g. https://cloud.example.com'
+            'label': 'Server URL, e.g. https://cloud.example.com',
+            'env': 'SECUREVAULT_NEXTCLOUD_WEBDAV_BASEURL',
           },
-          'username': <String, Object?>{'label': 'Username'},
+          'username': <String, Object?>{
+            'label': 'Username',
+            'env': 'SECUREVAULT_NEXTCLOUD_WEBDAV_USERNAME',
+          },
           'password': <String, Object?>{
             'label': 'App password',
-            'secret': true
+            'secret': true,
+            'env': 'SECUREVAULT_NEXTCLOUD_WEBDAV_PASSWORD',
           },
         },
         'capabilities': ['listFiles', 'fileInfo', 'fileStream', 'freeSpace'],
@@ -391,6 +400,146 @@ class CloudPluginRegistry {
           'method': 'PUT',
           'url': '{baseUrl}/remote.php/dav/files/{username}/{path}',
           'auth': 'basic',
+        },
+      },
+    );
+    await _writeTemplate(
+      pluginsDir,
+      folder: 'ftp_resource',
+      manifest: <String, Object?>{
+        'id': 'ftp-resource',
+        'name': 'FTP resource',
+        'version': '1.0.0',
+        'pluginType': 'network-storage',
+        'description':
+            'Native Dart FTP adapter with passive mode LIST/MLSD, RETR, STOR, MKD and delete.',
+        'authType': 'password',
+        'capabilities': [
+          'listFiles',
+          'fileInfo',
+          'fileStream',
+          'upload',
+          'mkdir',
+          'delete'
+        ],
+        'variables': <String, Object?>{
+          'host': <String, Object?>{
+            'label': 'FTP host',
+            'env': 'SECUREVAULT_FTP_RESOURCE_HOST',
+          },
+          'port': <String, Object?>{
+            'label': 'FTP port',
+            'default': '21',
+            'env': 'SECUREVAULT_FTP_RESOURCE_PORT',
+          },
+          'username': <String, Object?>{
+            'label': 'Username',
+            'default': 'anonymous',
+            'env': 'SECUREVAULT_FTP_RESOURCE_USERNAME',
+          },
+          'password': <String, Object?>{
+            'label': 'Password',
+            'secret': true,
+            'default': 'anonymous@',
+            'env': 'SECUREVAULT_FTP_RESOURCE_PASSWORD',
+          },
+        },
+        'components': <String, Object?>{'executor': 'ftp'},
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{'executor': 'ftp'},
+          'linux-x64': <String, Object?>{'executor': 'ftp'},
+          'android-arm64': <String, Object?>{'executor': 'ftp'},
+          'fallback': <String, Object?>{'executor': 'ftp'},
+        },
+      },
+    );
+    await _writeTemplate(
+      pluginsDir,
+      folder: 'sftp_resource',
+      manifest: <String, Object?>{
+        'id': 'sftp-resource',
+        'name': 'SFTP/SSH resource',
+        'version': '1.0.0',
+        'pluginType': 'network-storage',
+        'description':
+            'SFTP-compatible SSH adapter through the system ssh client and key/agent authentication.',
+        'authType': 'ssh-key-or-agent',
+        'capabilities': [
+          'listFiles',
+          'fileInfo',
+          'fileStream',
+          'upload',
+          'mkdir',
+          'delete'
+        ],
+        'variables': <String, Object?>{
+          'host': <String, Object?>{
+            'label': 'SSH host',
+            'env': 'SECUREVAULT_SFTP_RESOURCE_HOST',
+          },
+          'port': <String, Object?>{
+            'label': 'SSH port',
+            'default': '22',
+            'env': 'SECUREVAULT_SFTP_RESOURCE_PORT',
+          },
+          'username': <String, Object?>{
+            'label': 'Username',
+            'env': 'SECUREVAULT_SFTP_RESOURCE_USERNAME',
+          },
+          'identityFile': <String, Object?>{
+            'label': 'Private key path',
+            'env': 'SECUREVAULT_SFTP_RESOURCE_IDENTITYFILE',
+          },
+        },
+        'components': <String, Object?>{'executor': 'sftp'},
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{'executor': 'sftp'},
+          'linux-x64': <String, Object?>{'executor': 'sftp'},
+          'android-arm64': <String, Object?>{'executor': 'sftp'},
+          'fallback': <String, Object?>{'executor': 'sftp'},
+        },
+      },
+    );
+    await _writeTemplate(
+      pluginsDir,
+      folder: 'smb_resource',
+      manifest: <String, Object?>{
+        'id': 'smb-resource',
+        'name': 'SMB resource',
+        'version': '1.0.0',
+        'pluginType': 'network-storage',
+        'description':
+            'SMB adapter through smbclient. Use //server/share as the share variable.',
+        'authType': 'password',
+        'capabilities': [
+          'listFiles',
+          'fileInfo',
+          'fileStream',
+          'upload',
+          'mkdir',
+          'delete'
+        ],
+        'variables': <String, Object?>{
+          'share': <String, Object?>{
+            'label': 'Share, e.g. //server/share',
+            'env': 'SECUREVAULT_SMB_RESOURCE_SHARE',
+          },
+          'username': <String, Object?>{
+            'label': 'Username',
+            'env': 'SECUREVAULT_SMB_RESOURCE_USERNAME',
+          },
+          'password': <String, Object?>{
+            'label': 'Password',
+            'secret': true,
+            'env': 'SECUREVAULT_SMB_RESOURCE_PASSWORD',
+          },
+        },
+        'components': <String, Object?>{'executor': 'smb'},
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{'executor': 'smb'},
+          'linux-x64': <String, Object?>{'executor': 'smb'},
+          'android-arm64': <String, Object?>{'executor': 'smb'},
+          'fallback': <String, Object?>{'executor': 'smb'},
         },
       },
     );

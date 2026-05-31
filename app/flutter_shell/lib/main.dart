@@ -20,7 +20,8 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.9.0';
+const _appVersion = '0.10.0';
+final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
   MediaKit.ensureInitialized();
@@ -194,6 +195,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     await PlatformServices.setScreenProtection(settings.blockScreenCapture);
     final runtime = await _bindings.getRuntimeInfo();
     final pluginDefs = await _plugins.loadPlugins();
+    _explorer.configurePlugins(pluginDefs);
     final locations = await _explorer.loadLocations(pluginDefs);
     final first =
         locations.where((e) => e.enabled && e.path != null).firstOrNull;
@@ -750,6 +752,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     if (FileViewerService.kindForName(entry.path) == FileContentKind.archive &&
         !_explorer.isVirtualPath(entry.path)) {
       await _openPathSafely(_explorer.zipRootPath(entry.path));
+      return;
+    }
+    if (FileViewerService.extensionForName(entry.path) == '.torrent' &&
+        !_explorer.isVirtualPath(entry.path)) {
+      await _openPathSafely(_explorer.torrentRootPath(entry.path));
       return;
     }
     final previewFuture = _explorer.previewFile(
@@ -2650,7 +2657,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   Future<String> _installPluginZip(String path) async {
     final dir = await _plugins.installPluginZip(path);
     final pluginDefs = await _plugins.loadPlugins();
-    setState(() => _pluginDefs = pluginDefs);
+    _explorer.configurePlugins(pluginDefs);
+    final locations = await _explorer.loadLocations(pluginDefs);
+    setState(() {
+      _pluginDefs = pluginDefs;
+      _locations = locations;
+    });
     return '${_language.t('settings.plugin.installed')} ${dir.path}';
   }
 
@@ -2723,163 +2735,176 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
 
     return _scaledInterface(Scaffold(
       body: SafeArea(
-        child: LayoutBuilder(
-          builder: (context, c) {
-            final sidebar = _Sidebar(
-              language: _language,
-              locations: _locations,
-              favoritePaths: _settings.favoritePaths
-                  .take(_settings.favoriteSidebarCount)
-                  .toList(),
-              recentPaths: _settings.rememberRecentFiles
-                  ? _settings.recentFilePaths
-                      .take(_settings.recentSidebarCount)
-                      .toList()
-                  : const <String>[],
-              currentPath: _currentPath,
-              page: _page,
-              onLocation: _selectLocation,
-              onFavoritePath: _openFavoritePath,
-              onRecentPath: (path) async {
-                final entry = await _explorer.entryForPath(path);
-                if (entry == null) {
-                  await _offerRemoveMissingRecent(path);
-                } else {
-                  await _openEntry(entry);
-                }
-              },
-              onRecentList: _openRecentFiles,
-              onFavoriteList: _openFavoriteFiles,
-              onExplorer: _openExplorerHome,
-              onMediaSection: _openMediaSection,
-              onSettings: () => setState(() => _page = ShellPage.settings),
-              onAbout: _showAbout,
-            );
-            final body = _page == ShellPage.settings
-                ? _SettingsView(
-                    language: _language,
-                    settings: _settings,
-                    plugins: _pluginDefs,
-                    onSave: _saveSecurity,
-                    onRequestAndroidStorageAccess:
-                        _requestAndroidStorageAccessFromSettings,
-                    onClear: _clearRemembered,
-                    onRevealCommonKey: _revealCommonEncryptionPassword,
-                    onValidateLanguageFile: _validateLanguageFile,
-                    onInstallLanguageFile: _installLanguageFile,
-                    onInstallPluginZip: _installPluginZip,
-                    onExportConfigurationArchive: _exportConfigurationArchive,
-                    onExportLanguageSample: _exportLanguageSample,
-                  )
-                : _page == ShellPage.gallery
-                    ? _GalleryLibraryView(
+        child: Stack(
+          children: [
+            LayoutBuilder(
+              builder: (context, c) {
+                final sidebar = _Sidebar(
+                  language: _language,
+                  locations: _locations,
+                  favoritePaths: _settings.favoritePaths
+                      .take(_settings.favoriteSidebarCount)
+                      .toList(),
+                  recentPaths: _settings.rememberRecentFiles
+                      ? _settings.recentFilePaths
+                          .take(_settings.recentSidebarCount)
+                          .toList()
+                      : const <String>[],
+                  currentPath: _currentPath,
+                  page: _page,
+                  onLocation: _selectLocation,
+                  onFavoritePath: _openFavoritePath,
+                  onRecentPath: (path) async {
+                    final entry = await _explorer.entryForPath(path);
+                    if (entry == null) {
+                      await _offerRemoveMissingRecent(path);
+                    } else {
+                      await _openEntry(entry);
+                    }
+                  },
+                  onRecentList: _openRecentFiles,
+                  onFavoriteList: _openFavoriteFiles,
+                  onExplorer: _openExplorerHome,
+                  onMediaSection: _openMediaSection,
+                  onSettings: () => setState(() => _page = ShellPage.settings),
+                  onAbout: _showAbout,
+                );
+                final body = _page == ShellPage.settings
+                    ? _SettingsView(
                         language: _language,
-                        snapshot: _snapshot,
-                        selected: _selected,
-                        searchQuery: _searchQuery,
-                        onRefresh: _refresh,
-                        onSearch: _searchDialog,
-                        onSearchFilters: _searchFiltersDialog,
-                        onEntry: _openEntry,
-                        onEntryFullscreen: (entry) =>
-                            _openEntry(entry, forceFullScreen: true),
+                        settings: _settings,
+                        plugins: _pluginDefs,
+                        onSave: _saveSecurity,
+                        onRequestAndroidStorageAccess:
+                            _requestAndroidStorageAccessFromSettings,
+                        onClear: _clearRemembered,
+                        onRevealCommonKey: _revealCommonEncryptionPassword,
+                        onValidateLanguageFile: _validateLanguageFile,
+                        onInstallLanguageFile: _installLanguageFile,
+                        onInstallPluginZip: _installPluginZip,
+                        onExportConfigurationArchive:
+                            _exportConfigurationArchive,
+                        onExportLanguageSample: _exportLanguageSample,
                       )
-                    : (_page == ShellPage.music || _page == ShellPage.video)
-                        ? _MediaOnlyView(
+                    : _page == ShellPage.gallery
+                        ? _GalleryLibraryView(
                             language: _language,
-                            entry: _selected,
-                            preview: _preview,
-                            mediaPlaylist: _mediaPlaylist,
-                            mediaResumePositions:
-                                _settings.mediaResumePositions,
-                            snapshot: _snapshot,
-                            isVideo: _page == ShellPage.video,
-                            onRefresh: _refresh,
-                            onSearch: _searchDialog,
-                            onSearchFilters: _searchFiltersDialog,
-                            onOpenPassword: _openWithPassword,
-                            onOpenExternal: _openPreviewExternal,
-                            onPreviewWindow: _showPreviewWindow,
-                            onEditPreview: _openEditor,
-                            onRememberMediaPosition: _rememberMediaPosition,
-                          )
-                        : _ExplorerView(
-                            language: _language,
-                            currentPath: _showingRecent
-                                ? _language.t('recent.title')
-                                : _currentPath,
                             snapshot: _snapshot,
                             selected: _selected,
-                            preview: _preview,
-                            mediaPlaylist: _mediaPlaylist,
-                            imagePlaylist: _imagePlaylist,
-                            mediaResumePositions:
-                                _settings.mediaResumePositions,
-                            onUp: _goUp,
-                            onRefresh: _refresh,
-                            onImport: _importFile,
-                            onExport: _exportFile,
-                            previewWidth: _previewWidth,
-                            previewVisible: _previewVisible,
-                            fileTextScale: _effectiveTextScale(context),
-                            fileIconScale: _effectiveIconScale(context),
-                            toolbarIconScale: _settings.toolbarIconScale
-                                .clamp(0.75, 2.5)
-                                .toDouble(),
-                            onPreviewResize: (delta) => setState(
-                              () => _previewWidth =
-                                  (_previewWidth - delta).clamp(280.0, 1800.0),
-                            ),
-                            onTogglePreview: () => setState(
-                                () => _previewVisible = !_previewVisible),
-                            onOpenPassword: _openWithPassword,
-                            onOpenExternal: _openPreviewExternal,
-                            onPreviewWindow: _showPreviewWindow,
-                            onEditPreview: _openEditor,
-                            onImageNavigate: _navigateImage,
-                            onRememberMediaPosition: _rememberMediaPosition,
-                            canPaste: _clipboardPaths.isNotEmpty,
-                            favoritePaths: _settings.favoritePaths,
-                            recentPaths: _settings.recentFilePaths,
-                            selectedPaths: _selectedPaths,
                             searchQuery: _searchQuery,
-                            searchUseRegex: _searchUseRegex,
-                            searchFilters: _searchFilters,
-                            localSearchEnabled:
-                                _searchMode == 'name' && !_searchRecursive,
-                            onPathEdit: _editPathDialog,
+                            onRefresh: _refresh,
                             onSearch: _searchDialog,
                             onSearchFilters: _searchFiltersDialog,
-                            onEntryAction: _handleEntryAction,
-                            onEmptyAreaAction: _handleEmptyAreaAction,
-                            onRemoveRecent: _removeRecentPath,
-                            onToggleFavorite: _toggleFavorite,
-                            onToggleSelection: _togglePathSelection,
-                            onSelectAllEntries: _selectAllEntries,
-                            onClearSelection: _clearSelection,
-                            onBulkAction: _handleBulkAction,
                             onEntry: _openEntry,
                             onEntryFullscreen: (entry) =>
                                 _openEntry(entry, forceFullScreen: true),
-                          );
-            if (c.maxWidth < 820) {
-              return Scaffold(
-                appBar: AppBar(title: Text(_language.appTitle)),
-                drawer: Drawer(child: sidebar),
-                body: body,
-              );
-            }
-            return Row(children: [
-              SizedBox(width: _sidebarWidth, child: sidebar),
-              _DragDivider(
-                onDrag: (delta) => setState(
-                  () => _sidebarWidth =
-                      (_sidebarWidth + delta).clamp(220.0, 520.0),
-                ),
-              ),
-              Expanded(child: body)
-            ]);
-          },
+                          )
+                        : (_page == ShellPage.music || _page == ShellPage.video)
+                            ? _MediaOnlyView(
+                                language: _language,
+                                entry: _selected,
+                                preview: _preview,
+                                mediaPlaylist: _mediaPlaylist,
+                                mediaResumePositions:
+                                    _settings.mediaResumePositions,
+                                snapshot: _snapshot,
+                                isVideo: _page == ShellPage.video,
+                                onRefresh: _refresh,
+                                onSearch: _searchDialog,
+                                onSearchFilters: _searchFiltersDialog,
+                                onOpenPassword: _openWithPassword,
+                                onOpenExternal: _openPreviewExternal,
+                                onPreviewWindow: _showPreviewWindow,
+                                onEditPreview: _openEditor,
+                                onRememberMediaPosition: _rememberMediaPosition,
+                              )
+                            : _ExplorerView(
+                                language: _language,
+                                currentPath: _showingRecent
+                                    ? _language.t('recent.title')
+                                    : _currentPath,
+                                snapshot: _snapshot,
+                                selected: _selected,
+                                preview: _preview,
+                                mediaPlaylist: _mediaPlaylist,
+                                imagePlaylist: _imagePlaylist,
+                                mediaResumePositions:
+                                    _settings.mediaResumePositions,
+                                onUp: _goUp,
+                                onRefresh: _refresh,
+                                onImport: _importFile,
+                                onExport: _exportFile,
+                                previewWidth: _previewWidth,
+                                previewVisible: _previewVisible,
+                                fileTextScale: _effectiveTextScale(context),
+                                fileIconScale: _effectiveIconScale(context),
+                                toolbarIconScale: _settings.toolbarIconScale
+                                    .clamp(0.75, 2.5)
+                                    .toDouble(),
+                                onPreviewResize: (delta) => setState(
+                                  () => _previewWidth = (_previewWidth - delta)
+                                      .clamp(280.0, 1800.0),
+                                ),
+                                onTogglePreview: () => setState(
+                                    () => _previewVisible = !_previewVisible),
+                                onOpenPassword: _openWithPassword,
+                                onOpenExternal: _openPreviewExternal,
+                                onPreviewWindow: _showPreviewWindow,
+                                onEditPreview: _openEditor,
+                                onImageNavigate: _navigateImage,
+                                onRememberMediaPosition: _rememberMediaPosition,
+                                canPaste: _clipboardPaths.isNotEmpty,
+                                favoritePaths: _settings.favoritePaths,
+                                recentPaths: _settings.recentFilePaths,
+                                selectedPaths: _selectedPaths,
+                                searchQuery: _searchQuery,
+                                searchUseRegex: _searchUseRegex,
+                                searchFilters: _searchFilters,
+                                localSearchEnabled:
+                                    _searchMode == 'name' && !_searchRecursive,
+                                onPathEdit: _editPathDialog,
+                                onSearch: _searchDialog,
+                                onSearchFilters: _searchFiltersDialog,
+                                onEntryAction: _handleEntryAction,
+                                onEmptyAreaAction: _handleEmptyAreaAction,
+                                onRemoveRecent: _removeRecentPath,
+                                onToggleFavorite: _toggleFavorite,
+                                onToggleSelection: _togglePathSelection,
+                                onSelectAllEntries: _selectAllEntries,
+                                onClearSelection: _clearSelection,
+                                onBulkAction: _handleBulkAction,
+                                onEntry: _openEntry,
+                                onEntryFullscreen: (entry) =>
+                                    _openEntry(entry, forceFullScreen: true),
+                              );
+                if (c.maxWidth < 820) {
+                  return Scaffold(
+                    appBar: AppBar(title: Text(_language.appTitle)),
+                    drawer: Drawer(child: sidebar),
+                    body: body,
+                  );
+                }
+                return Row(children: [
+                  SizedBox(width: _sidebarWidth, child: sidebar),
+                  _DragDivider(
+                    onDrag: (delta) => setState(
+                      () => _sidebarWidth =
+                          (_sidebarWidth + delta).clamp(220.0, 520.0),
+                    ),
+                  ),
+                  Expanded(child: body)
+                ]);
+              },
+            ),
+            _FloatingMediaDock(
+              session: _sharedMediaSession,
+              language: _language,
+              enableMiniVideo: _settings.enableMiniVideo,
+              enableMiniAudio: _settings.enableMiniAudio,
+              continueInBackground: _settings.continueMediaInBackground,
+              onOpenFullScreen: _showPreviewWindow,
+            ),
+          ],
         ),
       ),
     ));
@@ -5369,11 +5394,10 @@ class _MediaPreviewPlayer extends StatefulWidget {
 }
 
 class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
-  late final Player _player;
-  late final VideoController _controller;
+  Player get _player => _sharedMediaSession.player;
+  VideoController get _controller => _sharedMediaSession.controller;
   Future<void>? _openFuture;
   StreamSubscription<String>? _errorSubscription;
-  _InMemoryMediaServer? _memoryMediaServer;
   var _shuffle = false;
   var _repeatOne = false;
   String? _error;
@@ -5382,8 +5406,6 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   @override
   void initState() {
     super.initState();
-    _player = Player();
-    _controller = VideoController(_player);
     _errorSubscription = _player.stream.error.listen((error) {
       if (mounted) setState(() => _error = error);
     });
@@ -5407,8 +5429,6 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   void dispose() {
     unawaited(_rememberCurrentPosition());
     _errorSubscription?.cancel();
-    _player.dispose();
-    unawaited(_clearMemoryMedia());
     super.dispose();
   }
 
@@ -5428,23 +5448,14 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   Future<void> _openPlaylist() async {
     setState(() => _error = null);
     try {
-      await _clearMemoryMedia();
-      final medias = <Media>[];
-      for (var i = 0; i < widget.playlist.length; i++) {
-        final item = widget.playlist[i];
-        if (item.bytes != null) {
-          final server =
-              _memoryMediaServer ??= await _InMemoryMediaServer.start();
-          final uri = server.add(item, i);
-          medias.add(Media(uri.toString()));
-        } else if (item.path != null && item.path!.isNotEmpty) {
-          medias.add(Media(Uri.file(item.path!).toString()));
-        }
-      }
-      if (medias.isEmpty) {
-        throw StateError(widget.language.t('media.unavailable'));
-      }
-      await _player.open(Playlist(medias, index: _initialIndex()), play: true);
+      await _sharedMediaSession.open(
+        preview: widget.preview,
+        playlist: widget.playlist,
+        language: widget.language,
+        initialIndex: _initialIndex(),
+        repeatOne: _repeatOne,
+        shuffle: _shuffle,
+      );
       final initialItem = _itemAt(_initialIndex());
       final resumeMs = initialItem == null
           ? 0
@@ -5459,12 +5470,6 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     }
-  }
-
-  Future<void> _clearMemoryMedia() async {
-    final server = _memoryMediaServer;
-    _memoryMediaServer = null;
-    await server?.close();
   }
 
   Future<void> _toggleShuffle() async {
@@ -5576,6 +5581,86 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
         );
       },
     );
+  }
+}
+
+class _SharedMediaSession extends ChangeNotifier {
+  _SharedMediaSession();
+
+  late final Player player = Player();
+  late final VideoController controller = VideoController(player);
+  _InMemoryMediaServer? _memoryMediaServer;
+  FilePreview? preview;
+  List<MediaPreviewItem> playlist = const [];
+  var active = false;
+  var collapsed = false;
+
+  MediaPreviewItem? get currentItem {
+    if (playlist.isEmpty) return null;
+    final index = player.state.playlist.index.clamp(0, playlist.length - 1);
+    return playlist[index.toInt()];
+  }
+
+  Future<void> open({
+    required FilePreview preview,
+    required List<MediaPreviewItem> playlist,
+    required AppLanguage language,
+    required int initialIndex,
+    required bool repeatOne,
+    required bool shuffle,
+  }) async {
+    await _clearMemoryMedia();
+    final medias = <Media>[];
+    for (var i = 0; i < playlist.length; i++) {
+      final item = playlist[i];
+      if (item.bytes != null) {
+        final server =
+            _memoryMediaServer ??= await _InMemoryMediaServer.start();
+        final uri = server.add(item, i);
+        medias.add(Media(uri.toString()));
+      } else if (item.path != null && item.path!.isNotEmpty) {
+        if (item.path!.startsWith('remote://') ||
+            item.path!.startsWith('torrent://') ||
+            item.path!.startsWith('zip://')) {
+          continue;
+        }
+        medias.add(Media(Uri.file(item.path!).toString()));
+      }
+    }
+    if (medias.isEmpty) {
+      throw StateError(language.t('media.unavailable'));
+    }
+    this.preview = preview;
+    this.playlist = playlist;
+    active = true;
+    collapsed = false;
+    notifyListeners();
+    await player.open(Playlist(medias, index: initialIndex), play: true);
+    await player.setPlaylistMode(
+      repeatOne ? PlaylistMode.single : PlaylistMode.loop,
+    );
+    await player.setShuffle(shuffle);
+    notifyListeners();
+  }
+
+  Future<void> close() async {
+    active = false;
+    preview = null;
+    playlist = const [];
+    await player.stop();
+    await _clearMemoryMedia();
+    notifyListeners();
+  }
+
+  void setCollapsed(bool value) {
+    collapsed = value;
+    notifyListeners();
+  }
+
+  Future<void> _clearMemoryMedia() async {
+    final server = _memoryMediaServer;
+    _memoryMediaServer = null;
+    await server?.close();
   }
 }
 
@@ -5692,6 +5777,175 @@ class _InMemoryMediaEntry {
   final String title;
   final Uint8List bytes;
   final String contentType;
+}
+
+class _FloatingMediaDock extends StatefulWidget {
+  const _FloatingMediaDock({
+    required this.session,
+    required this.language,
+    required this.enableMiniVideo,
+    required this.enableMiniAudio,
+    required this.continueInBackground,
+    required this.onOpenFullScreen,
+  });
+
+  final _SharedMediaSession session;
+  final AppLanguage language;
+  final bool enableMiniVideo;
+  final bool enableMiniAudio;
+  final bool continueInBackground;
+  final ValueChanged<FilePreview> onOpenFullScreen;
+
+  @override
+  State<_FloatingMediaDock> createState() => _FloatingMediaDockState();
+}
+
+class _FloatingMediaDockState extends State<_FloatingMediaDock> {
+  Offset _offset = const Offset(24, 92);
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: widget.session,
+      builder: (context, _) {
+        final preview = widget.session.preview;
+        final item = widget.session.currentItem;
+        if (!widget.continueInBackground ||
+            !widget.session.active ||
+            preview == null ||
+            item == null) {
+          return const SizedBox.shrink();
+        }
+        final isVideo = item.kind == FileContentKind.video;
+        if (isVideo && !widget.enableMiniVideo) return const SizedBox.shrink();
+        if (!isVideo && !widget.enableMiniAudio) return const SizedBox.shrink();
+
+        final size = MediaQuery.sizeOf(context);
+        final width = isVideo && !widget.session.collapsed ? 340.0 : 320.0;
+        final height = isVideo && !widget.session.collapsed ? 236.0 : 92.0;
+        final left = _offset.dx
+            .clamp(8.0, math.max(8.0, size.width - width - 8))
+            .toDouble();
+        final top = _offset.dy
+            .clamp(8.0, math.max(8.0, size.height - height - 8))
+            .toDouble();
+        return Positioned(
+          left: left,
+          top: top,
+          width: width,
+          child: GestureDetector(
+            onPanUpdate: (details) => setState(() {
+              _offset += details.delta;
+            }),
+            child: Material(
+              elevation: 12,
+              borderRadius: BorderRadius.circular(20),
+              clipBehavior: Clip.antiAlias,
+              color: Theme.of(context).colorScheme.surface,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                if (isVideo && !widget.session.collapsed)
+                  AspectRatio(
+                    aspectRatio: 16 / 9,
+                    child: Video(
+                      controller: widget.session.controller,
+                      fit: BoxFit.contain,
+                    ),
+                  )
+                else
+                  _MiniAudioHeader(item: item),
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  child: Row(children: [
+                    Expanded(
+                      child: Text(
+                        item.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    ),
+                    StreamBuilder<bool>(
+                      stream: widget.session.player.stream.playing,
+                      initialData: widget.session.player.state.playing,
+                      builder: (context, snapshot) {
+                        final playing = snapshot.data ?? false;
+                        return IconButton(
+                          onPressed: widget.session.player.playOrPause,
+                          icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+                          tooltip: playing
+                              ? widget.language.t('media.pause')
+                              : widget.language.t('media.play'),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      onPressed: () => widget.session.setCollapsed(
+                        !widget.session.collapsed,
+                      ),
+                      icon: Icon(widget.session.collapsed
+                          ? Icons.open_in_full
+                          : Icons.minimize),
+                      tooltip: widget.language.t('preview.window'),
+                    ),
+                    IconButton(
+                      onPressed: () => widget.onOpenFullScreen(preview),
+                      icon: const Icon(Icons.fullscreen),
+                      tooltip: widget.language.t('preview.window'),
+                    ),
+                    IconButton(
+                      onPressed: () => unawaited(widget.session.close()),
+                      icon: const Icon(Icons.close),
+                      tooltip: widget.language.t('common.cancel'),
+                    ),
+                  ]),
+                ),
+              ]),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MiniAudioHeader extends StatelessWidget {
+  const _MiniAudioHeader({required this.item});
+
+  final MediaPreviewItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<Uint8List?>(
+      future:
+          MediaArtworkService.audioArtwork(path: item.path, bytes: item.bytes),
+      builder: (context, snapshot) {
+        final bytes = snapshot.data;
+        return Container(
+          height: 34,
+          color: Theme.of(context).colorScheme.secondaryContainer,
+          child: Row(children: [
+            const SizedBox(width: 10),
+            if (bytes != null && bytes.isNotEmpty)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: Image.memory(bytes,
+                    width: 28, height: 28, fit: BoxFit.cover),
+              )
+            else
+              const Icon(Icons.graphic_eq, size: 28),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'SecureVault media',
+                style: Theme.of(context).textTheme.labelMedium,
+              ),
+            ),
+          ]),
+        );
+      },
+    );
+  }
 }
 
 class _MediaTransportControls extends StatelessWidget {
@@ -6248,6 +6502,159 @@ class _ImageEditorDialogState extends State<_ImageEditorDialog> {
   }
 }
 
+class _MediaEditorTimeline extends StatelessWidget {
+  const _MediaEditorTimeline({
+    required this.preview,
+    required this.isVideo,
+    required this.range,
+    required this.durationSeconds,
+    required this.onChanged,
+  });
+
+  final FilePreview preview;
+  final bool isVideo;
+  final RangeValues range;
+  final double durationSeconds;
+  final ValueChanged<RangeValues> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child:
+            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          SizedBox(
+            height: 86,
+            child: CustomPaint(
+              painter: isVideo
+                  ? _VideoTimelinePainter(range: range)
+                  : _AudioWaveformPainter(
+                      bytes: preview.bytes,
+                      range: range,
+                    ),
+            ),
+          ),
+          RangeSlider(
+            values: range,
+            min: 0,
+            max: 1,
+            divisions: 1000,
+            labels: RangeLabels(
+              _secondsToTimestamp(durationSeconds * range.start),
+              _secondsToTimestamp(durationSeconds * range.end),
+            ),
+            onChanged: onChanged,
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+class _AudioWaveformPainter extends CustomPainter {
+  const _AudioWaveformPainter({required this.bytes, required this.range});
+
+  final List<int>? bytes;
+  final RangeValues range;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.height / 2;
+    final bars = math.max(48, size.width ~/ 4);
+    final paint = Paint()
+      ..color = const Color(0xFF0F4C81)
+      ..strokeWidth = math.max(1, size.width / bars * .55);
+    final raw = bytes ?? const <int>[];
+    for (var i = 0; i < bars; i++) {
+      final x = i / math.max(1, bars - 1) * size.width;
+      final sample = raw.isEmpty
+          ? (math.sin(i * .42) * .5 + .5)
+          : raw[(i * raw.length / bars).floor().clamp(0, raw.length - 1)] /
+              255.0;
+      final height = (sample * size.height * .82).clamp(4.0, size.height);
+      canvas.drawLine(
+        Offset(x, center - height / 2),
+        Offset(x, center + height / 2),
+        paint,
+      );
+    }
+    _paintSelection(canvas, size, range);
+  }
+
+  @override
+  bool shouldRepaint(covariant _AudioWaveformPainter oldDelegate) =>
+      oldDelegate.bytes != bytes || oldDelegate.range != range;
+}
+
+class _VideoTimelinePainter extends CustomPainter {
+  const _VideoTimelinePainter({required this.range});
+
+  final RangeValues range;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final frameWidth = math.max(54.0, size.width / 8);
+    for (var x = 0.0; x < size.width; x += frameWidth + 6) {
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+            x, 8, math.min(frameWidth, size.width - x), size.height - 16),
+        const Radius.circular(10),
+      );
+      final hue = (x / math.max(1, size.width) * 255).round();
+      final paint = Paint()
+        ..shader = LinearGradient(
+          colors: [
+            HSVColor.fromAHSV(1, hue.toDouble(), .42, .78).toColor(),
+            HSVColor.fromAHSV(1, (hue + 28).toDouble(), .58, .52).toColor(),
+          ],
+        ).createShader(rect.outerRect);
+      canvas.drawRRect(rect, paint);
+      canvas.drawCircle(
+        Offset(x + frameWidth / 2, size.height / 2),
+        12,
+        Paint()..color = Colors.white.withValues(alpha: .72),
+      );
+      canvas.drawPath(
+        Path()
+          ..moveTo(x + frameWidth / 2 - 4, size.height / 2 - 7)
+          ..lineTo(x + frameWidth / 2 - 4, size.height / 2 + 7)
+          ..lineTo(x + frameWidth / 2 + 8, size.height / 2)
+          ..close(),
+        Paint()..color = const Color(0xFF203040),
+      );
+    }
+    _paintSelection(canvas, size, range);
+  }
+
+  @override
+  bool shouldRepaint(covariant _VideoTimelinePainter oldDelegate) =>
+      oldDelegate.range != range;
+}
+
+void _paintSelection(Canvas canvas, Size size, RangeValues range) {
+  final left = range.start * size.width;
+  final right = range.end * size.width;
+  final overlay = Paint()..color = Colors.black.withValues(alpha: .34);
+  if (left > 0) {
+    canvas.drawRect(Rect.fromLTWH(0, 0, left, size.height), overlay);
+  }
+  if (right < size.width) {
+    canvas.drawRect(
+        Rect.fromLTWH(right, 0, size.width - right, size.height), overlay);
+  }
+  final border = Paint()
+    ..color = const Color(0xFFFFB000)
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 2;
+  canvas.drawRect(
+    Rect.fromLTRB(left, 2, right, size.height - 2),
+    border,
+  );
+}
+
 class _FfmpegEditorDialog extends StatefulWidget {
   const _FfmpegEditorDialog({
     required this.preview,
@@ -6273,6 +6680,8 @@ class _FfmpegEditorDialogState extends State<_FfmpegEditorDialog> {
   final _heightController = TextEditingController();
   final _crfController = TextEditingController(text: '23');
   final _audioBitrateController = TextEditingController(text: '128k');
+  RangeValues _timelineRange = const RangeValues(0, 1);
+  double _durationSeconds = 60;
   var _rotateVideo = false;
   var _busy = false;
   String? _log;
@@ -6290,6 +6699,7 @@ class _FfmpegEditorDialogState extends State<_FfmpegEditorDialog> {
       text:
           '$directory${Platform.pathSeparator}${_fileNameWithoutExtension(widget.preview.title)}_edited$extension',
     );
+    unawaited(_probeDuration());
   }
 
   @override
@@ -6317,6 +6727,23 @@ class _FfmpegEditorDialogState extends State<_FfmpegEditorDialog> {
         child: SingleChildScrollView(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Text(widget.language.t('editor.ffmpeg.note')),
+            const SizedBox(height: 12),
+            _MediaEditorTimeline(
+              preview: widget.preview,
+              isVideo: isVideo,
+              range: _timelineRange,
+              durationSeconds: _durationSeconds,
+              onChanged: (range) {
+                setState(() => _timelineRange = range);
+                _startController.text = _secondsToTimestamp(
+                  _durationSeconds * range.start,
+                );
+                _endController.text = _secondsToTimestamp(
+                  _durationSeconds * range.end,
+                );
+              },
+            ),
+            const SizedBox(height: 12),
             TextField(
               controller: _outputController,
               decoration: InputDecoration(
@@ -6468,6 +6895,33 @@ class _FfmpegEditorDialogState extends State<_FfmpegEditorDialog> {
     }
   }
 
+  Future<void> _probeDuration() async {
+    final source = widget.preview.sourcePath;
+    if (source == null ||
+        source.startsWith('remote://') ||
+        source.startsWith('zip://') ||
+        source.startsWith('torrent://')) {
+      return;
+    }
+    try {
+      final result = await Process.run('ffprobe', [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        source,
+      ]);
+      final parsed = double.tryParse(result.stdout.toString().trim());
+      if (mounted && parsed != null && parsed.isFinite && parsed > 0) {
+        setState(() => _durationSeconds = parsed);
+      }
+    } catch (_) {
+      // The editor still works through manual time fields when ffprobe is absent.
+    }
+  }
+
   List<String> _buildFfmpegArgs(String sourcePath, String outputPath) {
     final isVideo = widget.preview.contentKind == FileContentKind.video;
     final args = <String>['-y'];
@@ -6552,6 +7006,16 @@ String _ensureExtension(String path, String extension) {
     return '${path.substring(0, dot)}.$extension';
   }
   return '$path.$extension';
+}
+
+String _secondsToTimestamp(double seconds) {
+  final total = seconds.round().clamp(0, 24 * 60 * 60 * 30);
+  final hours = total ~/ 3600;
+  final minutes = (total ~/ 60) % 60;
+  final secs = total % 60;
+  return '${hours.toString().padLeft(2, '0')}:'
+      '${minutes.toString().padLeft(2, '0')}:'
+      '${secs.toString().padLeft(2, '0')}';
 }
 
 String _safeFileName(String value) =>

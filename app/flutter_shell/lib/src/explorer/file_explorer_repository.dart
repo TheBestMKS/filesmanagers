@@ -6,8 +6,10 @@ import 'package:archive/archive.dart';
 
 import '../ffi/crypt_bindings.dart';
 import '../plugins/cloud_plugin_registry.dart' hide basename;
+import '../remote/remote_file_system.dart';
 import '../security/vault_crypto.dart';
 import '../storage/app_paths.dart';
+import '../torrent/torrent_service.dart';
 import '../viewer/file_viewer_service.dart';
 import '../vault/vault_models.dart';
 import 'explorer_models.dart';
@@ -16,15 +18,31 @@ class FileExplorerRepository {
   FileExplorerRepository(this._bindings);
 
   final CryptBindings _bindings;
+  final RemoteFileSystemRepository _remote = RemoteFileSystemRepository();
+  final TorrentService _torrents = const TorrentService();
 
   static const int _fileContainerFixedSize = 106;
   static const int _fileParamsTlvTag = 0x1001;
   static const String _zipScheme = 'zip://';
+  static const String _remoteScheme = 'remote://';
+  static const String _torrentScheme = 'torrent://';
   static const String _folderMetaFileName = '.folder.cryptmeta';
 
-  bool isVirtualPath(String path) => _ZipVirtualPath.tryParse(path) != null;
+  void configurePlugins(List<CloudPluginDefinition> plugins) {
+    _remote.configurePlugins(plugins);
+  }
+
+  bool isVirtualPath(String path) =>
+      _ZipVirtualPath.tryParse(path) != null ||
+      _RemoteVirtualPath.tryParse(path) != null ||
+      _TorrentVirtualPath.tryParse(path) != null;
 
   String zipRootPath(String archivePath) => _ZipVirtualPath.build(archivePath);
+
+  String remoteRootPath(String pluginId) => _RemoteVirtualPath.build(pluginId);
+
+  String torrentRootPath(String torrentPath) =>
+      _TorrentVirtualPath.build(torrentPath);
 
   String parentPathFor(String path) {
     final zip = _ZipVirtualPath.tryParse(path);
@@ -34,6 +52,26 @@ class FileExplorerRepository {
       }
       final parts = zip.innerPath.split('/')..removeLast();
       return _ZipVirtualPath.build(zip.archivePath, parts.join('/'));
+    }
+    final remote = _RemoteVirtualPath.tryParse(path);
+    if (remote != null) {
+      if (remote.innerPath == '/') {
+        return remote.fullPath;
+      }
+      return _RemoteVirtualPath.build(
+        remote.pluginId,
+        _remoteParent(remote.innerPath),
+      );
+    }
+    final torrent = _TorrentVirtualPath.tryParse(path);
+    if (torrent != null) {
+      if (torrent.innerPath.isEmpty) {
+        return File(torrent.torrentPath).parent.path;
+      }
+      return _TorrentVirtualPath.build(
+        torrent.torrentPath,
+        _zipParent(torrent.innerPath),
+      );
     }
     return File(path).parent.path;
   }
@@ -145,7 +183,8 @@ class FileExplorerRepository {
           name: plugin.name,
           kind: ExplorerLocationKind.cloudPlugin,
           description: plugin.description ?? 'JSON cloud plugin',
-          enabled: false,
+          enabled: _remote.isSupported(plugin),
+          path: _remote.isSupported(plugin) ? remoteRootPath(plugin.id) : null,
           pluginId: plugin.id,
         ),
       );
@@ -163,6 +202,14 @@ class FileExplorerRepository {
     final zipPath = _ZipVirtualPath.tryParse(path);
     if (zipPath != null) {
       return _listZipDirectory(zipPath);
+    }
+    final remotePath = _RemoteVirtualPath.tryParse(path);
+    if (remotePath != null) {
+      return _listRemoteDirectory(remotePath);
+    }
+    final torrentPath = _TorrentVirtualPath.tryParse(path);
+    if (torrentPath != null) {
+      return _listTorrentDirectory(torrentPath);
     }
 
     final directory = Directory(path);
@@ -345,6 +392,14 @@ class FileExplorerRepository {
     if (zipPath != null) {
       return _entryForZipPath(zipPath);
     }
+    final remotePath = _RemoteVirtualPath.tryParse(path);
+    if (remotePath != null) {
+      return _entryForRemotePath(remotePath);
+    }
+    final torrentPath = _TorrentVirtualPath.tryParse(path);
+    if (torrentPath != null) {
+      return _entryForTorrentPath(torrentPath);
+    }
 
     final type = await FileSystemEntity.type(path, followLinks: false);
     if (type == FileSystemEntityType.notFound) {
@@ -448,6 +503,14 @@ class FileExplorerRepository {
     final zipPath = _ZipVirtualPath.tryParse(path);
     if (zipPath != null) {
       return _previewZipFile(zipPath);
+    }
+    final remotePath = _RemoteVirtualPath.tryParse(path);
+    if (remotePath != null) {
+      return _previewRemoteFile(remotePath);
+    }
+    final torrentPath = _TorrentVirtualPath.tryParse(path);
+    if (torrentPath != null) {
+      return _previewTorrentFile(torrentPath);
     }
 
     final file = File(path);
@@ -842,6 +905,13 @@ class FileExplorerRepository {
         normalized.contains('\\')) {
       throw ArgumentError('Invalid folder name.');
     }
+    final remote = _RemoteVirtualPath.tryParse(targetDirectory);
+    if (remote != null) {
+      await _remote
+          .clientFor(remote.pluginId)
+          .createDirectory(_remoteJoin(remote.innerPath, normalized));
+      return Directory(targetDirectory);
+    }
     final targetDir = Directory(targetDirectory);
     await targetDir.create(recursive: true);
     final directory = await _availableDirectory(targetDir, normalized);
@@ -869,6 +939,15 @@ class FileExplorerRepository {
   }
 
   Future<void> deleteEntity(String path) async {
+    final remote = _RemoteVirtualPath.tryParse(path);
+    if (remote != null) {
+      final entry = await _entryForRemotePath(remote);
+      await _remote.clientFor(remote.pluginId).delete(
+            remote.innerPath,
+            recursive: entry?.isDirectory == true,
+          );
+      return;
+    }
     final type = await FileSystemEntity.type(path, followLinks: false);
     if (type == FileSystemEntityType.directory) {
       await Directory(path).delete(recursive: true);
@@ -879,6 +958,246 @@ class FileExplorerRepository {
       return;
     }
     throw FileSystemException('Path not found', path);
+  }
+
+  Future<DirectorySnapshot> _listRemoteDirectory(
+      _RemoteVirtualPath remote) async {
+    try {
+      final client = _remote.clientFor(remote.pluginId);
+      final entries = <ExplorerEntry>[];
+      if (remote.innerPath != '/') {
+        entries.add(
+          ExplorerEntry(
+            name: '...',
+            path: _RemoteVirtualPath.build(
+              remote.pluginId,
+              _remoteParent(remote.innerPath),
+            ),
+            kind: ExplorerEntryKind.directory,
+            sizeBytes: 0,
+            modifiedAt: DateTime.now(),
+            isNavigationEntry: true,
+          ),
+        );
+      }
+      final remoteEntries = await client.list(remote.innerPath);
+      entries.addAll(remoteEntries.map((entry) {
+        final path = _RemoteVirtualPath.build(remote.pluginId, entry.path);
+        return ExplorerEntry(
+          name: entry.name,
+          path: path,
+          kind: entry.isDirectory
+              ? ExplorerEntryKind.directory
+              : _kindForFile(entry.name),
+          sizeBytes: entry.sizeBytes,
+          modifiedAt: entry.modifiedAt,
+        );
+      }));
+      return DirectorySnapshot(path: remote.fullPath, entries: entries);
+    } catch (error) {
+      return DirectorySnapshot(
+        path: remote.fullPath,
+        entries: const [],
+        error: 'Remote resource could not be opened: $error',
+      );
+    }
+  }
+
+  Future<ExplorerEntry?> _entryForRemotePath(_RemoteVirtualPath remote) async {
+    if (!_remote.hasPlugin(remote.pluginId)) return null;
+    if (remote.innerPath == '/') {
+      return ExplorerEntry(
+        name: remote.pluginId,
+        path: remote.fullPath,
+        kind: ExplorerEntryKind.directory,
+        sizeBytes: 0,
+        modifiedAt: DateTime.now(),
+      );
+    }
+    final stat =
+        await _remote.clientFor(remote.pluginId).stat(remote.innerPath);
+    if (stat == null || !stat.exists) return null;
+    return ExplorerEntry(
+      name: _remoteBasename(remote.innerPath),
+      path: remote.fullPath,
+      kind: stat.isDirectory
+          ? ExplorerEntryKind.directory
+          : _kindForFile(_remoteBasename(remote.innerPath)),
+      sizeBytes: stat.sizeBytes,
+      modifiedAt: stat.modifiedAt,
+    );
+  }
+
+  Future<FilePreview> _previewRemoteFile(_RemoteVirtualPath remote) async {
+    final name = _remoteBasename(remote.innerPath);
+    final bytes = await _remote.clientFor(remote.pluginId).readBytes(
+          remote.innerPath,
+        );
+    return FileViewerService.previewBytes(
+      name: name,
+      subtitle: 'Remote file, ${bytes.length} bytes',
+      bytes: bytes,
+      sourcePath: remote.fullPath,
+    );
+  }
+
+  Future<DirectorySnapshot> _listTorrentDirectory(
+      _TorrentVirtualPath torrent) async {
+    try {
+      final metadata = await _torrents.readMetadata(torrent.torrentPath);
+      final prefix = torrent.innerPath.isEmpty ? '' : '${torrent.innerPath}/';
+      final directories = <String, int>{};
+      final files = <TorrentFileEntry>[];
+      for (final file in metadata.files) {
+        if (!file.path.startsWith(prefix)) continue;
+        final rest = file.path.substring(prefix.length);
+        if (rest.isEmpty) continue;
+        final slash = rest.indexOf('/');
+        if (slash >= 0) {
+          directories[rest.substring(0, slash)] =
+              (directories[rest.substring(0, slash)] ?? 0) + file.sizeBytes;
+        } else {
+          files.add(file);
+        }
+      }
+      final entries = <ExplorerEntry>[];
+      if (torrent.innerPath.isNotEmpty) {
+        entries.add(
+          ExplorerEntry(
+            name: '...',
+            path: _TorrentVirtualPath.build(
+              torrent.torrentPath,
+              _zipParent(torrent.innerPath),
+            ),
+            kind: ExplorerEntryKind.directory,
+            sizeBytes: 0,
+            modifiedAt: DateTime.now(),
+            isNavigationEntry: true,
+          ),
+        );
+      }
+      for (final directory in directories.entries) {
+        entries.add(ExplorerEntry(
+          name: directory.key,
+          path: _TorrentVirtualPath.build(
+            torrent.torrentPath,
+            _joinZipPath(torrent.innerPath, directory.key),
+          ),
+          kind: ExplorerEntryKind.directory,
+          sizeBytes: directory.value,
+          modifiedAt: DateTime.now(),
+        ));
+      }
+      for (final file in files) {
+        final local = await _torrents.downloadedFile(metadata, file);
+        final localExists = await local.exists();
+        final stat = localExists ? await local.stat() : null;
+        entries.add(ExplorerEntry(
+          name: _zipBasename(file.path),
+          path: _TorrentVirtualPath.build(torrent.torrentPath, file.path),
+          kind: _kindForFile(file.path),
+          sizeBytes: file.sizeBytes,
+          modifiedAt: stat?.modified ?? DateTime.now(),
+          exists: true,
+        ));
+      }
+      entries.sort((a, b) {
+        if (a.isNavigationEntry != b.isNavigationEntry) {
+          return a.isNavigationEntry ? -1 : 1;
+        }
+        if (a.isDirectory != b.isDirectory) {
+          return a.isDirectory ? -1 : 1;
+        }
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+      return DirectorySnapshot(path: torrent.fullPath, entries: entries);
+    } catch (error) {
+      return DirectorySnapshot(
+        path: torrent.fullPath,
+        entries: const [],
+        error: 'Torrent could not be opened: $error',
+      );
+    }
+  }
+
+  Future<ExplorerEntry?> _entryForTorrentPath(
+      _TorrentVirtualPath torrent) async {
+    if (!await File(torrent.torrentPath).exists()) return null;
+    final metadata = await _torrents.readMetadata(torrent.torrentPath);
+    if (torrent.innerPath.isEmpty) {
+      return ExplorerEntry(
+        name: metadata.name,
+        path: torrent.fullPath,
+        kind: ExplorerEntryKind.directory,
+        sizeBytes: metadata.totalSize,
+        modifiedAt: (await File(torrent.torrentPath).stat()).modified,
+      );
+    }
+    TorrentFileEntry? exact;
+    for (final file in metadata.files) {
+      if (file.path == torrent.innerPath) {
+        exact = file;
+        break;
+      }
+    }
+    if (exact != null) {
+      final local = await _torrents.downloadedFile(metadata, exact);
+      final localExists = await local.exists();
+      final stat = localExists ? await local.stat() : null;
+      return ExplorerEntry(
+        name: _zipBasename(exact.path),
+        path: torrent.fullPath,
+        kind: _kindForFile(exact.path),
+        sizeBytes: exact.sizeBytes,
+        modifiedAt: stat?.modified ?? DateTime.now(),
+        exists: true,
+      );
+    }
+    final prefix = '${torrent.innerPath}/';
+    final hasChildren =
+        metadata.files.any((file) => file.path.startsWith(prefix));
+    if (!hasChildren) return null;
+    return ExplorerEntry(
+      name: _zipBasename(torrent.innerPath),
+      path: torrent.fullPath,
+      kind: ExplorerEntryKind.directory,
+      sizeBytes: 0,
+      modifiedAt: DateTime.now(),
+    );
+  }
+
+  Future<FilePreview> _previewTorrentFile(_TorrentVirtualPath torrent) async {
+    final metadata = await _torrents.readMetadata(torrent.torrentPath);
+    TorrentFileEntry? file;
+    for (final item in metadata.files) {
+      if (item.path == torrent.innerPath) {
+        file = item;
+        break;
+      }
+    }
+    if (file == null) {
+      return FilePreview(
+        title: _zipBasename(torrent.innerPath),
+        subtitle: 'Torrent entry is not a file.',
+        sourcePath: torrent.fullPath,
+      );
+    }
+    final local = await _torrents.downloadedFile(metadata, file);
+    if (!await local.exists()) {
+      final result = await _torrents.startDownload(
+        metadata,
+        selectedFiles: [file],
+      );
+      return FilePreview(
+        title: file.name,
+        subtitle:
+            'Torrent download started for selected file. aria2c exit: ${result.exitCode}',
+        sourcePath: torrent.fullPath,
+        text: '${result.stdout}\n${result.stderr}'.trim(),
+        contentKind: FileViewerService.kindForName(file.name),
+      );
+    }
+    return FileViewerService.previewPlainFile(local);
   }
 
   Future<DirectorySnapshot> _listZipDirectory(_ZipVirtualPath zip) async {
@@ -1125,6 +1444,15 @@ class FileExplorerRepository {
     final normalized = _normalizeZipEntryName(path);
     if (normalized.isEmpty) return basename(path);
     return normalized.split('/').last;
+  }
+
+  String _zipParent(String path) {
+    final normalized = _normalizeZipEntryName(path);
+    if (normalized.isEmpty) return '';
+    final parts = normalized.split('/');
+    if (parts.length <= 1) return '';
+    parts.removeLast();
+    return parts.join('/');
   }
 
   ExplorerEntryKind _kindForFile(String name) {
@@ -1587,5 +1915,122 @@ class _ZipVirtualPath {
     return inner.isEmpty
         ? '${FileExplorerRepository._zipScheme}$encoded'
         : '${FileExplorerRepository._zipScheme}$encoded/${Uri.encodeComponent(inner)}';
+  }
+}
+
+class _RemoteVirtualPath {
+  const _RemoteVirtualPath({
+    required this.pluginId,
+    required this.innerPath,
+    required this.fullPath,
+  });
+
+  final String pluginId;
+  final String innerPath;
+  final String fullPath;
+
+  static _RemoteVirtualPath? tryParse(String path) {
+    if (!path.startsWith(FileExplorerRepository._remoteScheme)) return null;
+    final rest = path.substring(FileExplorerRepository._remoteScheme.length);
+    final slash = rest.indexOf('/');
+    final pluginId = slash < 0 ? rest : rest.substring(0, slash);
+    if (pluginId.trim().isEmpty) return null;
+    final inner =
+        slash < 0 ? '/' : Uri.decodeComponent(rest.substring(slash + 1));
+    final normalized = _normalizeRemotePath(inner);
+    return _RemoteVirtualPath(
+      pluginId: pluginId,
+      innerPath: normalized,
+      fullPath: path,
+    );
+  }
+
+  static String build(String pluginId, [String innerPath = '/']) {
+    final normalized = _normalizeRemotePath(innerPath);
+    final encodedInner = Uri.encodeComponent(normalized);
+    return '${FileExplorerRepository._remoteScheme}$pluginId/$encodedInner';
+  }
+}
+
+String _normalizeRemotePath(String value) {
+  var normalized = value.replaceAll('\\', '/');
+  normalized = normalized
+      .split('/')
+      .where((part) => part.isNotEmpty && part != '..')
+      .join('/');
+  return normalized.isEmpty ? '/' : '/$normalized';
+}
+
+String _remoteJoin(String parent, String name) {
+  final normalizedParent = _normalizeRemotePath(parent);
+  final cleanName = name
+      .replaceAll('\\', '/')
+      .split('/')
+      .where((part) => part.isNotEmpty && part != '..')
+      .join('/');
+  if (cleanName.isEmpty) return normalizedParent;
+  if (normalizedParent == '/') return '/$cleanName';
+  return '$normalizedParent/$cleanName';
+}
+
+String _remoteParent(String path) {
+  final normalized = _normalizeRemotePath(path);
+  if (normalized == '/') return '/';
+  final index = normalized.lastIndexOf('/');
+  if (index <= 0) return '/';
+  return normalized.substring(0, index);
+}
+
+String _remoteBasename(String path) {
+  final normalized = _normalizeRemotePath(path);
+  if (normalized == '/') return '/';
+  return normalized.split('/').last;
+}
+
+class _TorrentVirtualPath {
+  const _TorrentVirtualPath({
+    required this.torrentPath,
+    required this.innerPath,
+    required this.fullPath,
+  });
+
+  final String torrentPath;
+  final String innerPath;
+  final String fullPath;
+
+  static _TorrentVirtualPath? tryParse(String path) {
+    if (!path.startsWith(FileExplorerRepository._torrentScheme)) return null;
+    final rest = path.substring(FileExplorerRepository._torrentScheme.length);
+    final slash = rest.indexOf('/');
+    final encodedTorrent = slash < 0 ? rest : rest.substring(0, slash);
+    if (encodedTorrent.isEmpty) return null;
+    try {
+      final torrentPath = utf8.decode(base64Url.decode(encodedTorrent));
+      final inner =
+          slash < 0 ? '' : Uri.decodeComponent(rest.substring(slash + 1));
+      return _TorrentVirtualPath(
+        torrentPath: torrentPath,
+        innerPath: inner
+            .replaceAll('\\', '/')
+            .split('/')
+            .where((part) => part.isNotEmpty && part != '..')
+            .join('/'),
+        fullPath: path,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String build(String torrentPath, [String innerPath = '']) {
+    final encoded = base64Url.encode(utf8.encode(torrentPath));
+    final inner = innerPath
+        .replaceAll('\\', '/')
+        .split('/')
+        .where((part) => part.isNotEmpty && part != '..')
+        .join('/');
+    return inner.isEmpty
+        ? '${FileExplorerRepository._torrentScheme}$encoded'
+        : '${FileExplorerRepository._torrentScheme}$encoded/${Uri.encodeComponent(inner)}';
   }
 }
