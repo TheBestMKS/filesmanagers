@@ -216,7 +216,7 @@
     "settings.language.install": "Add language to program",
     "settings.language.installed": "Language file installed:",
     "settings.plugins": "Plugins",
-    "settings.plugins.note": "Install plugin ZIP archives. Built-in WebDAV templates are created for Yandex Disk and Nextcloud.",
+    "settings.plugins.note": "Install plugin ZIP archives. Built-in templates cover WebDAV, FTP, embedded SFTP/SSH, and embedded SMB2/3.",
     "settings.plugin.zip.path": "Plugin ZIP path",
     "settings.plugin.install": "Install plugin ZIP",
     "settings.plugin.installed": "Plugin installed:",

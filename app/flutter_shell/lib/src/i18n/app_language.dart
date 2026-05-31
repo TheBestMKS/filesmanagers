@@ -366,7 +366,7 @@ class AppLanguage {
     'settings.language.installed': 'Language file installed:',
     'settings.plugins': 'Plugins',
     'settings.plugins.note':
-        'Install plugin ZIP archives. Built-in WebDAV templates are created for Yandex Disk and Nextcloud.',
+        'Install plugin ZIP archives. Built-in templates cover WebDAV, FTP, embedded SFTP/SSH, and embedded SMB2/3.',
     'settings.plugin.zip.path': 'Plugin ZIP path',
     'settings.plugin.install': 'Install plugin ZIP',
     'settings.plugin.installed': 'Plugin installed:',
@@ -774,7 +774,7 @@ class AppLanguage {
     'settings.language.installed': 'Файл языка добавлен:',
     'settings.plugins': 'Плагины',
     'settings.plugins.note':
-        'Устанавливайте ZIP-архивы плагинов. Встроенные шаблоны WebDAV создаются для Яндекс.Диска и Nextcloud.',
+        'Устанавливайте ZIP-архивы плагинов. Встроенные шаблоны охватывают WebDAV, FTP, embedded SFTP/SSH и embedded SMB2/3.',
     'settings.plugin.zip.path': 'Путь к ZIP-плагину',
     'settings.plugin.install': 'Установить ZIP-плагин',
     'settings.plugin.installed': 'Плагин установлен:',

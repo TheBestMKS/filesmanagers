@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:dart_smb2/dart_smb2.dart';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:xml/xml.dart';
 
 import '../plugins/cloud_plugin_registry.dart' hide basename;
@@ -69,6 +71,7 @@ class RemoteFileSystemRepository {
     return executor == 'webdav-json' ||
         executor == 'json-http' ||
         executor == 'ftp' ||
+        executor == 'ssh' ||
         executor == 'sftp' ||
         executor == 'smb';
   }
@@ -82,8 +85,8 @@ class RemoteFileSystemRepository {
     return switch (executor) {
       'webdav-json' || 'json-http' => WebDavRemoteClient(plugin),
       'ftp' => FtpRemoteClient(plugin),
-      'sftp' => SftpCommandRemoteClient(plugin),
-      'smb' => SmbCommandRemoteClient(plugin),
+      'ssh' || 'sftp' => SftpRemoteClient(plugin),
+      'smb' => SmbRemoteClient(plugin),
       _ => throw UnsupportedError('Unsupported plugin executor: $executor'),
     };
   }
@@ -551,285 +554,485 @@ class FtpRemoteClient implements RemoteFileSystemClient {
   }
 }
 
-class SftpCommandRemoteClient implements RemoteFileSystemClient {
-  SftpCommandRemoteClient(this.plugin);
+class SftpRemoteClient implements RemoteFileSystemClient {
+  SftpRemoteClient(this.plugin);
 
   final CloudPluginDefinition plugin;
 
   @override
   Future<List<RemoteFileSystemEntry>> list(String path) async {
-    final result = await _ssh([
-      'python3',
-      '-c',
-      _remotePythonListScript(),
-      _remotePath(path),
-    ]);
-    final decoded = jsonDecode(result);
-    if (decoded is! List) return const [];
-    return decoded
-        .whereType<Map>()
-        .map((item) => RemoteFileSystemEntry(
-              name: item['name'].toString(),
-              path: _remoteJoin(path, item['name'].toString()),
-              isDirectory: item['isDirectory'] == true,
-              sizeBytes:
-                  item['size'] is num ? (item['size'] as num).round() : 0,
-              modifiedAt: DateTime.fromMillisecondsSinceEpoch(
-                item['mtimeMs'] is num
-                    ? (item['mtimeMs'] as num).round()
-                    : DateTime.now().millisecondsSinceEpoch,
-              ),
-            ))
-        .toList()
-      ..sort((a, b) {
-        if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
+    return _withSftp((sftp) async {
+      final entries = await sftp.listdir(_remotePath(path));
+      return entries
+          .where((entry) => entry.filename != '.' && entry.filename != '..')
+          .map((entry) => RemoteFileSystemEntry(
+                name: entry.filename,
+                path: _remoteJoin(path, entry.filename),
+                isDirectory: entry.attr.isDirectory,
+                sizeBytes: entry.attr.size ?? 0,
+                modifiedAt: _sftpModifiedAt(entry.attr),
+              ))
+          .toList()
+        ..sort((a, b) {
+          if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        });
+    });
   }
 
   @override
   Future<RemoteFileStat?> stat(String path) async {
-    final parent = _remoteParent(path);
-    final name = _remoteBasename(path);
-    final entries = await list(parent);
-    return entries
-        .where((entry) => entry.name == name)
-        .map((entry) => RemoteFileStat(
-              path: path,
-              exists: true,
-              isDirectory: entry.isDirectory,
-              sizeBytes: entry.sizeBytes,
-              modifiedAt: entry.modifiedAt,
-            ))
-        .firstOrNull;
+    return _withSftp((sftp) async {
+      try {
+        final attrs = await sftp.stat(_remotePath(path));
+        return RemoteFileStat(
+          path: path,
+          exists: true,
+          isDirectory: attrs.isDirectory,
+          sizeBytes: attrs.size ?? 0,
+          modifiedAt: _sftpModifiedAt(attrs),
+        );
+      } on SftpStatusError catch (error) {
+        if (error.code == SftpStatusCode.noSuchFile) return null;
+        rethrow;
+      }
+    });
   }
 
   @override
   Future<Uint8List> readBytes(String path) async {
-    return _sshBytes(['cat', _remotePath(path)]);
+    return _withSftp((sftp) async {
+      final file = await sftp.open(_remotePath(path));
+      try {
+        return file.readBytes();
+      } finally {
+        await file.close();
+      }
+    });
   }
 
   @override
   Future<void> writeBytes(String path, List<int> bytes) async {
-    final variables = _variables(plugin);
-    final target = _sshTarget(variables);
-    final process = await Process.start(
-      'ssh',
-      [
-        ..._sshOptions(variables),
-        target,
-        'cat > ${_shellQuote(_remotePath(path))}',
-      ],
-      runInShell: Platform.isWindows,
-    );
-    process.stdin.add(bytes);
-    await process.stdin.close();
-    final stderr = await utf8.decodeStream(process.stderr);
-    final exitCode = await process.exitCode;
-    if (exitCode != 0) {
-      throw ProcessException('ssh', ['write', path], stderr, exitCode);
-    }
+    return _withSftp((sftp) async {
+      final file = await sftp.open(
+        _remotePath(path),
+        mode: SftpFileOpenMode.create |
+            SftpFileOpenMode.truncate |
+            SftpFileOpenMode.write,
+      );
+      try {
+        await file.writeBytes(Uint8List.fromList(bytes));
+      } finally {
+        await file.close();
+      }
+    });
   }
 
   @override
   Future<void> createDirectory(String path) async {
-    await _ssh(['mkdir', '-p', _remotePath(path)]);
+    return _withSftp((sftp) => sftp.mkdir(_remotePath(path)));
   }
 
   @override
   Future<void> delete(String path, {required bool recursive}) async {
-    await _ssh(recursive
-        ? ['rm', '-rf', _remotePath(path)]
-        : ['rm', '-f', _remotePath(path)]);
+    return _withSftp((sftp) => _deleteSftpPath(sftp, path, recursive));
   }
 
-  Future<String> _ssh(List<String> command) async {
-    final bytes = await _sshBytes(command);
-    return utf8.decode(bytes, allowMalformed: true);
-  }
-
-  Future<Uint8List> _sshBytes(List<String> command) async {
-    final variables = _variables(plugin);
-    final target = _sshTarget(variables);
-    final remoteCommand = command.map(_shellQuote).join(' ');
-    final result = await Process.run(
-      'ssh',
-      [..._sshOptions(variables), target, remoteCommand],
-      runInShell: Platform.isWindows,
-      stdoutEncoding: null,
-      stderrEncoding: utf8,
-    );
-    if (result.exitCode != 0) {
-      throw ProcessException(
-        'ssh',
-        [target, remoteCommand],
-        result.stderr.toString(),
-        result.exitCode,
-      );
+  Future<void> _deleteSftpPath(
+    SftpClient sftp,
+    String path,
+    bool recursive,
+  ) async {
+    final remotePath = _remotePath(path);
+    final attrs = await sftp.stat(remotePath);
+    if (attrs.isDirectory) {
+      if (recursive) {
+        final children = await sftp.listdir(remotePath);
+        for (final child in children) {
+          if (child.filename == '.' || child.filename == '..') continue;
+          await _deleteSftpPath(
+            sftp,
+            _remoteJoin(path, child.filename),
+            recursive,
+          );
+        }
+      }
+      await sftp.rmdir(remotePath);
+    } else {
+      await sftp.remove(remotePath);
     }
-    return Uint8List.fromList(
-      result.stdout is List<int>
-          ? result.stdout as List<int>
-          : utf8.encode(result.stdout.toString()),
-    );
   }
 
-  String _sshTarget(Map<String, String> variables) {
+  Future<T> _withSftp<T>(Future<T> Function(SftpClient) body) async {
+    final variables = _variables(plugin);
     final host = variables['host'] ?? variables['server'];
     if (host == null || host.isEmpty) {
       throw StateError('SFTP plugin ${plugin.id} has no host variable.');
     }
-    final username = variables['username'] ?? variables['user'];
-    return username == null || username.isEmpty ? host : '$username@$host';
+    final port = int.tryParse(variables['port'] ?? '') ?? 22;
+    final username = variables['username'] ??
+        variables['user'] ??
+        Platform.environment['USERNAME'] ??
+        Platform.environment['USER'] ??
+        'anonymous';
+    final password = _emptyToNull(variables['password']);
+    final identities = await _loadSshIdentities(variables);
+    final socket = await SSHSocket.connect(
+      host,
+      port,
+      timeout: _connectionTimeout(variables),
+    );
+    final client = SSHClient(
+      socket,
+      username: username,
+      identities: identities,
+      onPasswordRequest: password == null ? null : () => password,
+      onUserInfoRequest: password == null
+          ? null
+          : (request) => List<String>.filled(request.prompts.length, password),
+      ident: 'SecureVaultEmbeddedSSH_1.0',
+    );
+    final sftp = await client.sftp();
+    try {
+      return await body(sftp);
+    } finally {
+      sftp.close();
+      client.close();
+      try {
+        await client.done.timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
   }
 
-  List<String> _sshOptions(Map<String, String> variables) => [
-        if ((variables['port'] ?? '').isNotEmpty) ...[
-          '-p',
-          variables['port']!,
-        ],
-        if ((variables['identityFile'] ?? '').isNotEmpty) ...[
-          '-i',
-          variables['identityFile']!,
-        ],
-        '-o',
-        'BatchMode=yes',
-      ];
+  Future<List<SSHKeyPair>?> _loadSshIdentities(
+    Map<String, String> variables,
+  ) async {
+    final identityFile = _emptyToNull(
+      variables['identityFile'] ??
+          variables['identityfile'] ??
+          variables['privateKey'] ??
+          variables['privatekey'],
+    );
+    if (identityFile == null) return null;
+    final passphrase = _emptyToNull(
+      variables['passphrase'] ?? variables['keyPassphrase'],
+    );
+    final pem = await File(identityFile).readAsString();
+    return SSHKeyPair.fromPem(pem, passphrase);
+  }
 
-  String _remotePythonListScript() => r'''
-import json, os, sys
-p=sys.argv[1]
-out=[]
-for name in os.listdir(p):
-    if name in ('.','..'): continue
-    full=os.path.join(p,name)
-    st=os.stat(full)
-    out.append({'name':name,'isDirectory':os.path.isdir(full),'size':st.st_size,'mtimeMs':int(st.st_mtime*1000)})
-print(json.dumps(out))
-''';
+  DateTime _sftpModifiedAt(SftpFileAttrs attrs) {
+    final seconds = attrs.modifyTime;
+    if (seconds == null) return DateTime.now();
+    return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+  }
 }
 
-class SmbCommandRemoteClient implements RemoteFileSystemClient {
-  SmbCommandRemoteClient(this.plugin);
+class SmbRemoteClient implements RemoteFileSystemClient {
+  SmbRemoteClient(this.plugin);
 
   final CloudPluginDefinition plugin;
 
   @override
   Future<List<RemoteFileSystemEntry>> list(String path) async {
-    final output = await _smb(['dir "${_smbPath(path)}"']);
-    final entries = <RemoteFileSystemEntry>[];
-    for (final line in output.split(RegExp(r'\r?\n'))) {
-      final match =
-          RegExp(r'^\s*(.+?)\s+([ADHRS]+)\s+(\d+)\s+(.+)$').firstMatch(line);
-      if (match == null) continue;
-      final name = match.group(1)!.trim();
-      if (name == '.' || name == '..') continue;
-      entries.add(RemoteFileSystemEntry(
-        name: name,
-        path: _remoteJoin(path, name),
-        isDirectory: match.group(2)!.contains('D'),
-        sizeBytes: int.tryParse(match.group(3)!) ?? 0,
-        modifiedAt: DateTime.tryParse(match.group(4)!) ?? DateTime.now(),
-      ));
-    }
-    return entries
-      ..sort((a, b) {
-        if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
+    return _withPool((pool, settings) async {
+      final entries = await pool.listDirectory(_smbPoolPath(path, settings));
+      return entries
+          .where((entry) => entry.name != '.' && entry.name != '..')
+          .map((entry) => RemoteFileSystemEntry(
+                name: entry.name,
+                path: _remoteJoin(path, entry.name),
+                isDirectory: entry.isDirectory,
+                sizeBytes: entry.size,
+                modifiedAt: entry.stat.modified.toLocal(),
+              ))
+          .toList()
+        ..sort((a, b) {
+          if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        });
+    });
   }
 
   @override
   Future<RemoteFileStat?> stat(String path) async {
-    final parent = _remoteParent(path);
-    final name = _remoteBasename(path);
-    final entries = await list(parent);
-    return entries
-        .where((entry) => entry.name == name)
-        .map((entry) => RemoteFileStat(
-              path: path,
-              exists: true,
-              isDirectory: entry.isDirectory,
-              sizeBytes: entry.sizeBytes,
-              modifiedAt: entry.modifiedAt,
-            ))
-        .firstOrNull;
+    return _withPool((pool, settings) async {
+      final smbPath = _smbPoolPath(path, settings);
+      if (smbPath.isEmpty) {
+        return RemoteFileStat(
+          path: path,
+          exists: true,
+          isDirectory: true,
+          sizeBytes: 0,
+          modifiedAt: DateTime.now(),
+        );
+      }
+      try {
+        final stat = await pool.stat(smbPath);
+        return RemoteFileStat(
+          path: path,
+          exists: true,
+          isDirectory: stat.isDirectory,
+          sizeBytes: stat.size,
+          modifiedAt: stat.modified.toLocal(),
+        );
+      } on Smb2Exception catch (error) {
+        if (error.type == Smb2ErrorType.fileNotFound) return null;
+        rethrow;
+      }
+    });
   }
 
   @override
   Future<Uint8List> readBytes(String path) async {
-    final variables = _variables(plugin);
-    final temp = await File(
-      '${Directory.systemTemp.path}${Platform.pathSeparator}securevault_smb_${DateTime.now().microsecondsSinceEpoch}',
-    ).create();
-    try {
-      await _smb(['get "${_smbPath(path)}" "${temp.path}"'], variables);
-      return temp.readAsBytes();
-    } finally {
-      await temp.delete().catchError((_) => temp);
-    }
+    return _withPool(
+      (pool, settings) => pool.readFile(_smbPoolPath(path, settings)),
+    );
   }
 
   @override
   Future<void> writeBytes(String path, List<int> bytes) async {
-    final temp = await File(
-      '${Directory.systemTemp.path}${Platform.pathSeparator}securevault_smb_${DateTime.now().microsecondsSinceEpoch}',
-    ).create();
-    try {
-      await temp.writeAsBytes(bytes, flush: true);
-      await _smb(['put "${temp.path}" "${_smbPath(path)}"']);
-    } finally {
-      await temp.delete().catchError((_) => temp);
-    }
+    return _withPool(
+      (pool, settings) => pool.writeFile(
+        _smbPoolPath(path, settings),
+        Uint8List.fromList(bytes),
+      ),
+    );
   }
 
   @override
   Future<void> createDirectory(String path) async {
-    await _smb(['mkdir "${_smbPath(path)}"']);
+    return _withPool(
+      (pool, settings) => pool.mkdir(_smbPoolPath(path, settings)),
+    );
   }
 
   @override
   Future<void> delete(String path, {required bool recursive}) async {
-    final stat = await this.stat(path);
-    await _smb([
-      stat?.isDirectory == true
-          ? 'rmdir "${_smbPath(path)}"'
-          : 'del "${_smbPath(path)}"',
-    ]);
+    return _withPool(
+      (pool, settings) => _deleteSmbPath(pool, settings, path, recursive),
+    );
   }
 
-  Future<String> _smb(
-    List<String> commands, [
-    Map<String, String>? variables,
-  ]) async {
-    variables ??= _variables(plugin);
-    final share = variables['share'] ?? variables['url'];
+  Future<void> _deleteSmbPath(
+    Smb2Pool pool,
+    _SmbConnectionSettings settings,
+    String path,
+    bool recursive,
+  ) async {
+    final smbPath = _smbPoolPath(path, settings);
+    final stat = await pool.stat(smbPath);
+    if (stat.isDirectory) {
+      if (recursive) {
+        final children = await pool.listDirectory(smbPath);
+        for (final child in children) {
+          if (child.name == '.' || child.name == '..') continue;
+          await _deleteSmbPath(
+            pool,
+            settings,
+            _remoteJoin(path, child.name),
+            recursive,
+          );
+        }
+      }
+      await pool.rmdir(smbPath);
+    } else {
+      await pool.deleteFile(smbPath);
+    }
+  }
+
+  Future<T> _withPool<T>(
+    Future<T> Function(Smb2Pool, _SmbConnectionSettings) body,
+  ) async {
+    final settings = _smbSettings(_variables(plugin));
+    final pool = await Smb2Pool.connect(
+      host: settings.host,
+      share: settings.share,
+      user: settings.username,
+      password: settings.password,
+      domain: settings.domain,
+      workers: settings.workers,
+      timeoutSeconds: settings.timeoutSeconds,
+      seal: settings.seal,
+      signing: settings.signing,
+      version: settings.version,
+    );
+    try {
+      return await body(pool, settings);
+    } finally {
+      await pool.disconnect();
+    }
+  }
+
+  _SmbConnectionSettings _smbSettings(Map<String, String> variables) {
+    final rawShare = variables['share'] ?? variables['url'];
+    final parsed = _parseSmbShare(rawShare);
+    final host =
+        _emptyToNull(variables['host'] ?? variables['server']) ?? parsed.host;
+    final share = _emptyToNull(
+          variables['shareName'] ?? variables['sharename'],
+        ) ??
+        parsed.share;
+    if (host == null || host.isEmpty) {
+      throw StateError('SMB plugin ${plugin.id} has no host variable.');
+    }
     if (share == null || share.isEmpty) {
       throw StateError('SMB plugin ${plugin.id} has no share variable.');
     }
-    final username = variables['username'] ?? variables['user'] ?? '';
-    final password = variables['password'] ?? '';
-    final args = <String>[
-      share,
-      if (username.isNotEmpty) ...['-U', '$username%$password'],
-      '-c',
-      commands.join('; '),
-    ];
-    final result = await Process.run(
-      'smbclient',
-      args,
-      runInShell: Platform.isWindows,
+    var username = _emptyToNull(variables['username'] ?? variables['user']);
+    var domain = _emptyToNull(variables['domain'] ?? variables['workgroup']);
+    if (username != null && username.contains(r'\') && domain == null) {
+      final parts = username.split(r'\');
+      domain = parts.first;
+      username = parts.sublist(1).join(r'\');
+    }
+    return _SmbConnectionSettings(
+      host: host,
+      share: share,
+      basePath: _joinSmbFragments([
+        parsed.basePath,
+        _emptyToNull(variables['basePath'] ?? variables['basepath']),
+      ]),
+      username: username,
+      password: _emptyToNull(variables['password']),
+      domain: domain,
+      workers:
+          _boundedInt(variables['workers'], defaultValue: 4, min: 1, max: 8),
+      timeoutSeconds: _boundedInt(
+        variables['timeoutSeconds'],
+        defaultValue: 30,
+        min: 5,
+        max: 300,
+      ),
+      seal: _boolValue(variables['seal']),
+      signing: _boolValue(variables['signing']),
+      version: _smbVersion(variables['version']),
     );
-    if (result.exitCode != 0) {
-      throw ProcessException(
-        'smbclient',
-        args,
-        result.stderr.toString(),
-        result.exitCode,
+  }
+
+  _ParsedSmbShare _parseSmbShare(String? rawShare) {
+    final value = _emptyToNull(rawShare);
+    if (value == null) return const _ParsedSmbShare();
+    var normalized = value.trim().replaceAll('\\', '/');
+    if (normalized.startsWith('smb://')) {
+      normalized = normalized.substring('smb://'.length);
+    } else {
+      normalized = normalized.replaceFirst(RegExp(r'^/+'), '');
+    }
+    final parts =
+        normalized.split('/').where((part) => part.isNotEmpty).toList();
+    if (parts.length >= 2 &&
+        (value.contains('://') ||
+            value.startsWith('//') ||
+            value.startsWith(r'\\'))) {
+      return _ParsedSmbShare(
+        host: parts[0],
+        share: parts[1],
+        basePath: parts.length > 2 ? parts.sublist(2).join('/') : '',
       );
     }
-    return result.stdout.toString();
+    return _ParsedSmbShare(share: parts.isEmpty ? value : parts.first);
   }
+
+  String _smbPoolPath(String path, _SmbConnectionSettings settings) {
+    return _joinSmbFragments([settings.basePath, path]);
+  }
+
+  Smb2Version _smbVersion(String? value) {
+    final normalized =
+        (value ?? '').toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    return switch (normalized) {
+      '2' || 'smb2' || 'any2' => Smb2Version.any2,
+      '3' || 'smb3' || 'any3' => Smb2Version.any3,
+      '202' || 'smb202' || 'v202' => Smb2Version.v202,
+      '210' || '21' || 'smb210' || 'v210' => Smb2Version.v210,
+      '300' || '30' || 'smb300' || 'v300' => Smb2Version.v300,
+      '302' || '3020' || 'smb302' || 'v302' => Smb2Version.v302,
+      '311' || '3110' || 'smb311' || 'v311' => Smb2Version.v311,
+      _ => Smb2Version.any,
+    };
+  }
+}
+
+class _ParsedSmbShare {
+  const _ParsedSmbShare({this.host, this.share, this.basePath = ''});
+
+  final String? host;
+  final String? share;
+  final String basePath;
+}
+
+class _SmbConnectionSettings {
+  const _SmbConnectionSettings({
+    required this.host,
+    required this.share,
+    required this.basePath,
+    required this.username,
+    required this.password,
+    required this.domain,
+    required this.workers,
+    required this.timeoutSeconds,
+    required this.seal,
+    required this.signing,
+    required this.version,
+  });
+
+  final String host;
+  final String share;
+  final String basePath;
+  final String? username;
+  final String? password;
+  final String? domain;
+  final int workers;
+  final int timeoutSeconds;
+  final bool seal;
+  final bool signing;
+  final Smb2Version version;
+}
+
+String _joinSmbFragments(List<String?> fragments) {
+  return fragments
+      .whereType<String>()
+      .map((part) => part.replaceAll('\\', '/'))
+      .expand((part) => part.split('/'))
+      .where((part) => part.trim().isNotEmpty)
+      .join('/');
+}
+
+Duration _connectionTimeout(Map<String, String> variables) {
+  return Duration(
+    seconds: _boundedInt(
+      variables['timeoutSeconds'] ?? variables['timeout'],
+      defaultValue: 30,
+      min: 5,
+      max: 300,
+    ),
+  );
+}
+
+String? _emptyToNull(String? value) {
+  final trimmed = value?.trim();
+  return trimmed == null || trimmed.isEmpty ? null : trimmed;
+}
+
+bool _boolValue(String? value) {
+  final normalized = value?.trim().toLowerCase();
+  return normalized == '1' ||
+      normalized == 'true' ||
+      normalized == 'yes' ||
+      normalized == 'on';
+}
+
+int _boundedInt(
+  String? value, {
+  required int defaultValue,
+  required int min,
+  required int max,
+}) {
+  final parsed = int.tryParse(value ?? '') ?? defaultValue;
+  if (parsed < min) return min;
+  if (parsed > max) return max;
+  return parsed;
 }
 
 class _FtpConnection {
@@ -1080,14 +1283,6 @@ String _ftpPath(String path) {
   if (!RegExp(r'[\s"\\]').hasMatch(normalized)) return normalized;
   return '"${normalized.replaceAll('"', r'\"')}"';
 }
-
-String _smbPath(String path) {
-  final normalized =
-      path.replaceAll('/', '\\').replaceFirst(RegExp(r'^\\+'), '');
-  return normalized.isEmpty ? '\\' : normalized;
-}
-
-String _shellQuote(String value) => "'${value.replaceAll("'", "'\\''")}'";
 
 extension _FirstOrNull<T> on Iterable<T> {
   T? get firstOrNull {

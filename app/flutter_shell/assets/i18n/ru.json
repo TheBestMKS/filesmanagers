@@ -237,7 +237,7 @@
     "settings.language.exported": "Образец файла языка выгружен:",
     "settings.language.installed": "Файл языка добавлен:",
     "settings.plugins": "Плагины",
-    "settings.plugins.note": "Устанавливайте ZIP-архивы плагинов. Встроенные шаблоны WebDAV создаются для Яндекс.Диска и Nextcloud.",
+    "settings.plugins.note": "Устанавливайте ZIP-архивы плагинов. Встроенные шаблоны охватывают WebDAV, FTP, embedded SFTP/SSH и embedded SMB2/3.",
     "settings.plugin.zip.path": "Путь к ZIP-плагину",
     "settings.plugin.install": "Установить ZIP-плагин",
     "settings.plugin.installed": "Плагин установлен:",

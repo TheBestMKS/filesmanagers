@@ -462,8 +462,8 @@ class CloudPluginRegistry {
         'version': '1.0.0',
         'pluginType': 'network-storage',
         'description':
-            'SFTP-compatible SSH adapter through the system ssh client and key/agent authentication.',
-        'authType': 'ssh-key-or-agent',
+            'Embedded SFTP/SSH adapter powered by dartssh2. Supports password, keyboard-interactive password prompts, and PEM private keys without external ssh.',
+        'authType': 'ssh-password-or-key',
         'capabilities': [
           'listFiles',
           'fileInfo',
@@ -490,6 +490,21 @@ class CloudPluginRegistry {
             'label': 'Private key path',
             'env': 'SECUREVAULT_SFTP_RESOURCE_IDENTITYFILE',
           },
+          'passphrase': <String, Object?>{
+            'label': 'Private key passphrase',
+            'secret': true,
+            'env': 'SECUREVAULT_SFTP_RESOURCE_PASSPHRASE',
+          },
+          'password': <String, Object?>{
+            'label': 'Password',
+            'secret': true,
+            'env': 'SECUREVAULT_SFTP_RESOURCE_PASSWORD',
+          },
+          'timeoutSeconds': <String, Object?>{
+            'label': 'Connection timeout, seconds',
+            'default': '30',
+            'env': 'SECUREVAULT_SFTP_RESOURCE_TIMEOUTSECONDS',
+          },
         },
         'components': <String, Object?>{'executor': 'sftp'},
         'platformComponents': <String, Object?>{
@@ -509,7 +524,7 @@ class CloudPluginRegistry {
         'version': '1.0.0',
         'pluginType': 'network-storage',
         'description':
-            'SMB adapter through smbclient. Use //server/share as the share variable.',
+            'Embedded SMB2/3 adapter powered by dart_smb2/libsmb2. Use host + share name, smb://server/share, or //server/share without external smbclient.',
         'authType': 'password',
         'capabilities': [
           'listFiles',
@@ -520,9 +535,17 @@ class CloudPluginRegistry {
           'delete'
         ],
         'variables': <String, Object?>{
+          'host': <String, Object?>{
+            'label': 'SMB host',
+            'env': 'SECUREVAULT_SMB_RESOURCE_HOST',
+          },
           'share': <String, Object?>{
-            'label': 'Share, e.g. //server/share',
+            'label': 'Share name or URL, e.g. Documents or //server/share',
             'env': 'SECUREVAULT_SMB_RESOURCE_SHARE',
+          },
+          'domain': <String, Object?>{
+            'label': 'Domain / workgroup',
+            'env': 'SECUREVAULT_SMB_RESOURCE_DOMAIN',
           },
           'username': <String, Object?>{
             'label': 'Username',
@@ -532,6 +555,31 @@ class CloudPluginRegistry {
             'label': 'Password',
             'secret': true,
             'env': 'SECUREVAULT_SMB_RESOURCE_PASSWORD',
+          },
+          'version': <String, Object?>{
+            'label': 'SMB dialect: any, any2, any3, 2.1, 3.0, 3.1.1',
+            'default': 'any',
+            'env': 'SECUREVAULT_SMB_RESOURCE_VERSION',
+          },
+          'workers': <String, Object?>{
+            'label': 'Parallel SMB workers',
+            'default': '4',
+            'env': 'SECUREVAULT_SMB_RESOURCE_WORKERS',
+          },
+          'timeoutSeconds': <String, Object?>{
+            'label': 'Connection timeout, seconds',
+            'default': '30',
+            'env': 'SECUREVAULT_SMB_RESOURCE_TIMEOUTSECONDS',
+          },
+          'signing': <String, Object?>{
+            'label': 'Require SMB signing',
+            'default': 'false',
+            'env': 'SECUREVAULT_SMB_RESOURCE_SIGNING',
+          },
+          'seal': <String, Object?>{
+            'label': 'Require SMB encryption',
+            'default': 'false',
+            'env': 'SECUREVAULT_SMB_RESOURCE_SEAL',
           },
         },
         'components': <String, Object?>{'executor': 'smb'},
