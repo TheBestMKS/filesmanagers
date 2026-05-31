@@ -98,8 +98,9 @@ class CloudPluginDefinition {
 class CloudPluginRegistry {
   Future<List<CloudPluginDefinition>> loadPlugins() async {
     final pluginsDir = await AppPaths.pluginsDirectory();
-    await _ensureSamplePlugin(pluginsDir);
-    await _ensureWebDavTemplates(pluginsDir);
+    final deleted = await _deletedPluginIds(pluginsDir);
+    await _removeObsoleteSamplePlugin(pluginsDir);
+    await _ensureWebDavTemplates(pluginsDir, deleted);
     final plugins = <CloudPluginDefinition>[];
     await for (final entity in pluginsDir.list(followLinks: false)) {
       if (entity is! Directory) {
@@ -193,95 +194,64 @@ class CloudPluginRegistry {
     return target;
   }
 
-  Future<void> _ensureSamplePlugin(Directory pluginsDir) async {
+  Future<void> deletePlugin(String pluginId) async {
+    final pluginsDir = await AppPaths.pluginsDirectory();
+    final plugins = await loadPlugins();
+    final plugin = plugins.firstWhere(
+      (item) => item.id == pluginId,
+      orElse: () => throw FormatException('Plugin not found: $pluginId'),
+    );
+    final deleted = await _deletedPluginIds(pluginsDir);
+    deleted.add(pluginId);
+    await _deletedPluginFile(pluginsDir).writeAsString(
+      const JsonEncoder.withIndent('  ').convert(deleted.toList()..sort()),
+      flush: true,
+    );
+    final root = Directory(plugin.rootPath);
+    if (await root.exists()) {
+      await root.delete(recursive: true);
+    }
+  }
+
+  Future<Set<String>> _deletedPluginIds(Directory pluginsDir) async {
+    final file = _deletedPluginFile(pluginsDir);
+    if (!await file.exists()) return <String>{};
+    try {
+      final decoded = jsonDecode(await file.readAsString());
+      return decoded is List
+          ? decoded.map((item) => item.toString()).toSet()
+          : <String>{};
+    } catch (_) {
+      return <String>{};
+    }
+  }
+
+  File _deletedPluginFile(Directory pluginsDir) =>
+      File('${pluginsDir.path}${Platform.pathSeparator}.deleted_plugins.json');
+
+  Future<void> _removeObsoleteSamplePlugin(Directory pluginsDir) async {
     final sampleDir = Directory(
         '${pluginsDir.path}${Platform.pathSeparator}sample_cloud_plugin');
     final manifest =
         File('${sampleDir.path}${Platform.pathSeparator}plugin.json');
-    if (await manifest.exists()) {
-      return;
+    if (!await manifest.exists()) return;
+    try {
+      final decoded = jsonDecode(await manifest.readAsString());
+      if (decoded is Map && decoded['id'] == 'sample-cloud') {
+        await sampleDir.delete(recursive: true);
+      }
+    } catch (_) {
+      // Broken obsolete sample plugins should not block real plugin loading.
     }
-    await sampleDir.create(recursive: true);
-    await manifest.writeAsString(
-        const JsonEncoder.withIndent('  ').convert(<String, Object?>{
-      'id': 'sample-cloud',
-      'name': 'Sample Cloud Provider',
-      'version': '1.0.0',
-      'pluginType': 'cloud-storage',
-      'description': 'Template for JSON-defined cloud storage adapters.',
-      'repositoryUrl': 'https://example.invalid/securevault/sample-cloud.git',
-      'updateUrl':
-          'https://example.invalid/securevault/sample-cloud/plugin.json',
-      'authType': 'oauth-html-return',
-      'capabilities': [
-        'listFiles',
-        'fileInfo',
-        'fileStream',
-        'upload',
-        'freeSpace',
-        'checkUpdates'
-      ],
-      'proxy': <String, Object?>{
-        'mode': 'inherit',
-        'variables': ['HTTPS_PROXY', 'HTTP_PROXY']
-      },
-      'components': <String, Object?>{
-        'executor': 'json-http',
-        'htmlReturnPage': 'oauth_return.html'
-      },
-      'platformComponents': <String, Object?>{
-        'windows-x64': <String, Object?>{
-          'library': 'bin/windows-x64/cloud.dll'
-        },
-        'linux-x64': <String, Object?>{'library': 'bin/linux-x64/libcloud.so'},
-        'android-arm64': <String, Object?>{
-          'library': 'lib/arm64-v8a/libcloud.so'
-        },
-        'fallback': <String, Object?>{'executor': 'json-http'}
-      },
-      'auth': <String, Object?>{
-        'authorizeUrl': 'https://example.invalid/oauth/authorize',
-        'redirectUri': 'securevault://oauth-return',
-        'tokenRequest': <String, Object?>{
-          'method': 'POST',
-          'url': 'https://example.invalid/oauth/token',
-        },
-      },
-      'listFiles': <String, Object?>{
-        'method': 'GET',
-        'url': 'https://example.invalid/api/files',
-        'pathParameter': 'path',
-        'foldersJsonPath': r'$.folders',
-        'filesJsonPath': r'$.files',
-      },
-      'fileInfo': <String, Object?>{
-        'method': 'GET',
-        'url': 'https://example.invalid/api/file/info',
-        'idParameter': 'id',
-      },
-      'fileStream': <String, Object?>{
-        'method': 'GET',
-        'url': 'https://example.invalid/api/file/download',
-        'idParameter': 'id',
-      },
-      'mediaCatalog': <String, Object?>{
-        'enabled': false,
-        'search': <String, Object?>{
-          'method': 'GET',
-          'url': 'https://example.invalid/api/media/search',
-          'queryParameter': 'q',
-        },
-        'sections': <Map<String, Object?>>[
-          {'id': 'music', 'label': 'Music'},
-          {'id': 'video', 'label': 'Video'},
-        ],
-      },
-    }));
   }
 
-  Future<void> _ensureWebDavTemplates(Directory pluginsDir) async {
+  Future<void> _ensureWebDavTemplates(
+    Directory pluginsDir,
+    Set<String> deleted,
+  ) async {
     await _writeTemplate(
       pluginsDir,
+      deleted: deleted,
       folder: 'yandex_disk_webdav',
       manifest: <String, Object?>{
         'id': 'yandex-disk-webdav',
@@ -341,6 +311,7 @@ class CloudPluginRegistry {
     );
     await _writeTemplate(
       pluginsDir,
+      deleted: deleted,
       folder: 'nextcloud_webdav',
       manifest: <String, Object?>{
         'id': 'nextcloud-webdav',
@@ -405,6 +376,7 @@ class CloudPluginRegistry {
     );
     await _writeTemplate(
       pluginsDir,
+      deleted: deleted,
       folder: 'ftp_resource',
       manifest: <String, Object?>{
         'id': 'ftp-resource',
@@ -455,6 +427,7 @@ class CloudPluginRegistry {
     );
     await _writeTemplate(
       pluginsDir,
+      deleted: deleted,
       folder: 'sftp_resource',
       manifest: <String, Object?>{
         'id': 'sftp-resource',
@@ -517,6 +490,7 @@ class CloudPluginRegistry {
     );
     await _writeTemplate(
       pluginsDir,
+      deleted: deleted,
       folder: 'smb_resource',
       manifest: <String, Object?>{
         'id': 'smb-resource',
@@ -597,7 +571,10 @@ class CloudPluginRegistry {
     Directory pluginsDir, {
     required String folder,
     required Map<String, Object?> manifest,
+    Set<String> deleted = const <String>{},
   }) async {
+    final id = manifest['id']?.toString();
+    if (id != null && deleted.contains(id)) return;
     final dir = Directory('${pluginsDir.path}${Platform.pathSeparator}$folder');
     final file = File('${dir.path}${Platform.pathSeparator}plugin.json');
     if (await file.exists()) return;

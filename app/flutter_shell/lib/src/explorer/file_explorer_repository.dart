@@ -44,6 +44,9 @@ class FileExplorerRepository {
   String torrentRootPath(String torrentPath) =>
       _TorrentVirtualPath.build(torrentPath);
 
+  Future<File> importTorrentToVault(String torrentPath) =>
+      _torrents.importTorrent(torrentPath);
+
   String parentPathFor(String path) {
     final zip = _ZipVirtualPath.tryParse(path);
     if (zip != null) {
@@ -144,37 +147,6 @@ class FileExplorerRepository {
         description: 'Файлы внутри директории приложения',
       ),
     );
-
-    locations.addAll(const <ExplorerLocation>[
-      ExplorerLocation(
-        id: 'network-smb',
-        name: 'SMB ресурс',
-        kind: ExplorerLocationKind.network,
-        description: 'Подключаемый сетевой провайдер',
-        enabled: false,
-      ),
-      ExplorerLocation(
-        id: 'network-ssh',
-        name: 'SSH/SCP ресурс',
-        kind: ExplorerLocationKind.network,
-        description: 'Подключаемый сетевой провайдер',
-        enabled: false,
-      ),
-      ExplorerLocation(
-        id: 'network-ftp',
-        name: 'FTP ресурс',
-        kind: ExplorerLocationKind.network,
-        description: 'Подключаемый сетевой провайдер',
-        enabled: false,
-      ),
-      ExplorerLocation(
-        id: 'network-sftp',
-        name: 'SFTP ресурс',
-        kind: ExplorerLocationKind.network,
-        description: 'Подключаемый сетевой провайдер',
-        enabled: false,
-      ),
-    ]);
 
     for (final plugin in plugins) {
       locations.add(

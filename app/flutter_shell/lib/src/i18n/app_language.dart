@@ -426,7 +426,7 @@ class AppLanguage {
     'snack.send.next':
         'Send action is prepared in the context menu and needs a platform share adapter.',
     'snack.folder.actions.next':
-        'Folder encryption/container actions are present in the menu and will be wired to recursive/container processing in the next version.',
+        'Folder encryption/container actions are available from the context menu.',
     'snack.uploaded': 'Uploaded:',
     'snack.upload.error': 'Upload error:',
     'snack.download.select': 'Choose a file to download.',
@@ -437,10 +437,10 @@ class AppLanguage {
     'snack.decrypted': 'Decrypted:',
     'snack.decrypt.error': 'Decryption error:',
     'provider.reserved':
-        'This location is reserved for an SMB/SSH/FTP/SFTP network provider. A transport adapter and connection form are required.',
+        'Configure and enable the corresponding network/cloud plugin in the plugin manager.',
     'provider.plugin': 'JSON plugin found:',
     'provider.plugin.detail':
-        'It describes auth, listFiles, fileInfo, and fileStream. The request executor is connected through a separate adapter.',
+        'The plugin executor handles auth, listFiles, fileInfo and fileStream according to its manifest.',
     'settings.plugins.window.title': 'Plugin settings',
     'settings.plugins.open.window': 'Open plugin settings window',
     'selection.zip.local.only':
@@ -465,6 +465,67 @@ class AppLanguage {
         'This path is unavailable now. If you continue, the current folder may stop working. Continue?',
     'explorer.folder.decrypt.name': 'Decrypt folder name',
     'explorer.folder.encrypt.name': 'Encrypt folder name',
+    'common.close': 'Close',
+    'explorer.show.hidden': 'Show hidden files and folders',
+    'explorer.show.system': 'Show system files and folders',
+    'settings.show.hidden': 'Show hidden files in Explorer',
+    'settings.show.system': 'Show system files in Explorer',
+    'settings.thumbnails.cache.encrypted': 'Encrypt persistent thumbnail cache',
+    'settings.background.external.overlay':
+        'Allow system floating player when supported by the OS',
+    'settings.android.media.notifications':
+        'Android media notification controls',
+    'settings.media.headset.controls': 'Headset media controls',
+    'settings.media.resume.encrypted': 'Encrypt saved playback positions',
+    'settings.reset.defaults': 'Reset to defaults',
+    'settings.reset.confirm': 'Reset all settings to default values?',
+    'settings.reset.done': 'Settings reset to defaults.',
+    'settings.plugin.repository': 'Repository',
+    'settings.plugin.update': 'Update source',
+    'settings.plugin.info': 'Plugin information',
+    'settings.plugin.settings': 'Plugin settings',
+    'settings.plugin.export': 'Export plugin',
+    'settings.plugin.delete': 'Delete plugin',
+    'settings.plugin.exported': 'Plugin exported:',
+    'settings.plugin.deleted': 'Plugin deleted.',
+    'settings.plugin.no.settings':
+        'This plugin does not declare editable variables.',
+    'jobs.title': 'Background operations',
+    'jobs.collapsed': 'Operations are collapsed.',
+    'jobs.collapse': 'Collapse',
+    'jobs.cancel': 'Cancel operation',
+    'jobs.done': 'Done',
+    'jobs.encrypt.file': 'Encrypting file',
+    'jobs.decrypt.file': 'Decrypting file',
+    'jobs.encrypt.folder': 'Recursive folder encryption',
+    'jobs.decrypt.folder': 'Recursive folder decryption',
+    'media.tab.current': 'Current',
+    'media.tab.all': 'All',
+    'media.tab.playlists': 'Playlists',
+    'media.tab.albums': 'Albums',
+    'media.tab.artists': 'Artists',
+    'media.tab.genres': 'Genres',
+    'media.tab.folders': 'Folders',
+    'media.tab.previous': 'Previous recent',
+    'media.group.unknown': 'Unknown',
+    'media.choose.to.play': 'Choose a track or video to start playback.',
+    'media.speed': 'Playback speed',
+    'media.tracks': 'Tracks and subtitles',
+    'media.audio.track': 'Audio track',
+    'media.subtitle.track': 'Subtitles',
+    'media.lyrics': 'Lyrics',
+    'media.equalizer': 'Equalizer',
+    'media.equalizer.flat': 'Flat',
+    'media.equalizer.bass': 'Bass boost',
+    'media.equalizer.voice': 'Voice',
+    'media.equalizer.treble': 'Treble boost',
+    'media.equalizer.loudness': 'Loudness',
+    'about.features.media.session':
+        'Audio and video share one media session across preview, full-window mode and mini-player, with resume positions and media-key control.',
+    'about.features.plugins':
+        'Built-in real plugin executors cover WebDAV, FTP, embedded SFTP/SSH and embedded SMB2/3; plugin manager supports info, settings, export and delete.',
+    'about.features.background.jobs':
+        'Encryption and recursive folder processing show cancellable background progress at the bottom of the app.',
   };
 
   static const _russianStrings = <String, String>{
@@ -877,7 +938,7 @@ class AppLanguage {
     'snack.send.next':
         'Отправка добавлена в контекстное меню и требует платформенный адаптер общего доступа.',
     'snack.folder.actions.next':
-        'Действия с папками уже есть в меню и будут подключены к рекурсивной обработке и контейнерам в следующей версии.',
+        'Действия шифрования папок и контейнеров доступны в контекстном меню.',
     'snack.uploaded': 'Загружено:',
     'snack.upload.error': 'Ошибка загрузки:',
     'snack.download.select': 'Выберите файл для выгрузки.',
@@ -888,10 +949,74 @@ class AppLanguage {
     'snack.decrypted': 'Расшифровано:',
     'snack.decrypt.error': 'Ошибка расшифрования:',
     'provider.reserved':
-        'Это место зарезервировано под сетевой провайдер SMB/SSH/FTP/SFTP. Нужен транспортный адаптер и форма подключения.',
+        'Настройте и включите соответствующий сетевой или облачный плагин в менеджере плагинов.',
     'provider.plugin': 'JSON-плагин найден:',
     'provider.plugin.detail':
-        'Он описывает auth, listFiles, fileInfo и fileStream. Исполнитель запросов будет подключаться отдельным адаптером.',
+        'Executor плагина обрабатывает auth, listFiles, fileInfo и fileStream согласно manifest.',
+    'common.close': 'Закрыть',
+    'explorer.show.hidden': 'Показывать скрытые файлы и папки',
+    'explorer.show.system': 'Показывать системные файлы и папки',
+    'settings.show.hidden': 'Показывать скрытые файлы в проводнике',
+    'settings.show.system': 'Показывать системные файлы в проводнике',
+    'settings.thumbnails.cache.encrypted': 'Шифровать постоянный кэш миниатюр',
+    'settings.background.external.overlay':
+        'Разрешить системный плавающий плеер, если ОС это поддерживает',
+    'settings.android.media.notifications':
+        'Управление медиа из Android-уведомлений',
+    'settings.media.headset.controls': 'Управление с гарнитуры',
+    'settings.media.resume.encrypted':
+        'Шифровать сохраненные позиции воспроизведения',
+    'settings.reset.defaults': 'Сбросить по умолчанию',
+    'settings.reset.confirm':
+        'Сбросить все настройки к значениям по умолчанию?',
+    'settings.reset.done': 'Настройки сброшены по умолчанию.',
+    'settings.plugin.repository': 'Репозиторий',
+    'settings.plugin.update': 'Источник обновления',
+    'settings.plugin.info': 'Информация о плагине',
+    'settings.plugin.settings': 'Настройки плагина',
+    'settings.plugin.export': 'Экспорт плагина',
+    'settings.plugin.delete': 'Удалить плагин',
+    'settings.plugin.exported': 'Плагин экспортирован:',
+    'settings.plugin.deleted': 'Плагин удален.',
+    'settings.plugin.no.settings':
+        'Этот плагин не объявляет редактируемые переменные.',
+    'jobs.title': 'Фоновые операции',
+    'jobs.collapsed': 'Операции свернуты.',
+    'jobs.collapse': 'Свернуть',
+    'jobs.cancel': 'Прервать операцию',
+    'jobs.done': 'Готово',
+    'jobs.encrypt.file': 'Шифрование файла',
+    'jobs.decrypt.file': 'Расшифрование файла',
+    'jobs.encrypt.folder': 'Рекурсивное шифрование папки',
+    'jobs.decrypt.folder': 'Рекурсивное расшифрование папки',
+    'media.tab.current': 'Текущие',
+    'media.tab.all': 'Все',
+    'media.tab.playlists': 'Плейлисты',
+    'media.tab.albums': 'Альбомы',
+    'media.tab.artists': 'Исполнители',
+    'media.tab.genres': 'Жанры',
+    'media.tab.folders': 'Папки',
+    'media.tab.previous': 'Последние предыдущие',
+    'media.group.unknown': 'Неизвестно',
+    'media.choose.to.play':
+        'Выберите трек или видео, чтобы начать воспроизведение.',
+    'media.speed': 'Скорость воспроизведения',
+    'media.tracks': 'Дорожки и субтитры',
+    'media.audio.track': 'Звуковая дорожка',
+    'media.subtitle.track': 'Субтитры',
+    'media.lyrics': 'Текст песни',
+    'media.equalizer': 'Эквалайзер',
+    'media.equalizer.flat': 'Без изменений',
+    'media.equalizer.bass': 'Больше баса',
+    'media.equalizer.voice': 'Голос',
+    'media.equalizer.treble': 'Больше высоких',
+    'media.equalizer.loudness': 'Громкость/плотность',
+    'about.features.media.session':
+        'Аудио и видео используют одну media-сессию для preview, режима во все окно и мини-плеера, с позициями продолжения и управлением media-клавишами.',
+    'about.features.plugins':
+        'Встроенные реальные plugin-executor покрывают WebDAV, FTP, embedded SFTP/SSH и embedded SMB2/3; менеджер плагинов поддерживает информацию, настройки, экспорт и удаление.',
+    'about.features.background.jobs':
+        'Шифрование и рекурсивная обработка папок показывают отменяемый фоновый прогресс в нижней части приложения.',
   };
 
   static List<String> get requiredStringKeys => _englishStrings.keys.toList();

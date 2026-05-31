@@ -40,6 +40,29 @@ class TorrentFileEntry {
 class TorrentService {
   const TorrentService();
 
+  Future<File> importTorrent(String torrentPath) async {
+    final source = File(torrentPath);
+    if (!await source.exists()) {
+      throw FileSystemException('Torrent file not found', torrentPath);
+    }
+    final metadata = await readMetadata(torrentPath);
+    final torrents = await AppPaths.torrentsDirectory();
+    final name = _safeFileName(metadata.name).isEmpty
+        ? 'torrent'
+        : _safeFileName(metadata.name);
+    final target = File(
+      '${torrents.path}${Platform.pathSeparator}'
+      '${name}_${metadata.infoHash.substring(0, 12)}.torrent',
+    );
+    if (_normalizePath(source.path) == _normalizePath(target.path)) {
+      return target;
+    }
+    if (!await target.exists()) {
+      await target.writeAsBytes(await source.readAsBytes(), flush: true);
+    }
+    return target;
+  }
+
   Future<TorrentMetadata> readMetadata(String torrentPath) async {
     final bytes = await File(torrentPath).readAsBytes();
     final parser = _BencodeParser(bytes);
@@ -176,6 +199,14 @@ class TorrentService {
     if (file.sizeBytes <= 0) return length > 0;
     return length >= math.min(file.sizeBytes, 256 * 1024);
   }
+}
+
+String _safeFileName(String value) =>
+    value.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
+
+String _normalizePath(String path) {
+  final normalized = File(path).absolute.path;
+  return Platform.isWindows ? normalized.toLowerCase() : normalized;
 }
 
 class _BencodeParser {

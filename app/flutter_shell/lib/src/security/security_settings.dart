@@ -78,6 +78,17 @@ class SecuritySettings {
     this.includeFavoritesInPathDropdown = false,
     this.locationSidebarCount = 5,
     this.requirePasswordOnAndroidResume = false,
+    this.showHiddenFiles = false,
+    this.showSystemFiles = false,
+    this.androidMediaNotificationControls = true,
+    this.headsetMediaControls = true,
+    this.externalFloatingPlayer = false,
+    this.encryptThumbnailCache = false,
+    this.encryptResumePositions = false,
+    this.audioEqualizerPreset = 'flat',
+    this.videoEqualizerPreset = 'flat',
+    this.perFileEqualizerPresets = const <String, String>{},
+    this.lastPlayedMediaKey,
   });
 
   final String? appPasswordSalt;
@@ -149,6 +160,17 @@ class SecuritySettings {
   final bool includeFavoritesInPathDropdown;
   final int locationSidebarCount;
   final bool requirePasswordOnAndroidResume;
+  final bool showHiddenFiles;
+  final bool showSystemFiles;
+  final bool androidMediaNotificationControls;
+  final bool headsetMediaControls;
+  final bool externalFloatingPlayer;
+  final bool encryptThumbnailCache;
+  final bool encryptResumePositions;
+  final String audioEqualizerPreset;
+  final String videoEqualizerPreset;
+  final Map<String, String> perFileEqualizerPresets;
+  final String? lastPlayedMediaKey;
 
   bool get hasAppPassword =>
       appPasswordSalt != null && appPasswordDigest != null;
@@ -236,6 +258,18 @@ class SecuritySettings {
     bool? includeFavoritesInPathDropdown,
     int? locationSidebarCount,
     bool? requirePasswordOnAndroidResume,
+    bool? showHiddenFiles,
+    bool? showSystemFiles,
+    bool? androidMediaNotificationControls,
+    bool? headsetMediaControls,
+    bool? externalFloatingPlayer,
+    bool? encryptThumbnailCache,
+    bool? encryptResumePositions,
+    String? audioEqualizerPreset,
+    String? videoEqualizerPreset,
+    Map<String, String>? perFileEqualizerPresets,
+    String? lastPlayedMediaKey,
+    bool clearLastPlayedMediaKey = false,
   }) {
     return SecuritySettings(
       appPasswordSalt:
@@ -349,6 +383,24 @@ class SecuritySettings {
       locationSidebarCount: locationSidebarCount ?? this.locationSidebarCount,
       requirePasswordOnAndroidResume:
           requirePasswordOnAndroidResume ?? this.requirePasswordOnAndroidResume,
+      showHiddenFiles: showHiddenFiles ?? this.showHiddenFiles,
+      showSystemFiles: showSystemFiles ?? this.showSystemFiles,
+      androidMediaNotificationControls: androidMediaNotificationControls ??
+          this.androidMediaNotificationControls,
+      headsetMediaControls: headsetMediaControls ?? this.headsetMediaControls,
+      externalFloatingPlayer:
+          externalFloatingPlayer ?? this.externalFloatingPlayer,
+      encryptThumbnailCache:
+          encryptThumbnailCache ?? this.encryptThumbnailCache,
+      encryptResumePositions:
+          encryptResumePositions ?? this.encryptResumePositions,
+      audioEqualizerPreset: audioEqualizerPreset ?? this.audioEqualizerPreset,
+      videoEqualizerPreset: videoEqualizerPreset ?? this.videoEqualizerPreset,
+      perFileEqualizerPresets:
+          perFileEqualizerPresets ?? this.perFileEqualizerPresets,
+      lastPlayedMediaKey: clearLastPlayedMediaKey
+          ? null
+          : lastPlayedMediaKey ?? this.lastPlayedMediaKey,
     );
   }
 
@@ -361,6 +413,7 @@ class SecuritySettings {
     final pluginProxy = json['pluginProxyById'];
     final mediaResume = json['mediaResumePositions'];
     final folderSortModes = json['folderSortModes'];
+    final perFileEqualizer = json['perFileEqualizerPresets'];
     List<String> listField(String key) {
       final value = json[key];
       return value is List
@@ -476,6 +529,21 @@ class SecuritySettings {
       locationSidebarCount: json['locationSidebarCount'] as int? ?? 5,
       requirePasswordOnAndroidResume:
           json['requirePasswordOnAndroidResume'] as bool? ?? false,
+      showHiddenFiles: json['showHiddenFiles'] as bool? ?? false,
+      showSystemFiles: json['showSystemFiles'] as bool? ?? false,
+      androidMediaNotificationControls:
+          json['androidMediaNotificationControls'] as bool? ?? true,
+      headsetMediaControls: json['headsetMediaControls'] as bool? ?? true,
+      externalFloatingPlayer: json['externalFloatingPlayer'] as bool? ?? false,
+      encryptThumbnailCache: json['encryptThumbnailCache'] as bool? ?? false,
+      encryptResumePositions: json['encryptResumePositions'] as bool? ?? false,
+      audioEqualizerPreset: json['audioEqualizerPreset'] as String? ?? 'flat',
+      videoEqualizerPreset: json['videoEqualizerPreset'] as String? ?? 'flat',
+      perFileEqualizerPresets: perFileEqualizer is Map
+          ? perFileEqualizer
+              .map((key, value) => MapEntry(key.toString(), value.toString()))
+          : const <String, String>{},
+      lastPlayedMediaKey: json['lastPlayedMediaKey'] as String?,
     );
   }
 
@@ -551,6 +619,17 @@ class SecuritySettings {
       'includeFavoritesInPathDropdown': includeFavoritesInPathDropdown,
       'locationSidebarCount': locationSidebarCount,
       'requirePasswordOnAndroidResume': requirePasswordOnAndroidResume,
+      'showHiddenFiles': showHiddenFiles,
+      'showSystemFiles': showSystemFiles,
+      'androidMediaNotificationControls': androidMediaNotificationControls,
+      'headsetMediaControls': headsetMediaControls,
+      'externalFloatingPlayer': externalFloatingPlayer,
+      'encryptThumbnailCache': encryptThumbnailCache,
+      'encryptResumePositions': encryptResumePositions,
+      'audioEqualizerPreset': audioEqualizerPreset,
+      'videoEqualizerPreset': videoEqualizerPreset,
+      'perFileEqualizerPresets': perFileEqualizerPresets,
+      'lastPlayedMediaKey': lastPlayedMediaKey,
     };
   }
 }
@@ -684,7 +763,16 @@ class SecuritySettingsRepository {
     while (nextPositions.length > 500) {
       nextPositions.remove(nextPositions.keys.first);
     }
-    final next = current.copyWith(mediaResumePositions: nextPositions);
+    final next = current.copyWith(
+      mediaResumePositions: nextPositions,
+      lastPlayedMediaKey: normalized,
+    );
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> resetToDefaults() async {
+    const next = SecuritySettings();
     await save(next);
     return next;
   }
@@ -846,6 +934,13 @@ class SecuritySettingsRepository {
     bool? includeFavoritesInPathDropdown,
     int? locationSidebarCount,
     bool? requirePasswordOnAndroidResume,
+    bool? showHiddenFiles,
+    bool? showSystemFiles,
+    bool? androidMediaNotificationControls,
+    bool? headsetMediaControls,
+    bool? externalFloatingPlayer,
+    bool? encryptThumbnailCache,
+    bool? encryptResumePositions,
   }) async {
     var next = current.copyWith(
       useSeparateFilePassword: useSeparateFilePassword,
@@ -915,6 +1010,13 @@ class SecuritySettingsRepository {
       includeFavoritesInPathDropdown: includeFavoritesInPathDropdown,
       locationSidebarCount: locationSidebarCount,
       requirePasswordOnAndroidResume: requirePasswordOnAndroidResume,
+      showHiddenFiles: showHiddenFiles,
+      showSystemFiles: showSystemFiles,
+      androidMediaNotificationControls: androidMediaNotificationControls,
+      headsetMediaControls: headsetMediaControls,
+      externalFloatingPlayer: externalFloatingPlayer,
+      encryptThumbnailCache: encryptThumbnailCache,
+      encryptResumePositions: encryptResumePositions,
       recentFilePaths: rememberRecentFiles == false
           ? const <String>[]
           : current.recentFilePaths
