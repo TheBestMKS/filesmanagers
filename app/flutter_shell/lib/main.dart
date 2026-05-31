@@ -20,7 +20,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.10.0';
+const _appVersion = '0.10.1';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
@@ -127,6 +127,72 @@ class _SearchFilters {
   }
 }
 
+class _FolderSortMode {
+  const _FolderSortMode({
+    required this.field,
+    required this.ascending,
+    required this.foldersFirst,
+  });
+
+  final String field;
+  final bool ascending;
+  final bool foldersFirst;
+
+  static const defaultMode = _FolderSortMode(
+    field: 'name',
+    ascending: true,
+    foldersFirst: true,
+  );
+
+  factory _FolderSortMode.parse(String? value) {
+    if (value == null || value.trim().isEmpty) return defaultMode;
+    final parts = value.split(':');
+    return _FolderSortMode(
+      field: parts.isNotEmpty ? parts[0] : 'name',
+      ascending: parts.length < 2 ? true : parts[1] != 'desc',
+      foldersFirst: parts.length < 3 ? true : parts[2] == 'foldersFirst',
+    );
+  }
+
+  String encode() =>
+      '$field:${ascending ? 'asc' : 'desc'}:${foldersFirst ? 'foldersFirst' : 'mixed'}';
+
+  String label(AppLanguage language) {
+    final fieldLabel = switch (field) {
+      'modified' => language.t('sort.modified'),
+      'created' => language.t('sort.created'),
+      'size' => language.t('sort.size'),
+      'extension' => language.t('sort.extension'),
+      _ => language.t('sort.name'),
+    };
+    return '$fieldLabel ${ascending ? language.t('sort.asc') : language.t('sort.desc')}';
+  }
+
+  List<ExplorerEntry> sort(List<ExplorerEntry> entries) {
+    final sorted = [...entries];
+    sorted.sort((a, b) {
+      if (a.isNavigationEntry != b.isNavigationEntry) {
+        return a.isNavigationEntry ? -1 : 1;
+      }
+      if (foldersFirst && a.isDirectory != b.isDirectory) {
+        return a.isDirectory ? -1 : 1;
+      }
+      final result = switch (field) {
+        'modified' => a.modifiedAt.compareTo(b.modifiedAt),
+        'created' =>
+          (a.createdAt ?? a.modifiedAt).compareTo(b.createdAt ?? b.modifiedAt),
+        'size' => a.sizeBytes.compareTo(b.sizeBytes),
+        'extension' => FileViewerService.extensionForName(a.name)
+            .compareTo(FileViewerService.extensionForName(b.name)),
+        _ => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+      };
+      if (result != 0) return ascending ? result : -result;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return sorted;
+  }
+}
+
 class VaultHomeScreen extends StatefulWidget {
   const VaultHomeScreen({super.key, this.initialOpenPath});
 
@@ -136,7 +202,8 @@ class VaultHomeScreen extends StatefulWidget {
   State<VaultHomeScreen> createState() => _VaultHomeScreenState();
 }
 
-class _VaultHomeScreenState extends State<VaultHomeScreen> {
+class _VaultHomeScreenState extends State<VaultHomeScreen>
+    with WidgetsBindingObserver {
   late final CryptBindings _bindings;
   late final FileExplorerRepository _explorer;
   late final CloudPluginRegistry _plugins;
@@ -172,15 +239,43 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   _SearchFilters _searchFilters = const _SearchFilters();
   bool _goingUp = false;
   Set<String> _selectedPaths = const <String>{};
+  bool _lockOnNextResume = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _bindings = CryptBindings();
     _explorer = FileExplorerRepository(_bindings);
     _plugins = CloudPluginRegistry();
     _settingsRepo = SecuritySettingsRepository();
     _boot();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!Platform.isAndroid ||
+        !_settings.requirePasswordOnAndroidResume ||
+        !_settings.hasAppPassword) {
+      return;
+    }
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      _lockOnNextResume = true;
+      return;
+    }
+    if (state == AppLifecycleState.resumed && _lockOnNextResume && mounted) {
+      _lockOnNextResume = false;
+      setState(() => _locked = true);
+    }
   }
 
   Future<void> _boot() async {
@@ -404,7 +499,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       return;
     }
     if (fromUp && policy == 'fallbackToLocations') {
-      _openExplorerHome();
+      _openLocationsHome();
       return;
     }
     if (policy == 'requestRoot') {
@@ -465,7 +560,88 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     unawaited(_openPathSafely(location.path!));
   }
 
+  Future<void> _showAddLocationDialog() async {
+    final candidates = _locations
+        .where((location) =>
+            location.kind == ExplorerLocationKind.cloudPlugin ||
+            location.kind == ExplorerLocationKind.network)
+        .toList();
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('locations.add')),
+        content: SizedBox(
+          width: 460,
+          child: candidates.isEmpty
+              ? Text(_language.t('locations.add.empty'))
+              : ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final location in candidates)
+                      ListTile(
+                        leading: Icon(location.enabled
+                            ? Icons.add_link
+                            : Icons.extension_outlined),
+                        title: Text(location.name),
+                        subtitle: Text(location.description ??
+                            _language.t('settings.plugins.note')),
+                        onTap: () {
+                          Navigator.pop(context);
+                          _selectLocation(location);
+                        },
+                      ),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.pop(context);
+              setState(() => _page = ShellPage.settings);
+            },
+            icon: const Icon(Icons.settings_applications_outlined),
+            label: Text(_language.t('settings.plugins.open.window')),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _openExplorerHome() {
+    unawaited(_openLastWorkspaceOrLocations());
+  }
+
+  Future<void> _openLastWorkspaceOrLocations() async {
+    final candidates = <String>[
+      if (_settings.rememberLastFolder &&
+          _settings.lastOpenedFolder != null &&
+          _settings.lastOpenedFolder!.trim().isNotEmpty)
+        _settings.lastOpenedFolder!.trim(),
+      if (_currentPath != null && _currentPath!.trim().isNotEmpty)
+        _currentPath!.trim(),
+    ];
+    for (final path in candidates) {
+      if (_explorer.isVirtualPath(path)) {
+        final entry = await _explorer.entryForPath(path);
+        if (entry?.isDirectory == true) {
+          _openPath(path);
+          return;
+        }
+        continue;
+      }
+      if (await Directory(path).exists()) {
+        _openPath(path);
+        return;
+      }
+    }
+    _openLocationsHome();
+  }
+
+  void _openLocationsHome() {
     final paths = <String>[
       for (final location in _locations)
         if (location.enabled && location.path != null) location.path!,
@@ -907,11 +1083,19 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     if (kind != FileContentKind.audio && kind != FileContentKind.video) {
       return const [];
     }
+    final selectedSource = selectedPreview.sourcePath;
+    final selectedPlayablePath = selectedPreview.decrypted
+        ? null
+        : selectedSource != null &&
+                selectedSource.isNotEmpty &&
+                !_explorer.isVirtualPath(selectedSource)
+            ? selectedSource
+            : selected.path;
 
     final selectedItem = MediaPreviewItem(
       title: selectedPreview.title,
       kind: kind,
-      path: selectedPreview.decrypted ? null : selected.path,
+      path: selectedPlayablePath,
       resumeKey: selected.path,
       bytes: selectedPreview.decrypted && selectedPreview.bytes != null
           ? Uint8List.fromList(selectedPreview.bytes!)
@@ -955,6 +1139,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
             password: _activeFilePassword(),
             commonPassword: _commonEncryptionPassword,
           );
+          final previewSource = preview.sourcePath;
           if (preview.contentKind == kind && preview.bytes != null) {
             items.add(MediaPreviewItem(
               title: preview.title,
@@ -962,6 +1147,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
               resumeKey: entry.path,
               bytes: Uint8List.fromList(preview.bytes!),
               encrypted: true,
+            ));
+          } else if (preview.contentKind == kind &&
+              previewSource != null &&
+              previewSource.isNotEmpty &&
+              !_explorer.isVirtualPath(previewSource)) {
+            items.add(MediaPreviewItem(
+              title: preview.title,
+              kind: kind,
+              path: previewSource,
+              resumeKey: entry.path,
             ));
           }
         } catch (_) {
@@ -1004,11 +1199,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     _goingUp = true;
     unawaited(() async {
       try {
+        final hidden = await AppPaths.hiddenVaultDirectory();
+        if (_normalizePath(path) == _normalizePath(hidden.path)) {
+          _openLocationsHome();
+          return;
+        }
         final parent = _explorer.parentPathFor(path);
         if (_normalizePath(parent) != _normalizePath(path)) {
           await _openPathSafely(parent, fromUp: true);
         } else {
-          _openExplorerHome();
+          _openLocationsHome();
         }
       } finally {
         _goingUp = false;
@@ -1347,6 +1547,110 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     );
     if (result == null) return;
     setState(() => _searchFilters = result);
+  }
+
+  _FolderSortMode _sortModeForCurrentPath() {
+    final path = _currentPath;
+    if (path == null || _showingRecent) return _FolderSortMode.defaultMode;
+    return _FolderSortMode.parse(_settings.folderSortModes[path]);
+  }
+
+  Future<void> _sortDialog() async {
+    final path = _currentPath;
+    if (path == null || _showingRecent) return;
+    var mode = _sortModeForCurrentPath();
+    final result = await showDialog<_FolderSortMode>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(_language.t('sort.title')),
+          content: SizedBox(
+            width: 420,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              DropdownButtonFormField<String>(
+                initialValue: mode.field,
+                decoration: InputDecoration(labelText: _language.t('sort.by')),
+                items: [
+                  DropdownMenuItem(
+                    value: 'name',
+                    child: Text(_language.t('sort.name')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'modified',
+                    child: Text(_language.t('sort.modified')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'created',
+                    child: Text(_language.t('sort.created')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'size',
+                    child: Text(_language.t('sort.size')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'extension',
+                    child: Text(_language.t('sort.extension')),
+                  ),
+                ],
+                onChanged: (value) => setDialogState(
+                  () => mode = _FolderSortMode(
+                    field: value ?? 'name',
+                    ascending: mode.ascending,
+                    foldersFirst: mode.foldersFirst,
+                  ),
+                ),
+              ),
+              SwitchListTile(
+                value: mode.ascending,
+                onChanged: (value) => setDialogState(
+                  () => mode = _FolderSortMode(
+                    field: mode.field,
+                    ascending: value,
+                    foldersFirst: mode.foldersFirst,
+                  ),
+                ),
+                title: Text(mode.ascending
+                    ? _language.t('sort.asc')
+                    : _language.t('sort.desc')),
+              ),
+              SwitchListTile(
+                value: mode.foldersFirst,
+                onChanged: (value) => setDialogState(
+                  () => mode = _FolderSortMode(
+                    field: mode.field,
+                    ascending: mode.ascending,
+                    foldersFirst: value,
+                  ),
+                ),
+                title: Text(_language.t('sort.folders.first')),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_language.t('common.cancel')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, mode),
+              child: Text(_language.t('search.apply')),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null) return;
+    final next = await _settingsRepo.setFolderSortMode(
+      _settings,
+      path,
+      result.encode(),
+    );
+    if (mounted) {
+      setState(() {
+        _settings = next;
+        _snapshot = _directorySnapshot(path);
+      });
+    }
   }
 
   String _dateInput(DateTime? value) {
@@ -2393,6 +2697,24 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                         _openEditor(currentPreview);
                       case _PreviewAction.external:
                         _openPreviewExternal(currentPreview);
+                      case _PreviewAction.copy:
+                        if (_selected != null) {
+                          _handleEntryAction(_selected!, _EntryAction.copy);
+                        }
+                      case _PreviewAction.cut:
+                        if (_selected != null) {
+                          _handleEntryAction(_selected!, _EntryAction.cut);
+                        }
+                      case _PreviewAction.delete:
+                        if (_selected != null) {
+                          _handleEntryAction(_selected!, _EntryAction.delete);
+                          Navigator.pop(context);
+                        }
+                      case _PreviewAction.properties:
+                        if (_selected != null) {
+                          _handleEntryAction(
+                              _selected!, _EntryAction.properties);
+                        }
                       case _PreviewAction.hide:
                         Navigator.pop(context);
                     }
@@ -2413,6 +2735,23 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     PopupMenuItem(
                       value: _PreviewAction.external,
                       child: Text(_language.t('preview.external')),
+                    ),
+                    const PopupMenuDivider(),
+                    PopupMenuItem(
+                      value: _PreviewAction.copy,
+                      child: Text(_language.t('explorer.copy')),
+                    ),
+                    PopupMenuItem(
+                      value: _PreviewAction.cut,
+                      child: Text(_language.t('explorer.cut')),
+                    ),
+                    PopupMenuItem(
+                      value: _PreviewAction.delete,
+                      child: Text(_language.t('explorer.delete')),
+                    ),
+                    PopupMenuItem(
+                      value: _PreviewAction.properties,
+                      child: Text(_language.t('explorer.properties')),
                     ),
                     PopupMenuItem(
                       value: _PreviewAction.hide,
@@ -2511,6 +2850,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     required int recentSidebarCount,
     required int recentRememberCount,
     required int favoriteSidebarCount,
+    required int locationSidebarCount,
     required bool decryptNamesInExplorer,
     required bool openFullscreenOnHiddenPreviewTap,
     required bool autoScaleForDpi,
@@ -2540,6 +2880,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     required bool enableMiniAudio,
     required bool continueMediaInBackground,
     required bool autoCloseMediaOnSectionChange,
+    required bool showVideoThumbnails,
+    required bool animateVideoThumbnails,
+    required bool showAudioArtwork,
+    required bool requirePasswordOnAndroidResume,
   }) async {
     if (languageCode == 'custom' &&
         (customLanguagePath == null || customLanguagePath.trim().isEmpty)) {
@@ -2574,6 +2918,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       recentSidebarCount: recentSidebarCount,
       recentRememberCount: recentRememberCount,
       favoriteSidebarCount: favoriteSidebarCount,
+      locationSidebarCount: locationSidebarCount,
       decryptNamesInExplorer: decryptNamesInExplorer,
       openFullscreenOnHiddenPreviewTap: openFullscreenOnHiddenPreviewTap,
       autoScaleForDpi: autoScaleForDpi,
@@ -2603,6 +2948,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       enableMiniAudio: enableMiniAudio,
       continueMediaInBackground: continueMediaInBackground,
       autoCloseMediaOnSectionChange: autoCloseMediaOnSectionChange,
+      showVideoThumbnails: showVideoThumbnails,
+      animateVideoThumbnails: animateVideoThumbnails,
+      showAudioArtwork: showAudioArtwork,
+      requirePasswordOnAndroidResume: requirePasswordOnAndroidResume,
     );
     await PlatformServices.setScreenProtection(next.blockScreenCapture);
     final language = await AppLanguage.load(next);
@@ -2741,7 +3090,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
               builder: (context, c) {
                 final sidebar = _Sidebar(
                   language: _language,
-                  locations: _locations,
+                  locations: _locations
+                      .take(
+                          _settings.locationSidebarCount.clamp(0, 1000).toInt())
+                      .toList(),
+                  hasMoreLocations:
+                      _locations.length > _settings.locationSidebarCount,
                   favoritePaths: _settings.favoritePaths
                       .take(_settings.favoriteSidebarCount)
                       .toList(),
@@ -2765,6 +3119,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                   onRecentList: _openRecentFiles,
                   onFavoriteList: _openFavoriteFiles,
                   onExplorer: _openExplorerHome,
+                  onAllLocations: _openLocationsHome,
+                  onAddLocation: _showAddLocationDialog,
                   onMediaSection: _openMediaSection,
                   onSettings: () => setState(() => _page = ShellPage.settings),
                   onAbout: _showAbout,
@@ -2816,6 +3172,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                                 onOpenExternal: _openPreviewExternal,
                                 onPreviewWindow: _showPreviewWindow,
                                 onEditPreview: _openEditor,
+                                onPreviewEntryAction: _handleEntryAction,
                                 onRememberMediaPosition: _rememberMediaPosition,
                               )
                             : _ExplorerView(
@@ -2862,9 +3219,22 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                                 searchFilters: _searchFilters,
                                 localSearchEnabled:
                                     _searchMode == 'name' && !_searchRecursive,
+                                showVideoThumbnails:
+                                    _settings.showVideoThumbnails,
+                                animateVideoThumbnails:
+                                    _settings.animateVideoThumbnails,
+                                showAudioArtwork: _settings.showAudioArtwork,
+                                onThumbnailPreview: (entry) =>
+                                    _explorer.previewFile(
+                                  entry.path,
+                                  password: _activeFilePassword(),
+                                  commonPassword: _commonEncryptionPassword,
+                                ),
                                 onPathEdit: _editPathDialog,
                                 onSearch: _searchDialog,
                                 onSearchFilters: _searchFiltersDialog,
+                                onSort: _sortDialog,
+                                sortMode: _sortModeForCurrentPath(),
                                 onEntryAction: _handleEntryAction,
                                 onEmptyAreaAction: _handleEmptyAreaAction,
                                 onRemoveRecent: _removeRecentPath,
@@ -2879,7 +3249,36 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                               );
                 if (c.maxWidth < 820) {
                   return Scaffold(
-                    appBar: AppBar(title: Text(_language.appTitle)),
+                    appBar: AppBar(
+                      title: Platform.isAndroid && _page == ShellPage.explorer
+                          ? null
+                          : Text(_language.appTitle),
+                      actions: [
+                        if (Platform.isAndroid &&
+                            _page == ShellPage.explorer) ...[
+                          IconButton(
+                            onPressed: _importFile,
+                            icon: const Icon(Icons.file_upload_outlined),
+                            tooltip: _language.t('explorer.upload'),
+                          ),
+                          IconButton(
+                            onPressed: _exportFile,
+                            icon: const Icon(Icons.file_download_outlined),
+                            tooltip: _language.t('explorer.download'),
+                          ),
+                          IconButton(
+                            onPressed: () => setState(
+                                () => _previewVisible = !_previewVisible),
+                            icon: Icon(_previewVisible
+                                ? Icons.visibility_off_outlined
+                                : Icons.visibility_outlined),
+                            tooltip: _previewVisible
+                                ? _language.t('preview.hide')
+                                : _language.t('preview.show'),
+                          ),
+                        ],
+                      ],
+                    ),
                     drawer: Drawer(child: sidebar),
                     body: body,
                   );
@@ -3351,7 +3750,17 @@ enum _EntryAction {
   useAsMultimedia,
 }
 
-enum _PreviewAction { password, window, edit, external, hide }
+enum _PreviewAction {
+  password,
+  window,
+  edit,
+  external,
+  copy,
+  cut,
+  delete,
+  properties,
+  hide
+}
 
 class _LockScreen extends StatefulWidget {
   const _LockScreen({
@@ -3455,6 +3864,7 @@ class _Sidebar extends StatelessWidget {
   const _Sidebar({
     required this.language,
     required this.locations,
+    required this.hasMoreLocations,
     required this.favoritePaths,
     required this.recentPaths,
     required this.currentPath,
@@ -3465,6 +3875,8 @@ class _Sidebar extends StatelessWidget {
     required this.onRecentList,
     required this.onFavoriteList,
     required this.onExplorer,
+    required this.onAllLocations,
+    required this.onAddLocation,
     required this.onMediaSection,
     required this.onSettings,
     required this.onAbout,
@@ -3472,6 +3884,7 @@ class _Sidebar extends StatelessWidget {
 
   final AppLanguage language;
   final List<ExplorerLocation> locations;
+  final bool hasMoreLocations;
   final List<String> favoritePaths;
   final List<String> recentPaths;
   final String? currentPath;
@@ -3482,12 +3895,23 @@ class _Sidebar extends StatelessWidget {
   final VoidCallback onRecentList;
   final VoidCallback onFavoriteList;
   final VoidCallback onExplorer;
+  final VoidCallback onAllLocations;
+  final VoidCallback onAddLocation;
   final ValueChanged<MediaSection> onMediaSection;
   final VoidCallback onSettings;
   final VoidCallback onAbout;
 
   @override
   Widget build(BuildContext context) {
+    void activate(VoidCallback callback) {
+      if (Platform.isAndroid) {
+        Navigator.of(context).maybePop();
+        Future<void>.delayed(const Duration(milliseconds: 80), callback);
+        return;
+      }
+      callback();
+    }
+
     return Material(
       color: const Color(0xFFEDF3FA),
       child: ListView(padding: const EdgeInsets.all(14), children: [
@@ -3518,43 +3942,43 @@ class _Sidebar extends StatelessWidget {
           Icons.folder_open,
           language.t('nav.explorer'),
           page == ShellPage.explorer,
-          onExplorer,
+          () => activate(onExplorer),
         ),
         _nav(
           Icons.photo_library_outlined,
           language.t('nav.gallery'),
           page == ShellPage.gallery,
-          () => onMediaSection(MediaSection.gallery),
+          () => activate(() => onMediaSection(MediaSection.gallery)),
         ),
         _nav(
           Icons.music_note_outlined,
           language.t('nav.music'),
           page == ShellPage.music,
-          () => onMediaSection(MediaSection.music),
+          () => activate(() => onMediaSection(MediaSection.music)),
         ),
         _nav(
           Icons.movie_outlined,
           language.t('nav.video'),
           page == ShellPage.video,
-          () => onMediaSection(MediaSection.video),
+          () => activate(() => onMediaSection(MediaSection.video)),
         ),
         _nav(
           Icons.description_outlined,
           language.t('nav.documents'),
           page == ShellPage.documents,
-          () => onMediaSection(MediaSection.documents),
+          () => activate(() => onMediaSection(MediaSection.documents)),
         ),
         _nav(
           Icons.hub_outlined,
           language.t('nav.torrent'),
           page == ShellPage.torrent,
-          () => onMediaSection(MediaSection.torrent),
+          () => activate(() => onMediaSection(MediaSection.torrent)),
         ),
         _nav(
           Icons.tune,
           language.t('nav.settings'),
           page == ShellPage.settings,
-          onSettings,
+          () => activate(onSettings),
         ),
         const SizedBox(height: 12),
         if (recentPaths.isNotEmpty) ...[
@@ -3563,7 +3987,7 @@ class _Sidebar extends StatelessWidget {
             dense: true,
             leading: const Icon(Icons.history),
             title: Text(language.t('recent.open.all')),
-            onTap: onRecentList,
+            onTap: () => activate(onRecentList),
           ),
           for (final path in recentPaths)
             ListTile(
@@ -3579,7 +4003,7 @@ class _Sidebar extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              onTap: () => onRecentPath(path),
+              onTap: () => activate(() => onRecentPath(path)),
             ),
           const SizedBox(height: 12),
         ],
@@ -3589,7 +4013,7 @@ class _Sidebar extends StatelessWidget {
             dense: true,
             leading: const Icon(Icons.star),
             title: Text(language.t('favorites.open.all')),
-            onTap: onFavoriteList,
+            onTap: () => activate(onFavoriteList),
           ),
           for (final path in favoritePaths)
             ListTile(
@@ -3605,17 +4029,26 @@ class _Sidebar extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              onTap: () => onFavoritePath(path),
+              onTap: () => activate(() => onFavoritePath(path)),
             ),
           const SizedBox(height: 12),
         ],
         Padding(
-          padding: const EdgeInsets.all(12),
-          child: Text(
-            language.t('locations.heading'),
-            style:
-                const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1),
-          ),
+          padding: const EdgeInsets.fromLTRB(12, 8, 4, 4),
+          child: Row(children: [
+            Expanded(
+              child: Text(
+                language.t('locations.heading'),
+                style: const TextStyle(
+                    fontWeight: FontWeight.w800, letterSpacing: 1),
+              ),
+            ),
+            IconButton(
+              onPressed: () => activate(onAddLocation),
+              icon: const Icon(Icons.add),
+              tooltip: language.t('locations.add'),
+            ),
+          ]),
         ),
         for (final location in locations)
           ListTile(
@@ -3640,7 +4073,14 @@ class _Sidebar extends StatelessWidget {
                   ),
             trailing:
                 location.enabled ? null : const Icon(Icons.extension, size: 18),
-            onTap: () => onLocation(location),
+            onTap: () => activate(() => onLocation(location)),
+          ),
+        if (hasMoreLocations)
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.more_horiz),
+            title: Text(language.t('locations.open.all')),
+            onTap: () => activate(onAllLocations),
           ),
       ]),
     );
@@ -3996,6 +4436,7 @@ class _MediaOnlyView extends StatelessWidget {
     required this.onOpenExternal,
     required this.onPreviewWindow,
     required this.onEditPreview,
+    required this.onPreviewEntryAction,
     required this.onRememberMediaPosition,
   });
 
@@ -4013,6 +4454,7 @@ class _MediaOnlyView extends StatelessWidget {
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
+  final Future<void> Function(ExplorerEntry, _EntryAction) onPreviewEntryAction;
   final Future<void> Function(String key, Duration position)
       onRememberMediaPosition;
 
@@ -4064,6 +4506,7 @@ class _MediaOnlyView extends StatelessWidget {
                 onOpenExternal: onOpenExternal,
                 onPreviewWindow: onPreviewWindow,
                 onEditPreview: onEditPreview,
+                onEntryAction: onPreviewEntryAction,
                 onImageNavigate: (_) async => null,
               ),
             );
@@ -4219,10 +4662,16 @@ class _ExplorerView extends StatelessWidget {
     required this.searchQuery,
     required this.searchUseRegex,
     required this.searchFilters,
+    required this.sortMode,
     required this.localSearchEnabled,
+    required this.showVideoThumbnails,
+    required this.animateVideoThumbnails,
+    required this.showAudioArtwork,
+    required this.onThumbnailPreview,
     required this.onPathEdit,
     required this.onSearch,
     required this.onSearchFilters,
+    required this.onSort,
     required this.onEntryAction,
     required this.onEmptyAreaAction,
     required this.onRemoveRecent,
@@ -4268,10 +4717,16 @@ class _ExplorerView extends StatelessWidget {
   final String searchQuery;
   final bool searchUseRegex;
   final _SearchFilters searchFilters;
+  final _FolderSortMode sortMode;
   final bool localSearchEnabled;
+  final bool showVideoThumbnails;
+  final bool animateVideoThumbnails;
+  final bool showAudioArtwork;
+  final Future<FilePreview> Function(ExplorerEntry) onThumbnailPreview;
   final VoidCallback onPathEdit;
   final VoidCallback onSearch;
   final VoidCallback onSearchFilters;
+  final VoidCallback onSort;
   final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
   final Future<void> Function(String, _EntryAction) onEmptyAreaAction;
   final ValueChanged<String> onRemoveRecent;
@@ -4344,6 +4799,11 @@ class _ExplorerView extends StatelessWidget {
               tooltip: language.t('search.filters'),
             ),
             IconButton(
+              onPressed: onSort,
+              icon: Icon(Icons.sort, size: 24 * toolbarIconScale),
+              tooltip: sortMode.label(language),
+            ),
+            IconButton(
               onPressed: onTogglePreview,
               icon: Icon(
                 previewVisible
@@ -4375,7 +4835,12 @@ class _ExplorerView extends StatelessWidget {
             searchQuery: searchQuery,
             searchUseRegex: searchUseRegex,
             searchFilters: searchFilters,
+            sortMode: sortMode,
             localSearchEnabled: localSearchEnabled,
+            showVideoThumbnails: showVideoThumbnails,
+            animateVideoThumbnails: animateVideoThumbnails,
+            showAudioArtwork: showAudioArtwork,
+            onThumbnailPreview: onThumbnailPreview,
             onEntryAction: onEntryAction,
             currentPath: currentPath,
             onEmptyAreaAction: onEmptyAreaAction,
@@ -4399,6 +4864,7 @@ class _ExplorerView extends StatelessWidget {
             onOpenExternal: onOpenExternal,
             onPreviewWindow: onPreviewWindow,
             onEditPreview: onEditPreview,
+            onEntryAction: onEntryAction,
             onImageNavigate: onImageNavigate,
             onRememberMediaPosition: onRememberMediaPosition,
           );
@@ -4439,7 +4905,12 @@ class _EntryList extends StatelessWidget {
     required this.searchQuery,
     required this.searchUseRegex,
     required this.searchFilters,
+    required this.sortMode,
     required this.localSearchEnabled,
+    required this.showVideoThumbnails,
+    required this.animateVideoThumbnails,
+    required this.showAudioArtwork,
+    required this.onThumbnailPreview,
     required this.currentPath,
     required this.onEntryAction,
     required this.onEmptyAreaAction,
@@ -4465,7 +4936,12 @@ class _EntryList extends StatelessWidget {
   final String searchQuery;
   final bool searchUseRegex;
   final _SearchFilters searchFilters;
+  final _FolderSortMode sortMode;
   final bool localSearchEnabled;
+  final bool showVideoThumbnails;
+  final bool animateVideoThumbnails;
+  final bool showAudioArtwork;
+  final Future<FilePreview> Function(ExplorerEntry) onThumbnailPreview;
   final String? currentPath;
   final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
   final Future<void> Function(String, _EntryAction) onEmptyAreaAction;
@@ -4504,7 +4980,8 @@ class _EntryList extends StatelessWidget {
                     .toList())
             .where(searchFilters.accepts)
             .toList();
-        if (entries.isEmpty) {
+        final sortedEntries = sortMode.sort(entries);
+        if (sortedEntries.isEmpty) {
           return _EmptyExplorerArea(
             language: language,
             currentPath: currentPath,
@@ -4515,10 +4992,10 @@ class _EntryList extends StatelessWidget {
         }
         final listView = ListView.separated(
           padding: const EdgeInsets.all(12),
-          itemCount: entries.length + 1,
+          itemCount: sortedEntries.length + 1,
           separatorBuilder: (_, __) => const Divider(height: 1),
           itemBuilder: (context, i) {
-            if (i == entries.length) {
+            if (i == sortedEntries.length) {
               return _EmptyExplorerArea(
                 language: language,
                 currentPath: currentPath,
@@ -4527,7 +5004,7 @@ class _EntryList extends StatelessWidget {
                 child: const SizedBox(height: 240),
               );
             }
-            final entry = entries[i];
+            final entry = sortedEntries[i];
             final selectionMode = selectedPaths.isNotEmpty;
             final selectedForBulk = selectedPaths.contains(entry.path);
             return GestureDetector(
@@ -4538,6 +5015,15 @@ class _EntryList extends StatelessWidget {
                   ? null
                   : () => unawaited(onEntryFullscreen(entry)),
               child: ListTile(
+                dense: fileTextScale <= 1.05 && fileIconScale <= 1.05,
+                visualDensity: VisualDensity(
+                  horizontal: -2,
+                  vertical: ((fileTextScale + fileIconScale) / 2 - 1)
+                      .clamp(-4.0, 2.0),
+                ),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                minVerticalPadding: 0,
                 selected: selected?.path == entry.path,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -4551,10 +5037,15 @@ class _EntryList extends StatelessWidget {
                           value: selectedForBulk,
                           onChanged: (_) => onToggleSelection(entry),
                         )
-                      : Icon(
-                          _icon(entry),
+                      : _EntryLeadingThumbnail(
+                          entry: entry,
+                          icon: _icon(entry),
                           color: _color(entry),
-                          size: 24 * fileIconScale,
+                          size: 28 * fileIconScale,
+                          showVideoThumbnails: showVideoThumbnails,
+                          animateVideoThumbnails: animateVideoThumbnails,
+                          showAudioArtwork: showAudioArtwork,
+                          previewLoader: onThumbnailPreview,
                         ),
                 ),
                 title: Text(
@@ -4588,7 +5079,7 @@ class _EntryList extends StatelessWidget {
           _SelectionToolbar(
             language: language,
             selectedCount: selectedPaths.length,
-            onSelectAll: () => onSelectAllEntries(entries),
+            onSelectAll: () => onSelectAllEntries(sortedEntries),
             onClear: onClearSelection,
             onAction: onBulkAction,
           ),
@@ -4900,6 +5391,172 @@ class _EntryList extends StatelessWidget {
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
 }
 
+class _EntryLeadingThumbnail extends StatelessWidget {
+  const _EntryLeadingThumbnail({
+    required this.entry,
+    required this.icon,
+    required this.size,
+    required this.showVideoThumbnails,
+    required this.animateVideoThumbnails,
+    required this.showAudioArtwork,
+    required this.previewLoader,
+    this.color,
+  });
+
+  final ExplorerEntry entry;
+  final IconData icon;
+  final Color? color;
+  final double size;
+  final bool showVideoThumbnails;
+  final bool animateVideoThumbnails;
+  final bool showAudioArtwork;
+  final Future<FilePreview> Function(ExplorerEntry) previewLoader;
+
+  @override
+  Widget build(BuildContext context) {
+    if (entry.isDirectory || entry.isNavigationEntry) {
+      return Icon(icon, color: color, size: size);
+    }
+    final kindByName = FileViewerService.kindForName(entry.name);
+    final kindByPath = FileViewerService.kindForName(entry.path);
+    final kind =
+        kindByName == FileContentKind.unknown ? kindByPath : kindByName;
+    final boxSize = math.max(30.0, size + 8);
+
+    if (kind == FileContentKind.image) {
+      if (!entry.isEncrypted && !entry.path.startsWith('zip://')) {
+        return _ThumbBox(
+          size: boxSize,
+          child: Image.file(
+            File(entry.path),
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => Icon(icon, color: color, size: size),
+          ),
+        );
+      }
+      return _PreviewThumb(
+        entry: entry,
+        size: boxSize,
+        previewLoader: previewLoader,
+        fallback: Icon(icon, color: color, size: size),
+      );
+    }
+
+    if (kind == FileContentKind.audio && showAudioArtwork) {
+      return FutureBuilder<FilePreview>(
+        future: entry.isEncrypted || entry.path.startsWith('zip://')
+            ? previewLoader(entry)
+            : null,
+        builder: (context, snapshot) {
+          final preview = snapshot.data;
+          return FutureBuilder<Uint8List?>(
+            future: MediaArtworkService.audioArtwork(
+              path: preview == null ? entry.path : null,
+              bytes: preview?.bytes == null
+                  ? null
+                  : Uint8List.fromList(preview!.bytes!),
+            ),
+            builder: (context, art) {
+              final bytes = art.data;
+              if (bytes == null || bytes.isEmpty) {
+                return Icon(Icons.audiotrack_outlined,
+                    color: color, size: size);
+              }
+              return _ThumbBox(
+                size: boxSize,
+                child: Image.memory(bytes, fit: BoxFit.cover),
+              );
+            },
+          );
+        },
+      );
+    }
+
+    if (kind == FileContentKind.video && showVideoThumbnails) {
+      return FutureBuilder<Uint8List?>(
+        future: entry.isEncrypted || entry.path.startsWith('zip://')
+            ? Future<Uint8List?>.value(null)
+            : MediaArtworkService.videoThumbnail(entry.path),
+        builder: (context, snapshot) {
+          final bytes = snapshot.data;
+          if (bytes == null || bytes.isEmpty) {
+            return Icon(Icons.movie_outlined, color: color, size: size);
+          }
+          return _ThumbBox(
+            size: boxSize,
+            child: Stack(fit: StackFit.expand, children: [
+              Image.memory(bytes, fit: BoxFit.cover),
+              if (animateVideoThumbnails)
+                TweenAnimationBuilder<double>(
+                  tween: Tween(begin: .18, end: .72),
+                  duration: const Duration(seconds: 2),
+                  builder: (context, value, child) => Align(
+                    alignment: Alignment(value * 2 - 1, .85),
+                    child: Container(
+                      width: 8,
+                      height: 3,
+                      color: Colors.white.withValues(alpha: .85),
+                    ),
+                  ),
+                ),
+              const Center(
+                child: Icon(Icons.play_circle_fill,
+                    color: Colors.white70, size: 18),
+              ),
+            ]),
+          );
+        },
+      );
+    }
+    return Icon(icon, color: color, size: size);
+  }
+}
+
+class _PreviewThumb extends StatelessWidget {
+  const _PreviewThumb({
+    required this.entry,
+    required this.size,
+    required this.previewLoader,
+    required this.fallback,
+  });
+
+  final ExplorerEntry entry;
+  final double size;
+  final Future<FilePreview> Function(ExplorerEntry) previewLoader;
+  final Widget fallback;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<FilePreview>(
+      future: previewLoader(entry),
+      builder: (context, snapshot) {
+        final preview = snapshot.data;
+        final bytes = preview?.bytes;
+        if (bytes == null || bytes.isEmpty) return fallback;
+        return _ThumbBox(
+          size: size,
+          child: Image.memory(Uint8List.fromList(bytes), fit: BoxFit.cover),
+        );
+      },
+    );
+  }
+}
+
+class _ThumbBox extends StatelessWidget {
+  const _ThumbBox({required this.size, required this.child});
+
+  final double size;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(7),
+      child: SizedBox(width: size, height: size, child: child),
+    );
+  }
+}
+
 class _SelectionToolbar extends StatelessWidget {
   const _SelectionToolbar({
     required this.language,
@@ -5067,6 +5724,7 @@ class _PreviewPane extends StatelessWidget {
     required this.onOpenExternal,
     required this.onPreviewWindow,
     required this.onEditPreview,
+    required this.onEntryAction,
     required this.onImageNavigate,
     required this.onRememberMediaPosition,
   });
@@ -5083,6 +5741,7 @@ class _PreviewPane extends StatelessWidget {
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
+  final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
   final Future<FilePreview?> Function(int delta) onImageNavigate;
   final Future<void> Function(String key, Duration position)
       onRememberMediaPosition;
@@ -5138,6 +5797,14 @@ class _PreviewPane extends StatelessWidget {
                       onEditPreview(p);
                     case _PreviewAction.external:
                       onOpenExternal(p);
+                    case _PreviewAction.copy:
+                      onEntryAction(entry!, _EntryAction.copy);
+                    case _PreviewAction.cut:
+                      onEntryAction(entry!, _EntryAction.cut);
+                    case _PreviewAction.delete:
+                      onEntryAction(entry!, _EntryAction.delete);
+                    case _PreviewAction.properties:
+                      onEntryAction(entry!, _EntryAction.properties);
                     case _PreviewAction.hide:
                       onTogglePreview();
                   }
@@ -5162,6 +5829,23 @@ class _PreviewPane extends StatelessWidget {
                   PopupMenuItem(
                     value: _PreviewAction.external,
                     child: Text(language.t('preview.external')),
+                  ),
+                  const PopupMenuDivider(),
+                  PopupMenuItem(
+                    value: _PreviewAction.copy,
+                    child: Text(language.t('explorer.copy')),
+                  ),
+                  PopupMenuItem(
+                    value: _PreviewAction.cut,
+                    child: Text(language.t('explorer.cut')),
+                  ),
+                  PopupMenuItem(
+                    value: _PreviewAction.delete,
+                    child: Text(language.t('explorer.delete')),
+                  ),
+                  PopupMenuItem(
+                    value: _PreviewAction.properties,
+                    child: Text(language.t('explorer.properties')),
                   ),
                   PopupMenuItem(
                     value: _PreviewAction.hide,
@@ -5409,14 +6093,14 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     _errorSubscription = _player.stream.error.listen((error) {
       if (mounted) setState(() => _error = error);
     });
-    _playlistKey = _makePlaylistKey(widget.playlist);
+    _playlistKey = _SharedMediaSession.keyFor(widget.preview, widget.playlist);
     _openFuture = _openPlaylist();
   }
 
   @override
   void didUpdateWidget(covariant _MediaPreviewPlayer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final nextKey = _makePlaylistKey(widget.playlist);
+    final nextKey = _SharedMediaSession.keyFor(widget.preview, widget.playlist);
     if (nextKey != _playlistKey ||
         widget.preview.title != oldWidget.preview.title) {
       unawaited(_rememberCurrentPosition());
@@ -5432,11 +6116,6 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     super.dispose();
   }
 
-  String _makePlaylistKey(List<MediaPreviewItem> items) => items
-      .map((item) =>
-          '${item.title}|${item.path ?? ''}|${item.bytes?.length ?? 0}|${item.encrypted}')
-      .join('\n');
-
   int _initialIndex() {
     final index = widget.playlist.indexWhere((item) =>
         item.title == widget.preview.title ||
@@ -5448,6 +6127,8 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   Future<void> _openPlaylist() async {
     setState(() => _error = null);
     try {
+      final wasAlreadyOpen =
+          _sharedMediaSession.isSame(widget.preview, widget.playlist);
       await _sharedMediaSession.open(
         preview: widget.preview,
         playlist: widget.playlist,
@@ -5460,7 +6141,7 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
       final resumeMs = initialItem == null
           ? 0
           : widget.resumePositions[initialItem.resumeKey ?? ''] ?? 0;
-      if (resumeMs > 1500) {
+      if (!wasAlreadyOpen && resumeMs > 1500) {
         await _player.seek(Duration(milliseconds: resumeMs));
       }
       await _player.setPlaylistMode(
@@ -5531,13 +6212,7 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
             else if (widget.preview.contentKind == FileContentKind.video)
               ClipRRect(
                 borderRadius: BorderRadius.circular(18),
-                child: AspectRatio(
-                  aspectRatio: 16 / 9,
-                  child: Video(
-                    controller: _controller,
-                    fit: BoxFit.contain,
-                  ),
-                ),
+                child: _AdaptiveVideoSurface(controller: _controller),
               )
             else
               Card(
@@ -5584,6 +6259,36 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   }
 }
 
+class _AdaptiveVideoSurface extends StatelessWidget {
+  const _AdaptiveVideoSurface({required this.controller});
+
+  final VideoController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final player = controller.player;
+    return StreamBuilder<int?>(
+      stream: player.stream.width,
+      initialData: player.state.width,
+      builder: (context, widthSnapshot) => StreamBuilder<int?>(
+        stream: player.stream.height,
+        initialData: player.state.height,
+        builder: (context, heightSnapshot) {
+          final width = (widthSnapshot.data ?? 0).toDouble();
+          final height = (heightSnapshot.data ?? 0).toDouble();
+          final aspectRatio = width > 0 && height > 0 ? width / height : 16 / 9;
+          return Center(
+            child: AspectRatio(
+              aspectRatio: aspectRatio.clamp(0.1, 10.0).toDouble(),
+              child: Video(controller: controller, fit: BoxFit.contain),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _SharedMediaSession extends ChangeNotifier {
   _SharedMediaSession();
 
@@ -5592,8 +6297,20 @@ class _SharedMediaSession extends ChangeNotifier {
   _InMemoryMediaServer? _memoryMediaServer;
   FilePreview? preview;
   List<MediaPreviewItem> playlist = const [];
+  String _sessionKey = '';
   var active = false;
   var collapsed = false;
+
+  static String keyFor(FilePreview preview, List<MediaPreviewItem> playlist) {
+    final itemsKey = playlist
+        .map((item) =>
+            '${item.title}|${item.path ?? ''}|${item.resumeKey ?? ''}|${item.bytes?.length ?? 0}|${item.encrypted}')
+        .join('\n');
+    return '${preview.title}|${preview.sourcePath ?? ''}|${preview.contentKind.name}|$itemsKey';
+  }
+
+  bool isSame(FilePreview preview, List<MediaPreviewItem> playlist) =>
+      active && _sessionKey == keyFor(preview, playlist);
 
   MediaPreviewItem? get currentItem {
     if (playlist.isEmpty) return null;
@@ -5609,6 +6326,18 @@ class _SharedMediaSession extends ChangeNotifier {
     required bool repeatOne,
     required bool shuffle,
   }) async {
+    final nextKey = keyFor(preview, playlist);
+    if (active && _sessionKey == nextKey) {
+      this.preview = preview;
+      this.playlist = playlist;
+      collapsed = false;
+      await player.setPlaylistMode(
+        repeatOne ? PlaylistMode.single : PlaylistMode.loop,
+      );
+      await player.setShuffle(shuffle);
+      notifyListeners();
+      return;
+    }
     await _clearMemoryMedia();
     final medias = <Media>[];
     for (var i = 0; i < playlist.length; i++) {
@@ -5632,6 +6361,7 @@ class _SharedMediaSession extends ChangeNotifier {
     }
     this.preview = preview;
     this.playlist = playlist;
+    _sessionKey = nextKey;
     active = true;
     collapsed = false;
     notifyListeners();
@@ -5645,6 +6375,7 @@ class _SharedMediaSession extends ChangeNotifier {
 
   Future<void> close() async {
     active = false;
+    _sessionKey = '';
     preview = null;
     playlist = const [];
     await player.stop();
@@ -5844,12 +6575,8 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
               color: Theme.of(context).colorScheme.surface,
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 if (isVideo && !widget.session.collapsed)
-                  AspectRatio(
-                    aspectRatio: 16 / 9,
-                    child: Video(
-                      controller: widget.session.controller,
-                      fit: BoxFit.contain,
-                    ),
+                  _AdaptiveVideoSurface(
+                    controller: widget.session.controller,
                   )
                 else
                   _MiniAudioHeader(item: item),
@@ -7159,6 +7886,7 @@ class _SettingsView extends StatefulWidget {
     required int recentSidebarCount,
     required int recentRememberCount,
     required int favoriteSidebarCount,
+    required int locationSidebarCount,
     required bool decryptNamesInExplorer,
     required bool openFullscreenOnHiddenPreviewTap,
     required bool autoScaleForDpi,
@@ -7188,6 +7916,10 @@ class _SettingsView extends StatefulWidget {
     required bool enableMiniAudio,
     required bool continueMediaInBackground,
     required bool autoCloseMediaOnSectionChange,
+    required bool showVideoThumbnails,
+    required bool animateVideoThumbnails,
+    required bool showAudioArtwork,
+    required bool requirePasswordOnAndroidResume,
   }) onSave;
   final Future<void> Function() onRequestAndroidStorageAccess;
   final Future<void> Function() onClear;
@@ -7215,6 +7947,7 @@ class _SettingsViewState extends State<_SettingsView> {
   late final TextEditingController _recentSidebarCount;
   late final TextEditingController _recentRememberCount;
   late final TextEditingController _favoriteSidebarCount;
+  late final TextEditingController _locationSidebarCount;
   late final TextEditingController _fileTextScale;
   late final TextEditingController _fileIconScale;
   late final TextEditingController _interfaceTextScale;
@@ -7250,6 +7983,10 @@ class _SettingsViewState extends State<_SettingsView> {
   late bool _enableMiniAudio;
   late bool _continueMediaInBackground;
   late bool _autoCloseMediaOnSectionChange;
+  late bool _showVideoThumbnails;
+  late bool _animateVideoThumbnails;
+  late bool _showAudioArtwork;
+  late bool _requirePasswordOnAndroidResume;
   late String _languageCode;
   late String _commonAlgorithm;
   late String _navigationPolicy;
@@ -7279,6 +8016,11 @@ class _SettingsViewState extends State<_SettingsView> {
     _continueMediaInBackground = widget.settings.continueMediaInBackground;
     _autoCloseMediaOnSectionChange =
         widget.settings.autoCloseMediaOnSectionChange;
+    _showVideoThumbnails = widget.settings.showVideoThumbnails;
+    _animateVideoThumbnails = widget.settings.animateVideoThumbnails;
+    _showAudioArtwork = widget.settings.showAudioArtwork;
+    _requirePasswordOnAndroidResume =
+        widget.settings.requirePasswordOnAndroidResume;
     _commonAlgorithm = widget.settings.commonEncryptionAlgorithm;
     _navigationPolicy = widget.settings.navigationPolicy;
     _searchMode = widget.settings.searchMode;
@@ -7296,6 +8038,9 @@ class _SettingsViewState extends State<_SettingsView> {
     );
     _favoriteSidebarCount = TextEditingController(
       text: '${widget.settings.favoriteSidebarCount}',
+    );
+    _locationSidebarCount = TextEditingController(
+      text: '${widget.settings.locationSidebarCount}',
     );
     _fileTextScale = TextEditingController(
       text: widget.settings.fileTextScale.toStringAsFixed(2),
@@ -7365,6 +8110,7 @@ class _SettingsViewState extends State<_SettingsView> {
     _recentSidebarCount.dispose();
     _recentRememberCount.dispose();
     _favoriteSidebarCount.dispose();
+    _locationSidebarCount.dispose();
     _fileTextScale.dispose();
     _fileIconScale.dispose();
     _interfaceTextScale.dispose();
@@ -7609,6 +8355,13 @@ class _SettingsViewState extends State<_SettingsView> {
             labelText: language.t('settings.favorite.sidebar.count'),
           ),
         ),
+        TextField(
+          controller: _locationSidebarCount,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.locations.sidebar.count'),
+          ),
+        ),
       ]),
       const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.explorer.view'), [
@@ -7627,6 +8380,23 @@ class _SettingsViewState extends State<_SettingsView> {
           value: _autoScaleForDpi,
           onChanged: (v) => setState(() => _autoScaleForDpi = v),
           title: Text(language.t('settings.auto.dpi')),
+        ),
+        SwitchListTile(
+          value: _showVideoThumbnails,
+          onChanged: (v) => setState(() => _showVideoThumbnails = v),
+          title: Text(language.t('settings.thumbnails.video')),
+        ),
+        SwitchListTile(
+          value: _animateVideoThumbnails,
+          onChanged: _showVideoThumbnails
+              ? (v) => setState(() => _animateVideoThumbnails = v)
+              : null,
+          title: Text(language.t('settings.thumbnails.video.animate')),
+        ),
+        SwitchListTile(
+          value: _showAudioArtwork,
+          onChanged: (v) => setState(() => _showAudioArtwork = v),
+          title: Text(language.t('settings.thumbnails.audio')),
         ),
         TextField(
           controller: _fileTextScale,
@@ -7753,6 +8523,12 @@ class _SettingsViewState extends State<_SettingsView> {
         ),
         Text(language.t('settings.block.capture.note')),
         if (Platform.isAndroid) ...[
+          SwitchListTile(
+            value: _requirePasswordOnAndroidResume,
+            onChanged: (v) =>
+                setState(() => _requirePasswordOnAndroidResume = v),
+            title: Text(language.t('settings.android.lock.resume')),
+          ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: widget.onRequestAndroidStorageAccess,
@@ -7929,6 +8705,8 @@ class _SettingsViewState extends State<_SettingsView> {
             int.tryParse(_recentRememberCount.text.trim()) ?? 50,
         favoriteSidebarCount:
             int.tryParse(_favoriteSidebarCount.text.trim()) ?? 10,
+        locationSidebarCount:
+            int.tryParse(_locationSidebarCount.text.trim()) ?? 5,
         decryptNamesInExplorer: _decryptNamesInExplorer,
         openFullscreenOnHiddenPreviewTap: _openFullscreenOnHiddenPreviewTap,
         autoScaleForDpi: _autoScaleForDpi,
@@ -7963,6 +8741,10 @@ class _SettingsViewState extends State<_SettingsView> {
         enableMiniAudio: _enableMiniAudio,
         continueMediaInBackground: _continueMediaInBackground,
         autoCloseMediaOnSectionChange: _autoCloseMediaOnSectionChange,
+        showVideoThumbnails: _showVideoThumbnails,
+        animateVideoThumbnails: _animateVideoThumbnails,
+        showAudioArtwork: _showAudioArtwork,
+        requirePasswordOnAndroidResume: _requirePasswordOnAndroidResume,
       );
     } catch (error) {
       _snack('${widget.language.t('settings.language.invalid')} $error');

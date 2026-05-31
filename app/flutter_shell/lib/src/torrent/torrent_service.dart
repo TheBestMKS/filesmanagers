@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -118,6 +119,62 @@ class TorrentService {
       metadata.sourcePath,
     ];
     return Process.run('aria2c', args, runInShell: Platform.isWindows);
+  }
+
+  Future<File?> prepareStreamingFile(
+    TorrentMetadata metadata,
+    TorrentFileEntry file, {
+    Duration waitForFirstBytes = const Duration(seconds: 10),
+  }) async {
+    final local = await downloadedFile(metadata, file);
+    if (await _hasPlayableBytes(local, file)) return local;
+
+    try {
+      await _startDownloadDetached(metadata, selectedFiles: [file]);
+    } catch (_) {
+      return null;
+    }
+
+    final deadline = DateTime.now().add(waitForFirstBytes);
+    while (DateTime.now().isBefore(deadline)) {
+      if (await _hasPlayableBytes(local, file)) return local;
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    }
+    return await local.exists() ? local : null;
+  }
+
+  Future<void> _startDownloadDetached(
+    TorrentMetadata metadata, {
+    Iterable<TorrentFileEntry> selectedFiles = const [],
+  }) async {
+    final dir = await downloadDirectory(metadata);
+    final select =
+        selectedFiles.map((file) => (file.index + 1).toString()).join(',');
+    final args = <String>[
+      '--seed-time=0',
+      '--continue=true',
+      '--summary-interval=0',
+      '--file-allocation=none',
+      '--allow-overwrite=true',
+      '--auto-file-renaming=false',
+      '--bt-prioritize-piece=head=64M,tail=16M',
+      '--dir=${dir.path}',
+      if (select.isNotEmpty) '--select-file=$select',
+      metadata.sourcePath,
+    ];
+    await Process.start(
+      'aria2c',
+      args,
+      runInShell: Platform.isWindows,
+      mode: ProcessStartMode.detached,
+    );
+  }
+
+  Future<bool> _hasPlayableBytes(File local, TorrentFileEntry file) async {
+    if (!await local.exists()) return false;
+    final length = await local.length().catchError((_) => 0);
+    if (file.sizeBytes <= 0) return length > 0;
+    return length >= math.min(file.sizeBytes, 256 * 1024);
   }
 }
 

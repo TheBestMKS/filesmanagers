@@ -1183,17 +1183,22 @@ class FileExplorerRepository {
       );
     }
     final local = await _torrents.downloadedFile(metadata, file);
-    if (!await local.exists()) {
-      final result = await _torrents.startDownload(
-        metadata,
-        selectedFiles: [file],
-      );
+    var localReady = false;
+    if (await local.exists()) {
+      localReady = (await local.length().catchError((_) => 0)) > 0;
+    }
+    if (!localReady) {
+      final streaming = await _torrents.prepareStreamingFile(metadata, file);
+      if (streaming != null && await streaming.exists()) {
+        return FileViewerService.previewPlainFile(streaming);
+      }
       return FilePreview(
         title: file.name,
         subtitle:
-            'Torrent download started for selected file. aria2c exit: ${result.exitCode}',
+            'Torrent streaming was requested, but no local pieces are available yet.',
         sourcePath: torrent.fullPath,
-        text: '${result.stdout}\n${result.stderr}'.trim(),
+        text:
+            'SecureVault started aria2c in background when available. Open this file again after the first pieces are downloaded.',
         contentKind: FileViewerService.kindForName(file.name),
       );
     }
@@ -1372,6 +1377,9 @@ class FileExplorerRepository {
     String? filePassword,
   }) async {
     final name = basename(directory.path);
+    if (name == 'hidden_vault') {
+      return 'Скрытое хранилище программы';
+    }
     final password = filePassword?.isNotEmpty == true
         ? filePassword
         : commonPassword?.isNotEmpty == true

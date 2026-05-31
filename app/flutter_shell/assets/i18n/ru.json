@@ -346,6 +346,24 @@
     "selection.unsupported.bulk": "Это массовое действие недоступно для текущего выделения.",
     "selection.zip.local.only": "ZIP-операции доступны только для локальных папок.",
     "settings.plugins.open.window": "Открыть окно настройки плагинов",
-    "settings.plugins.window.title": "Настройка плагинов"
+    "settings.plugins.window.title": "Настройка плагинов",
+    "locations.add": "Добавить расположение",
+    "locations.add.empty": "Установите или настройте сетевой/облачный плагин, чтобы добавить расположение.",
+    "locations.open.all": "Показать все расположения",
+    "sort.title": "Сортировка папки",
+    "sort.by": "Сортировать по",
+    "sort.name": "Имя",
+    "sort.modified": "Дата изменения",
+    "sort.created": "Дата создания",
+    "sort.size": "Размер",
+    "sort.extension": "Расширение",
+    "sort.asc": "по возрастанию",
+    "sort.desc": "по убыванию",
+    "sort.folders.first": "Сначала папки",
+    "settings.locations.sidebar.count": "Расположений слева",
+    "settings.thumbnails.video": "Показывать кадры видео",
+    "settings.thumbnails.video.animate": "Анимировать кадры видео",
+    "settings.thumbnails.audio": "Показывать обложки аудио",
+    "settings.android.lock.resume": "Запрашивать пароль после возврата в Android"
   }
 }

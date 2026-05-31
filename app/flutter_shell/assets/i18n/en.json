@@ -346,6 +346,24 @@
     "selection.unsupported.bulk": "This bulk action is not available for the current selection.",
     "selection.zip.local.only": "ZIP operations are available only for local folders.",
     "settings.plugins.open.window": "Open plugin settings window",
-    "settings.plugins.window.title": "Plugin settings"
+    "settings.plugins.window.title": "Plugin settings",
+    "locations.add": "Add location",
+    "locations.add.empty": "Install or configure a network/cloud plugin to add a new location.",
+    "locations.open.all": "Show all locations",
+    "sort.title": "Folder sorting",
+    "sort.by": "Sort by",
+    "sort.name": "Name",
+    "sort.modified": "Modified",
+    "sort.created": "Created",
+    "sort.size": "Size",
+    "sort.extension": "Extension",
+    "sort.asc": "ascending",
+    "sort.desc": "descending",
+    "sort.folders.first": "Keep folders first",
+    "settings.locations.sidebar.count": "Locations shown on the left",
+    "settings.thumbnails.video": "Show video thumbnails",
+    "settings.thumbnails.video.animate": "Animate video thumbnails",
+    "settings.thumbnails.audio": "Show audio covers",
+    "settings.android.lock.resume": "Ask for the app password after Android resume"
   }
 }

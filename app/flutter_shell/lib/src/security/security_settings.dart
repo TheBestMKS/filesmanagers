@@ -67,6 +67,12 @@ class SecuritySettings {
     this.continueMediaInBackground = true,
     this.autoCloseMediaOnSectionChange = false,
     this.mediaResumePositions = const <String, int>{},
+    this.folderSortModes = const <String, String>{},
+    this.showVideoThumbnails = true,
+    this.animateVideoThumbnails = false,
+    this.showAudioArtwork = true,
+    this.locationSidebarCount = 5,
+    this.requirePasswordOnAndroidResume = false,
   });
 
   final String? appPasswordSalt;
@@ -127,6 +133,12 @@ class SecuritySettings {
   final bool continueMediaInBackground;
   final bool autoCloseMediaOnSectionChange;
   final Map<String, int> mediaResumePositions;
+  final Map<String, String> folderSortModes;
+  final bool showVideoThumbnails;
+  final bool animateVideoThumbnails;
+  final bool showAudioArtwork;
+  final int locationSidebarCount;
+  final bool requirePasswordOnAndroidResume;
 
   bool get hasAppPassword =>
       appPasswordSalt != null && appPasswordDigest != null;
@@ -203,6 +215,12 @@ class SecuritySettings {
     bool? continueMediaInBackground,
     bool? autoCloseMediaOnSectionChange,
     Map<String, int>? mediaResumePositions,
+    Map<String, String>? folderSortModes,
+    bool? showVideoThumbnails,
+    bool? animateVideoThumbnails,
+    bool? showAudioArtwork,
+    int? locationSidebarCount,
+    bool? requirePasswordOnAndroidResume,
   }) {
     return SecuritySettings(
       appPasswordSalt:
@@ -299,6 +317,14 @@ class SecuritySettings {
       autoCloseMediaOnSectionChange:
           autoCloseMediaOnSectionChange ?? this.autoCloseMediaOnSectionChange,
       mediaResumePositions: mediaResumePositions ?? this.mediaResumePositions,
+      folderSortModes: folderSortModes ?? this.folderSortModes,
+      showVideoThumbnails: showVideoThumbnails ?? this.showVideoThumbnails,
+      animateVideoThumbnails:
+          animateVideoThumbnails ?? this.animateVideoThumbnails,
+      showAudioArtwork: showAudioArtwork ?? this.showAudioArtwork,
+      locationSidebarCount: locationSidebarCount ?? this.locationSidebarCount,
+      requirePasswordOnAndroidResume:
+          requirePasswordOnAndroidResume ?? this.requirePasswordOnAndroidResume,
     );
   }
 
@@ -310,6 +336,7 @@ class SecuritySettings {
     final recent = json['recentFilePaths'];
     final pluginProxy = json['pluginProxyById'];
     final mediaResume = json['mediaResumePositions'];
+    final folderSortModes = json['folderSortModes'];
     List<String> listField(String key) {
       final value = json[key];
       return value is List
@@ -406,6 +433,17 @@ class SecuritySettings {
                 value is num ? value.round() : int.tryParse('$value') ?? 0,
               ))
           : const <String, int>{},
+      folderSortModes: folderSortModes is Map
+          ? folderSortModes.map(
+              (key, value) => MapEntry(key.toString(), value.toString()),
+            )
+          : const <String, String>{},
+      showVideoThumbnails: json['showVideoThumbnails'] as bool? ?? true,
+      animateVideoThumbnails: json['animateVideoThumbnails'] as bool? ?? false,
+      showAudioArtwork: json['showAudioArtwork'] as bool? ?? true,
+      locationSidebarCount: json['locationSidebarCount'] as int? ?? 5,
+      requirePasswordOnAndroidResume:
+          json['requirePasswordOnAndroidResume'] as bool? ?? false,
     );
   }
 
@@ -470,6 +508,12 @@ class SecuritySettings {
       'continueMediaInBackground': continueMediaInBackground,
       'autoCloseMediaOnSectionChange': autoCloseMediaOnSectionChange,
       'mediaResumePositions': mediaResumePositions,
+      'folderSortModes': folderSortModes,
+      'showVideoThumbnails': showVideoThumbnails,
+      'animateVideoThumbnails': animateVideoThumbnails,
+      'showAudioArtwork': showAudioArtwork,
+      'locationSidebarCount': locationSidebarCount,
+      'requirePasswordOnAndroidResume': requirePasswordOnAndroidResume,
     };
   }
 }
@@ -608,6 +652,20 @@ class SecuritySettingsRepository {
     return next;
   }
 
+  Future<SecuritySettings> setFolderSortMode(
+    SecuritySettings current,
+    String folderPath,
+    String sortMode,
+  ) async {
+    final normalized = folderPath.trim();
+    if (normalized.isEmpty) return current;
+    final nextModes = Map<String, String>.of(current.folderSortModes);
+    nextModes[normalized] = sortMode;
+    final next = current.copyWith(folderSortModes: nextModes);
+    await save(next);
+    return next;
+  }
+
   Future<SecuritySettings> updateMediaFolders(
     SecuritySettings current, {
     List<String>? galleryFolders,
@@ -732,6 +790,11 @@ class SecuritySettingsRepository {
     bool? enableMiniAudio,
     bool? continueMediaInBackground,
     bool? autoCloseMediaOnSectionChange,
+    bool? showVideoThumbnails,
+    bool? animateVideoThumbnails,
+    bool? showAudioArtwork,
+    int? locationSidebarCount,
+    bool? requirePasswordOnAndroidResume,
   }) async {
     var next = current.copyWith(
       useSeparateFilePassword: useSeparateFilePassword,
@@ -791,6 +854,11 @@ class SecuritySettingsRepository {
       enableMiniAudio: enableMiniAudio,
       continueMediaInBackground: continueMediaInBackground,
       autoCloseMediaOnSectionChange: autoCloseMediaOnSectionChange,
+      showVideoThumbnails: showVideoThumbnails,
+      animateVideoThumbnails: animateVideoThumbnails,
+      showAudioArtwork: showAudioArtwork,
+      locationSidebarCount: locationSidebarCount,
+      requirePasswordOnAndroidResume: requirePasswordOnAndroidResume,
       recentFilePaths: rememberRecentFiles == false
           ? const <String>[]
           : current.recentFilePaths
