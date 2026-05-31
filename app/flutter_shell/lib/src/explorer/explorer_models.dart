@@ -160,6 +160,7 @@ class MediaPreviewItem {
     required this.title,
     required this.kind,
     this.path,
+    this.resumeKey,
     this.bytes,
     this.encrypted = false,
   });
@@ -167,6 +168,7 @@ class MediaPreviewItem {
   final String title;
   final FileContentKind kind;
   final String? path;
+  final String? resumeKey;
   final Uint8List? bytes;
   final bool encrypted;
 }

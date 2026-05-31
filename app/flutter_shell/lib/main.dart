@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:image/image.dart' as img;
 import 'package:media_kit/media_kit.dart';
@@ -19,7 +20,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.7.0';
+const _appVersion = '0.8.0';
 
 void main(List<String> args) {
   MediaKit.ensureInitialized();
@@ -550,6 +551,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
               title: entry.name,
               kind: kind,
               path: entry.path,
+              resumeKey: entry.path,
               encrypted: entry.isEncrypted,
             ),
       ];
@@ -794,6 +796,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       title: selectedPreview.title,
       kind: kind,
       path: selectedPreview.decrypted ? null : selected.path,
+      resumeKey: selected.path,
       bytes: selectedPreview.decrypted && selectedPreview.bytes != null
           ? Uint8List.fromList(selectedPreview.bytes!)
           : null,
@@ -840,6 +843,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
             items.add(MediaPreviewItem(
               title: preview.title,
               kind: kind,
+              resumeKey: entry.path,
               bytes: Uint8List.fromList(preview.bytes!),
               encrypted: true,
             ));
@@ -854,6 +858,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         title: entry.name,
         kind: kind,
         path: entry.path,
+        resumeKey: entry.path,
       ));
     }
 
@@ -1899,6 +1904,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
               language: _language,
               mediaPlaylist: _mediaPlaylist,
               imagePlaylist: _imagePlaylist,
+              mediaResumePositions: _settings.mediaResumePositions,
+              onRememberMediaPosition: _rememberMediaPosition,
               fillAvailable: true,
               onImageNavigate: (delta) async {
                 final next = await _navigateImage(delta);
@@ -1948,6 +1955,17 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     }
 
     _snack(_language.t('editor.unsupported'));
+  }
+
+  Future<void> _rememberMediaPosition(String key, Duration position) async {
+    if (key.trim().isEmpty) return;
+    final next = await _settingsRepo
+        .recordMediaResumePosition(_settings, key, position.inMilliseconds)
+        .catchError((_) => _settings);
+    if (mounted &&
+        next.mediaResumePositions != _settings.mediaResumePositions) {
+      setState(() => _settings = next);
+    }
   }
 
   Future<void> _saveSecurity({
@@ -2254,6 +2272,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                             entry: _selected,
                             preview: _preview,
                             mediaPlaylist: _mediaPlaylist,
+                            mediaResumePositions:
+                                _settings.mediaResumePositions,
                             snapshot: _snapshot,
                             isVideo: _page == ShellPage.video,
                             onRefresh: _refresh,
@@ -2263,6 +2283,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                             onOpenExternal: _openPreviewExternal,
                             onPreviewWindow: _showPreviewWindow,
                             onEditPreview: _openEditor,
+                            onRememberMediaPosition: _rememberMediaPosition,
                           )
                         : _ExplorerView(
                             language: _language,
@@ -2274,6 +2295,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                             preview: _preview,
                             mediaPlaylist: _mediaPlaylist,
                             imagePlaylist: _imagePlaylist,
+                            mediaResumePositions:
+                                _settings.mediaResumePositions,
                             onUp: _goUp,
                             onRefresh: _refresh,
                             onImport: _importFile,
@@ -2296,6 +2319,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                             onPreviewWindow: _showPreviewWindow,
                             onEditPreview: _openEditor,
                             onImageNavigate: _navigateImage,
+                            onRememberMediaPosition: _rememberMediaPosition,
                             canPaste: _clipboardPath != null,
                             favoritePaths: _settings.favoritePaths,
                             recentPaths: _settings.recentFilePaths,
@@ -3090,7 +3114,7 @@ class _Sidebar extends StatelessWidget {
       };
 }
 
-class _GalleryLibraryView extends StatelessWidget {
+class _GalleryLibraryView extends StatefulWidget {
   const _GalleryLibraryView({
     required this.language,
     required this.snapshot,
@@ -3114,19 +3138,26 @@ class _GalleryLibraryView extends StatelessWidget {
   final Future<void> Function(ExplorerEntry) onEntryFullscreen;
 
   @override
+  State<_GalleryLibraryView> createState() => _GalleryLibraryViewState();
+}
+
+class _GalleryLibraryViewState extends State<_GalleryLibraryView> {
+  var _tileExtent = 170.0;
+
+  @override
   Widget build(BuildContext context) {
     return Column(children: [
       _MediaHeader(
-        title: language.t('nav.gallery'),
-        language: language,
-        onRefresh: onRefresh,
-        onSearch: onSearch,
-        onSearchFilters: onSearchFilters,
-        searchQuery: searchQuery,
+        title: widget.language.t('nav.gallery'),
+        language: widget.language,
+        onRefresh: widget.onRefresh,
+        onSearch: widget.onSearch,
+        onSearchFilters: widget.onSearchFilters,
+        searchQuery: widget.searchQuery,
       ),
       Expanded(
         child: FutureBuilder<DirectorySnapshot>(
-          future: snapshot,
+          future: widget.snapshot,
           builder: (context, snap) {
             if (!snap.hasData) {
               return const Center(child: CircularProgressIndicator());
@@ -3134,69 +3165,21 @@ class _GalleryLibraryView extends StatelessWidget {
             if (snap.data!.hasError) {
               return Center(
                 child: Text(
-                  '${language.t('explorer.access.error')}\n${snap.data!.error}',
+                  '${widget.language.t('explorer.access.error')}\n${snap.data!.error}',
                   textAlign: TextAlign.center,
                 ),
               );
             }
             final entries = _filtered(snap.data!.entries);
             if (entries.isEmpty) {
-              return Center(child: Text(language.t('explorer.empty')));
+              return Center(child: Text(widget.language.t('explorer.empty')));
             }
-            return LayoutBuilder(builder: (context, constraints) {
-              final width = constraints.maxWidth;
-              final columns = (width / 170).floor().clamp(2, 8);
-              return GridView.builder(
-                padding: const EdgeInsets.all(14),
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: columns,
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                  childAspectRatio: .82,
-                ),
-                itemCount: entries.length,
-                itemBuilder: (context, index) {
-                  final entry = entries[index];
-                  final kind = FileViewerService.kindForName(entry.name);
-                  return GestureDetector(
-                    onTap: () => unawaited(onEntry(entry)),
-                    onDoubleTap: () => unawaited(onEntryFullscreen(entry)),
-                    child: Card(
-                      clipBehavior: Clip.antiAlias,
-                      elevation: selected?.path == entry.path ? 4 : 0,
-                      child: Column(children: [
-                        Expanded(
-                          child: _MediaThumbnail(
-                            entry: entry,
-                            kind: kind,
-                            fit: BoxFit.cover,
-                          ),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: Row(children: [
-                            Icon(
-                              kind == FileContentKind.video
-                                  ? Icons.play_circle_outline
-                                  : Icons.image_outlined,
-                              size: 18,
-                            ),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                entry.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ]),
-                        ),
-                      ]),
-                    ),
-                  );
-                },
-              );
-            });
+            return Listener(
+              onPointerSignal: _handlePointerSignal,
+              child: _tileExtent <= 92
+                  ? _buildCalendarMode(entries)
+                  : _buildMonthGridMode(entries),
+            );
           },
         ),
       ),
@@ -3204,11 +3187,234 @@ class _GalleryLibraryView extends StatelessWidget {
   }
 
   List<ExplorerEntry> _filtered(List<ExplorerEntry> entries) {
-    if (searchQuery.isEmpty) return entries;
-    final query = searchQuery.toLowerCase();
+    if (widget.searchQuery.isEmpty) return entries;
+    final query = widget.searchQuery.toLowerCase();
     return entries
         .where((entry) => entry.name.toLowerCase().contains(query))
         .toList();
+  }
+
+  void _handlePointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent ||
+        !HardwareKeyboard.instance.isControlPressed) {
+      return;
+    }
+    final direction = event.scrollDelta.dy.sign;
+    if (direction == 0) return;
+    setState(() {
+      _tileExtent = (_tileExtent + direction * -18).clamp(68.0, 290.0);
+    });
+  }
+
+  Widget _buildMonthGridMode(List<ExplorerEntry> entries) {
+    final groups = _groupByMonth(entries);
+    return LayoutBuilder(builder: (context, constraints) {
+      final width = constraints.maxWidth;
+      final columns = (width / _tileExtent).floor().clamp(2, 12).toInt();
+      return CustomScrollView(slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Text(
+              widget.language.t('gallery.zoom.hint'),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        ),
+        for (final group in groups.entries) ...[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 18, 16, 8),
+              child: Text(
+                _monthTitle(group.key),
+                style: Theme.of(context)
+                    .textTheme
+                    .titleLarge
+                    ?.copyWith(fontWeight: FontWeight.w800),
+              ),
+            ),
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            sliver: SliverGrid(
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                crossAxisSpacing: 12,
+                mainAxisSpacing: 12,
+                childAspectRatio: .82,
+              ),
+              delegate: SliverChildBuilderDelegate(
+                (context, index) => _GalleryTile(
+                  entry: group.value[index],
+                  selected: widget.selected?.path == group.value[index].path,
+                  onEntry: widget.onEntry,
+                  onEntryFullscreen: widget.onEntryFullscreen,
+                ),
+                childCount: group.value.length,
+              ),
+            ),
+          ),
+        ],
+        const SliverToBoxAdapter(child: SizedBox(height: 24)),
+      ]);
+    });
+  }
+
+  Widget _buildCalendarMode(List<ExplorerEntry> entries) {
+    final years = <int, Map<int, int>>{};
+    for (final entry in entries) {
+      final date = entry.modifiedAt;
+      final months = years.putIfAbsent(date.year, () => <int, int>{});
+      months[date.month] = (months[date.month] ?? 0) + 1;
+    }
+    final sortedYears = years.keys.toList()..sort((a, b) => b.compareTo(a));
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: sortedYears.length,
+      itemBuilder: (context, index) {
+        final year = sortedYears[index];
+        final months = years[year]!;
+        return Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$year',
+                  style: Theme.of(context)
+                      .textTheme
+                      .headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 12),
+                GridView.builder(
+                  physics: const NeverScrollableScrollPhysics(),
+                  shrinkWrap: true,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 6,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                    childAspectRatio: 1.4,
+                  ),
+                  itemCount: 12,
+                  itemBuilder: (context, monthIndex) {
+                    final month = monthIndex + 1;
+                    final count = months[month] ?? 0;
+                    return DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        color: count == 0
+                            ? Theme.of(context)
+                                .colorScheme
+                                .surfaceContainerHighest
+                            : Theme.of(context).colorScheme.primaryContainer,
+                      ),
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(_shortMonth(month)),
+                            if (count > 0) ...[
+                              const SizedBox(height: 4),
+                              Container(
+                                width: 7,
+                                height: 7,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Theme.of(context).colorScheme.primary,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Map<String, List<ExplorerEntry>> _groupByMonth(List<ExplorerEntry> entries) {
+    final sorted = [...entries]
+      ..sort((a, b) => b.modifiedAt.compareTo(a.modifiedAt));
+    final groups = <String, List<ExplorerEntry>>{};
+    for (final entry in sorted) {
+      final date = entry.modifiedAt;
+      final key = '${date.year}-${date.month.toString().padLeft(2, '0')}';
+      groups.putIfAbsent(key, () => <ExplorerEntry>[]).add(entry);
+    }
+    return groups;
+  }
+
+  String _monthTitle(String key) {
+    final parts = key.split('-');
+    final year = parts.first;
+    final month = int.tryParse(parts.last) ?? 1;
+    return '${widget.language.t('month.$month')} $year';
+  }
+
+  String _shortMonth(int month) => widget.language.t('month.short.$month');
+}
+
+class _GalleryTile extends StatelessWidget {
+  const _GalleryTile({
+    required this.entry,
+    required this.selected,
+    required this.onEntry,
+    required this.onEntryFullscreen,
+  });
+
+  final ExplorerEntry entry;
+  final bool selected;
+  final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry) onEntryFullscreen;
+
+  @override
+  Widget build(BuildContext context) {
+    final kind = FileViewerService.kindForName(entry.name);
+    return GestureDetector(
+      onTap: () => unawaited(onEntry(entry)),
+      onDoubleTap: () => unawaited(onEntryFullscreen(entry)),
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        elevation: selected ? 4 : 0,
+        child: Column(children: [
+          Expanded(
+            child: _MediaThumbnail(
+              entry: entry,
+              kind: kind,
+              fit: BoxFit.cover,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Row(children: [
+              Icon(
+                kind == FileContentKind.video
+                    ? Icons.play_circle_outline
+                    : Icons.image_outlined,
+                size: 18,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  entry.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ]),
+          ),
+        ]),
+      ),
+    );
   }
 }
 
@@ -3218,6 +3424,7 @@ class _MediaOnlyView extends StatelessWidget {
     required this.entry,
     required this.preview,
     required this.mediaPlaylist,
+    required this.mediaResumePositions,
     required this.snapshot,
     required this.isVideo,
     required this.onRefresh,
@@ -3227,12 +3434,14 @@ class _MediaOnlyView extends StatelessWidget {
     required this.onOpenExternal,
     required this.onPreviewWindow,
     required this.onEditPreview,
+    required this.onRememberMediaPosition,
   });
 
   final AppLanguage language;
   final ExplorerEntry? entry;
   final Future<FilePreview>? preview;
   final List<MediaPreviewItem> mediaPlaylist;
+  final Map<String, int> mediaResumePositions;
   final Future<DirectorySnapshot>? snapshot;
   final bool isVideo;
   final Future<void> Function() onRefresh;
@@ -3242,6 +3451,8 @@ class _MediaOnlyView extends StatelessWidget {
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
+  final Future<void> Function(String key, Duration position)
+      onRememberMediaPosition;
 
   @override
   Widget build(BuildContext context) {
@@ -3283,6 +3494,8 @@ class _MediaOnlyView extends StatelessWidget {
                 preview: preview,
                 mediaPlaylist: mediaPlaylist,
                 imagePlaylist: const [],
+                mediaResumePositions: mediaResumePositions,
+                onRememberMediaPosition: onRememberMediaPosition,
                 visible: true,
                 onTogglePreview: () {},
                 onOpenPassword: onOpenPassword,
@@ -3419,6 +3632,7 @@ class _ExplorerView extends StatelessWidget {
     required this.preview,
     required this.mediaPlaylist,
     required this.imagePlaylist,
+    required this.mediaResumePositions,
     required this.onUp,
     required this.onRefresh,
     required this.onImport,
@@ -3435,6 +3649,7 @@ class _ExplorerView extends StatelessWidget {
     required this.onPreviewWindow,
     required this.onEditPreview,
     required this.onImageNavigate,
+    required this.onRememberMediaPosition,
     required this.canPaste,
     required this.favoritePaths,
     required this.recentPaths,
@@ -3459,6 +3674,7 @@ class _ExplorerView extends StatelessWidget {
   final Future<FilePreview>? preview;
   final List<MediaPreviewItem> mediaPlaylist;
   final List<MediaPreviewItem> imagePlaylist;
+  final Map<String, int> mediaResumePositions;
   final VoidCallback onUp;
   final Future<void> Function() onRefresh;
   final VoidCallback onImport;
@@ -3475,6 +3691,8 @@ class _ExplorerView extends StatelessWidget {
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
   final Future<FilePreview?> Function(int delta) onImageNavigate;
+  final Future<void> Function(String key, Duration position)
+      onRememberMediaPosition;
   final bool canPaste;
   final List<String> favoritePaths;
   final List<String> recentPaths;
@@ -3594,6 +3812,7 @@ class _ExplorerView extends StatelessWidget {
             preview: preview,
             mediaPlaylist: mediaPlaylist,
             imagePlaylist: imagePlaylist,
+            mediaResumePositions: mediaResumePositions,
             visible: previewVisible,
             onTogglePreview: onTogglePreview,
             onOpenPassword: onOpenPassword,
@@ -3601,6 +3820,7 @@ class _ExplorerView extends StatelessWidget {
             onPreviewWindow: onPreviewWindow,
             onEditPreview: onEditPreview,
             onImageNavigate: onImageNavigate,
+            onRememberMediaPosition: onRememberMediaPosition,
           );
           if (c.maxWidth < 980) {
             return Column(children: [
@@ -4132,6 +4352,7 @@ class _PreviewPane extends StatelessWidget {
     required this.preview,
     required this.mediaPlaylist,
     required this.imagePlaylist,
+    required this.mediaResumePositions,
     required this.visible,
     required this.onTogglePreview,
     required this.onOpenPassword,
@@ -4139,6 +4360,7 @@ class _PreviewPane extends StatelessWidget {
     required this.onPreviewWindow,
     required this.onEditPreview,
     required this.onImageNavigate,
+    required this.onRememberMediaPosition,
   });
 
   final AppLanguage language;
@@ -4146,6 +4368,7 @@ class _PreviewPane extends StatelessWidget {
   final Future<FilePreview>? preview;
   final List<MediaPreviewItem> mediaPlaylist;
   final List<MediaPreviewItem> imagePlaylist;
+  final Map<String, int> mediaResumePositions;
   final bool visible;
   final VoidCallback onTogglePreview;
   final VoidCallback onOpenPassword;
@@ -4153,6 +4376,8 @@ class _PreviewPane extends StatelessWidget {
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
   final Future<FilePreview?> Function(int delta) onImageNavigate;
+  final Future<void> Function(String key, Duration position)
+      onRememberMediaPosition;
 
   @override
   Widget build(BuildContext context) {
@@ -4178,6 +4403,8 @@ class _PreviewPane extends StatelessWidget {
                 language: language,
                 mediaPlaylist: mediaPlaylist,
                 imagePlaylist: imagePlaylist,
+                mediaResumePositions: mediaResumePositions,
+                onRememberMediaPosition: onRememberMediaPosition,
                 onImageNavigate: (delta) async {
                   await onImageNavigate(delta);
                 },
@@ -4249,6 +4476,8 @@ class _PreviewContent extends StatelessWidget {
     this.mediaPlaylist = const [],
     this.imagePlaylist = const [],
     this.onImageNavigate,
+    this.mediaResumePositions = const <String, int>{},
+    this.onRememberMediaPosition,
     this.fillAvailable = false,
   });
 
@@ -4257,6 +4486,9 @@ class _PreviewContent extends StatelessWidget {
   final List<MediaPreviewItem> mediaPlaylist;
   final List<MediaPreviewItem> imagePlaylist;
   final Future<void> Function(int delta)? onImageNavigate;
+  final Map<String, int> mediaResumePositions;
+  final Future<void> Function(String key, Duration position)?
+      onRememberMediaPosition;
   final bool fillAvailable;
 
   @override
@@ -4278,6 +4510,7 @@ class _PreviewContent extends StatelessWidget {
                 title: preview.title,
                 kind: preview.contentKind,
                 path: preview.decrypted ? null : preview.sourcePath,
+                resumeKey: preview.sourcePath,
                 bytes: preview.decrypted && preview.bytes != null
                     ? Uint8List.fromList(preview.bytes!)
                     : null,
@@ -4289,6 +4522,8 @@ class _PreviewContent extends StatelessWidget {
         preview: preview,
         playlist: playlist,
         language: language,
+        resumePositions: mediaResumePositions,
+        onRememberPosition: onRememberMediaPosition,
       );
     }
 
@@ -4435,11 +4670,16 @@ class _MediaPreviewPlayer extends StatefulWidget {
     required this.preview,
     required this.playlist,
     required this.language,
+    required this.resumePositions,
+    required this.onRememberPosition,
   });
 
   final FilePreview preview;
   final List<MediaPreviewItem> playlist;
   final AppLanguage language;
+  final Map<String, int> resumePositions;
+  final Future<void> Function(String key, Duration position)?
+      onRememberPosition;
 
   @override
   State<_MediaPreviewPlayer> createState() => _MediaPreviewPlayerState();
@@ -4474,6 +4714,7 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     final nextKey = _makePlaylistKey(widget.playlist);
     if (nextKey != _playlistKey ||
         widget.preview.title != oldWidget.preview.title) {
+      unawaited(_rememberCurrentPosition());
       _playlistKey = nextKey;
       _openFuture = _openPlaylist();
     }
@@ -4481,6 +4722,7 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
 
   @override
   void dispose() {
+    unawaited(_rememberCurrentPosition());
     _errorSubscription?.cancel();
     _player.dispose();
     unawaited(_clearTempMedia());
@@ -4518,6 +4760,13 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
         throw StateError(widget.language.t('media.unavailable'));
       }
       await _player.open(Playlist(medias, index: _initialIndex()), play: true);
+      final initialItem = _itemAt(_initialIndex());
+      final resumeMs = initialItem == null
+          ? 0
+          : widget.resumePositions[initialItem.resumeKey ?? ''] ?? 0;
+      if (resumeMs > 1500) {
+        await _player.seek(Duration(milliseconds: resumeMs));
+      }
       await _player.setPlaylistMode(
         _repeatOne ? PlaylistMode.single : PlaylistMode.loop,
       );
@@ -4568,6 +4817,29 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     await _player.setPlaylistMode(
       _repeatOne ? PlaylistMode.single : PlaylistMode.loop,
     );
+  }
+
+  MediaPreviewItem? _currentItem() => _itemAt(_player.state.playlist.index);
+
+  MediaPreviewItem? _itemAt(int index) {
+    if (widget.playlist.isEmpty) return null;
+    final normalized = index.clamp(0, widget.playlist.length - 1).toInt();
+    return widget.playlist[normalized];
+  }
+
+  Future<void> _rememberCurrentPosition() async {
+    final callback = widget.onRememberPosition;
+    if (callback == null) return;
+    final item = _currentItem();
+    final key = item?.resumeKey ?? item?.path;
+    if (key == null || key.trim().isEmpty) return;
+    final duration = _player.state.duration;
+    final position = _player.state.position;
+    final value = duration > Duration.zero &&
+            duration - position < const Duration(seconds: 3)
+        ? Duration.zero
+        : position;
+    await callback(key, value);
   }
 
   @override
@@ -4631,12 +4903,14 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
               repeatOne: _repeatOne,
               onShuffle: _toggleShuffle,
               onRepeatOne: _toggleRepeatOne,
+              onBeforeTrackChange: _rememberCurrentPosition,
             ),
             const SizedBox(height: 12),
             _MediaPlaylistView(
               player: _player,
               items: widget.playlist,
               language: widget.language,
+              onBeforeTrackChange: _rememberCurrentPosition,
             ),
           ],
         );
@@ -4653,6 +4927,7 @@ class _MediaTransportControls extends StatelessWidget {
     required this.repeatOne,
     required this.onShuffle,
     required this.onRepeatOne,
+    required this.onBeforeTrackChange,
   });
 
   final Player player;
@@ -4661,6 +4936,7 @@ class _MediaTransportControls extends StatelessWidget {
   final bool repeatOne;
   final VoidCallback onShuffle;
   final VoidCallback onRepeatOne;
+  final Future<void> Function() onBeforeTrackChange;
 
   @override
   Widget build(BuildContext context) {
@@ -4671,7 +4947,10 @@ class _MediaTransportControls extends StatelessWidget {
         child: Column(children: [
           Row(mainAxisAlignment: MainAxisAlignment.center, children: [
             IconButton(
-              onPressed: player.previous,
+              onPressed: () => unawaited(() async {
+                await onBeforeTrackChange();
+                await player.previous();
+              }()),
               icon: const Icon(Icons.skip_previous),
               tooltip: language.t('media.previous'),
             ),
@@ -4690,7 +4969,10 @@ class _MediaTransportControls extends StatelessWidget {
               },
             ),
             IconButton(
-              onPressed: player.next,
+              onPressed: () => unawaited(() async {
+                await onBeforeTrackChange();
+                await player.next();
+              }()),
               icon: const Icon(Icons.skip_next),
               tooltip: language.t('media.next'),
             ),
@@ -4809,11 +5091,13 @@ class _MediaPlaylistView extends StatelessWidget {
     required this.player,
     required this.items,
     required this.language,
+    required this.onBeforeTrackChange,
   });
 
   final Player player;
   final List<MediaPreviewItem> items;
   final AppLanguage language;
+  final Future<void> Function() onBeforeTrackChange;
 
   @override
   Widget build(BuildContext context) {
@@ -4854,7 +5138,10 @@ class _MediaPlaylistView extends StatelessWidget {
                       subtitle: item.encrypted
                           ? Text(language.t('media.encrypted.item'))
                           : null,
-                      onTap: () => player.jump(index),
+                      onTap: () => unawaited(() async {
+                        await onBeforeTrackChange();
+                        await player.jump(index);
+                      }()),
                     );
                   },
                 ),

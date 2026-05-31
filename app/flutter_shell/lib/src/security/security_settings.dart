@@ -66,6 +66,7 @@ class SecuritySettings {
     this.enableMiniAudio = true,
     this.continueMediaInBackground = true,
     this.autoCloseMediaOnSectionChange = false,
+    this.mediaResumePositions = const <String, int>{},
   });
 
   final String? appPasswordSalt;
@@ -125,6 +126,7 @@ class SecuritySettings {
   final bool enableMiniAudio;
   final bool continueMediaInBackground;
   final bool autoCloseMediaOnSectionChange;
+  final Map<String, int> mediaResumePositions;
 
   bool get hasAppPassword =>
       appPasswordSalt != null && appPasswordDigest != null;
@@ -200,6 +202,7 @@ class SecuritySettings {
     bool? enableMiniAudio,
     bool? continueMediaInBackground,
     bool? autoCloseMediaOnSectionChange,
+    Map<String, int>? mediaResumePositions,
   }) {
     return SecuritySettings(
       appPasswordSalt:
@@ -295,6 +298,7 @@ class SecuritySettings {
           continueMediaInBackground ?? this.continueMediaInBackground,
       autoCloseMediaOnSectionChange:
           autoCloseMediaOnSectionChange ?? this.autoCloseMediaOnSectionChange,
+      mediaResumePositions: mediaResumePositions ?? this.mediaResumePositions,
     );
   }
 
@@ -305,6 +309,7 @@ class SecuritySettings {
     final favorites = json['favoritePaths'];
     final recent = json['recentFilePaths'];
     final pluginProxy = json['pluginProxyById'];
+    final mediaResume = json['mediaResumePositions'];
     List<String> listField(String key) {
       final value = json[key];
       return value is List
@@ -395,6 +400,12 @@ class SecuritySettings {
           json['continueMediaInBackground'] as bool? ?? true,
       autoCloseMediaOnSectionChange:
           json['autoCloseMediaOnSectionChange'] as bool? ?? false,
+      mediaResumePositions: mediaResume is Map
+          ? mediaResume.map((key, value) => MapEntry(
+                key.toString(),
+                value is num ? value.round() : int.tryParse('$value') ?? 0,
+              ))
+          : const <String, int>{},
     );
   }
 
@@ -458,6 +469,7 @@ class SecuritySettings {
       'enableMiniAudio': enableMiniAudio,
       'continueMediaInBackground': continueMediaInBackground,
       'autoCloseMediaOnSectionChange': autoCloseMediaOnSectionChange,
+      'mediaResumePositions': mediaResumePositions,
     };
   }
 }
@@ -571,6 +583,27 @@ class SecuritySettingsRepository {
       return current;
     }
     final next = current.copyWith(lastOpenedFolder: path.trim());
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> recordMediaResumePosition(
+    SecuritySettings current,
+    String key,
+    int positionMs,
+  ) async {
+    final normalized = key.trim();
+    if (normalized.isEmpty) return current;
+    final nextPositions = Map<String, int>.of(current.mediaResumePositions);
+    if (positionMs <= 1500) {
+      nextPositions.remove(normalized);
+    } else {
+      nextPositions[normalized] = positionMs;
+    }
+    while (nextPositions.length > 500) {
+      nextPositions.remove(nextPositions.keys.first);
+    }
+    final next = current.copyWith(mediaResumePositions: nextPositions);
     await save(next);
     return next;
   }
