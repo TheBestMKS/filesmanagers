@@ -99,6 +99,7 @@ class ExplorerEntry {
     required this.kind,
     required this.sizeBytes,
     required this.modifiedAt,
+    this.createdAt,
     this.containerInfo,
     this.exists = true,
     this.isNavigationEntry = false,
@@ -109,6 +110,7 @@ class ExplorerEntry {
   final ExplorerEntryKind kind;
   final int sizeBytes;
   final DateTime modifiedAt;
+  final DateTime? createdAt;
   final VaultContainerInfo? containerInfo;
   final bool exists;
   final bool isNavigationEntry;

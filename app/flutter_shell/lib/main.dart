@@ -20,7 +20,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.8.0';
+const _appVersion = '0.9.0';
 
 void main(List<String> args) {
   MediaKit.ensureInitialized();
@@ -78,6 +78,54 @@ class _SearchDialogResult {
   final bool recursive;
 }
 
+class _SearchFilters {
+  const _SearchFilters({
+    this.minSizeBytes,
+    this.maxSizeBytes,
+    this.createdFrom,
+    this.createdTo,
+    this.modifiedFrom,
+    this.modifiedTo,
+    this.minDurationSeconds,
+    this.maxDurationSeconds,
+  });
+
+  final int? minSizeBytes;
+  final int? maxSizeBytes;
+  final DateTime? createdFrom;
+  final DateTime? createdTo;
+  final DateTime? modifiedFrom;
+  final DateTime? modifiedTo;
+  final int? minDurationSeconds;
+  final int? maxDurationSeconds;
+
+  bool get isEmpty =>
+      minSizeBytes == null &&
+      maxSizeBytes == null &&
+      createdFrom == null &&
+      createdTo == null &&
+      modifiedFrom == null &&
+      modifiedTo == null &&
+      minDurationSeconds == null &&
+      maxDurationSeconds == null;
+
+  bool accepts(ExplorerEntry entry) {
+    if (entry.isNavigationEntry || entry.isDirectory) return true;
+    final size = entry.sizeBytes;
+    if (minSizeBytes != null && size < minSizeBytes!) return false;
+    if (maxSizeBytes != null && size > maxSizeBytes!) return false;
+    final created = entry.createdAt ?? entry.modifiedAt;
+    if (createdFrom != null && created.isBefore(createdFrom!)) return false;
+    if (createdTo != null && created.isAfter(createdTo!)) return false;
+    final modified = entry.modifiedAt;
+    if (modifiedFrom != null && modified.isBefore(modifiedFrom!)) {
+      return false;
+    }
+    if (modifiedTo != null && modified.isAfter(modifiedTo!)) return false;
+    return true;
+  }
+}
+
 class VaultHomeScreen extends StatefulWidget {
   const VaultHomeScreen({super.key, this.initialOpenPath});
 
@@ -113,14 +161,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   double _sidebarWidth = 290;
   double _previewWidth = 420;
   bool _previewVisible = true;
-  String? _clipboardPath;
+  List<String> _clipboardPaths = const [];
   bool _clipboardCut = false;
   bool _showingRecent = false;
   String _searchQuery = '';
   String _searchMode = 'name';
   bool _searchUseRegex = false;
   bool _searchRecursive = false;
+  _SearchFilters _searchFilters = const _SearchFilters();
   bool _goingUp = false;
+  Set<String> _selectedPaths = const <String>{};
 
   @override
   void initState() {
@@ -295,6 +345,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _preview = null;
       _mediaPlaylist = const [];
       _imagePlaylist = const [];
+      _selectedPaths = const <String>{};
       _snapshot = _directorySnapshot(path);
     });
   }
@@ -310,6 +361,15 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   }
 
   Future<void> _openPathSafely(String path, {bool fromUp = false}) async {
+    if (_explorer.isVirtualPath(path)) {
+      final entry = await _explorer.entryForPath(path);
+      if (entry != null && entry.isDirectory) {
+        _openPath(path);
+      } else {
+        _snack(_language.t('path.unavailable'));
+      }
+      return;
+    }
     final type = await FileSystemEntity.type(path, followLinks: false);
     if (type == FileSystemEntityType.directory) {
       _openPath(path);
@@ -320,8 +380,33 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _openPath(path);
       return;
     }
+    if (policy == 'ask' && mounted) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(_language.t('path.unavailable')),
+          content: Text(_language.t('path.unavailable.ask')),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(_language.t('common.cancel')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(_language.t('common.open')),
+            ),
+          ],
+        ),
+      );
+      if (go == true) _openPath(path);
+      return;
+    }
     if (fromUp && policy == 'fallbackToLocations') {
       _openExplorerHome();
+      return;
+    }
+    if (policy == 'requestRoot') {
+      _snack(_language.t('path.root.unavailable'));
       return;
     }
     _snack(_language.t('path.unavailable'));
@@ -394,6 +479,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _preview = null;
       _mediaPlaylist = const [];
       _imagePlaylist = const [];
+      _selectedPaths = const <String>{};
       _snapshot = _explorer.snapshotForPaths(
         _language.t('nav.explorer'),
         paths,
@@ -479,6 +565,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _preview = null;
       _mediaPlaylist = const [];
       _imagePlaylist = const [];
+      _selectedPaths = const <String>{};
       _snapshot = snapshotFuture;
     });
     if (section != MediaSection.music && section != MediaSection.video) {
@@ -564,9 +651,26 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _preview = null;
       _mediaPlaylist = const [];
       _imagePlaylist = const [];
+      _selectedPaths = const <String>{};
       _snapshot = _explorer.snapshotForPaths(
         _language.t('recent.title'),
         _settings.recentFilePaths.take(_settings.recentRememberCount).toList(),
+      );
+    });
+  }
+
+  void _openFavoriteFiles() {
+    setState(() {
+      _page = ShellPage.explorer;
+      _showingRecent = false;
+      _selected = null;
+      _preview = null;
+      _mediaPlaylist = const [];
+      _imagePlaylist = const [];
+      _selectedPaths = const <String>{};
+      _snapshot = _explorer.snapshotForPaths(
+        _language.t('favorites.title'),
+        _settings.favoritePaths,
       );
     });
   }
@@ -643,6 +747,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       await _openPathSafely(entry.path);
       return;
     }
+    if (FileViewerService.kindForName(entry.path) == FileContentKind.archive &&
+        !_explorer.isVirtualPath(entry.path)) {
+      await _openPathSafely(_explorer.zipRootPath(entry.path));
+      return;
+    }
     final previewFuture = _explorer.previewFile(
       entry.path,
       password: _activeFilePassword(),
@@ -706,7 +815,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       encrypted: selectedPreview.decrypted,
     );
 
-    final parent = File(selected.path).parent.path;
+    final parent = _explorer.parentPathFor(selected.path);
     final DirectorySnapshot snapshot;
     try {
       snapshot = await _explorer.listDirectory(
@@ -803,7 +912,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       encrypted: selectedPreview.decrypted,
     );
 
-    final parent = File(selected.path).parent.path;
+    final parent = _explorer.parentPathFor(selected.path);
     final DirectorySnapshot snapshot;
     try {
       snapshot = await _explorer.listDirectory(
@@ -831,7 +940,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         continue;
       }
 
-      if (entry.isEncrypted) {
+      if (entry.isEncrypted || _explorer.isVirtualPath(entry.path)) {
         if (displayedKind != kind) continue;
         try {
           final preview = await _explorer.previewFile(
@@ -888,7 +997,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     _goingUp = true;
     unawaited(() async {
       try {
-        final parent = Directory(path).parent.path;
+        final parent = _explorer.parentPathFor(path);
         if (_normalizePath(parent) != _normalizePath(path)) {
           await _openPathSafely(parent, fromUp: true);
         } else {
@@ -1096,19 +1205,155 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   }
 
   Future<void> _searchFiltersDialog() async {
-    await showDialog<void>(
+    final minSize = TextEditingController(
+      text: _searchFilters.minSizeBytes?.toString() ?? '',
+    );
+    final maxSize = TextEditingController(
+      text: _searchFilters.maxSizeBytes?.toString() ?? '',
+    );
+    final createdFrom = TextEditingController(
+      text: _dateInput(_searchFilters.createdFrom),
+    );
+    final createdTo = TextEditingController(
+      text: _dateInput(_searchFilters.createdTo),
+    );
+    final modifiedFrom = TextEditingController(
+      text: _dateInput(_searchFilters.modifiedFrom),
+    );
+    final modifiedTo = TextEditingController(
+      text: _dateInput(_searchFilters.modifiedTo),
+    );
+    final minDuration = TextEditingController(
+      text: _searchFilters.minDurationSeconds?.toString() ?? '',
+    );
+    final maxDuration = TextEditingController(
+      text: _searchFilters.maxDurationSeconds?.toString() ?? '',
+    );
+    final result = await showDialog<_SearchFilters>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(_language.t('search.filters')),
-        content: Text(_language.t('search.filters.note')),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(_language.t('search.filters.note')),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: minSize,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                        labelText: _language.t('filter.size.min')),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: maxSize,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                        labelText: _language.t('filter.size.max')),
+                  ),
+                ),
+              ]),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: createdFrom,
+                    decoration: InputDecoration(
+                        labelText: _language.t('filter.created.from')),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: createdTo,
+                    decoration: InputDecoration(
+                        labelText: _language.t('filter.created.to')),
+                  ),
+                ),
+              ]),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: modifiedFrom,
+                    decoration: InputDecoration(
+                        labelText: _language.t('filter.modified.from')),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: modifiedTo,
+                    decoration: InputDecoration(
+                        labelText: _language.t('filter.modified.to')),
+                  ),
+                ),
+              ]),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: minDuration,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                        labelText: _language.t('filter.duration.min')),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: maxDuration,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                        labelText: _language.t('filter.duration.max')),
+                  ),
+                ),
+              ]),
+            ]),
+          ),
+        ),
         actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, const _SearchFilters()),
+            child: Text(_language.t('search.clear')),
+          ),
           FilledButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(_language.t('common.ok')),
+            onPressed: () => Navigator.pop(
+              context,
+              _SearchFilters(
+                minSizeBytes: int.tryParse(minSize.text.trim()),
+                maxSizeBytes: int.tryParse(maxSize.text.trim()),
+                createdFrom: _parseDateInput(createdFrom.text),
+                createdTo: _parseDateInput(createdTo.text, endOfDay: true),
+                modifiedFrom: _parseDateInput(modifiedFrom.text),
+                modifiedTo: _parseDateInput(modifiedTo.text, endOfDay: true),
+                minDurationSeconds: int.tryParse(minDuration.text.trim()),
+                maxDurationSeconds: int.tryParse(maxDuration.text.trim()),
+              ),
+            ),
+            child: Text(_language.t('search.apply')),
           ),
         ],
       ),
     );
+    if (result == null) return;
+    setState(() => _searchFilters = result);
+  }
+
+  String _dateInput(DateTime? value) {
+    if (value == null) return '';
+    return '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+  }
+
+  DateTime? _parseDateInput(String value, {bool endOfDay = false}) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    final parsed = DateTime.tryParse(trimmed);
+    if (parsed == null) return null;
+    if (!endOfDay) return parsed;
+    return DateTime(parsed.year, parsed.month, parsed.day, 23, 59, 59, 999);
   }
 
   Future<void> _importFile() async {
@@ -1181,13 +1426,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         await _decryptSelectedFile(entry);
       case _EntryAction.copy:
         setState(() {
-          _clipboardPath = entry.path;
+          _clipboardPaths = [entry.path];
           _clipboardCut = false;
         });
         _snack(_language.t('snack.copied'));
       case _EntryAction.cut:
         setState(() {
-          _clipboardPath = entry.path;
+          _clipboardPaths = [entry.path];
           _clipboardCut = true;
         });
         _snack(_language.t('snack.cut'));
@@ -1208,10 +1453,20 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         await _toggleFavorite(entry);
       case _EntryAction.removeRecent:
         await _removeRecentPath(entry.path);
+      case _EntryAction.selectAll:
+      case _EntryAction.clearSelection:
+      case _EntryAction.zipSelected:
+        await _handleBulkAction(action);
       case _EntryAction.folderContainer:
+        await _createFolderContainer(entry);
+      case _EntryAction.folderEncryptName:
+        await _encryptFolderName(entry);
+      case _EntryAction.folderDecryptName:
+        await _decryptFolderName(entry);
       case _EntryAction.folderEncrypt:
+        await _encryptFolderFiles(entry);
       case _EntryAction.folderDecrypt:
-        _snack(_language.t('snack.folder.actions.next'));
+        await _decryptFolderFiles(entry);
       case _EntryAction.useAsGallery:
       case _EntryAction.useAsVideo:
       case _EntryAction.useAsMusic:
@@ -1234,20 +1489,149 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     await _handleEntryAction(entry, action);
   }
 
-  Future<void> _pasteClipboard(String? targetDirectory) async {
-    final source = _clipboardPath;
-    if (source == null || targetDirectory == null) return;
+  void _togglePathSelection(ExplorerEntry entry) {
+    if (entry.isNavigationEntry || !entry.exists) return;
+    setState(() {
+      final next = {..._selectedPaths};
+      if (!next.add(entry.path)) {
+        next.remove(entry.path);
+      }
+      _selectedPaths = next;
+    });
+  }
+
+  void _selectAllEntries(List<ExplorerEntry> entries) {
+    setState(() {
+      _selectedPaths = {
+        for (final entry in entries)
+          if (!entry.isNavigationEntry && entry.exists) entry.path,
+      };
+    });
+  }
+
+  void _clearSelection() {
+    setState(() => _selectedPaths = const <String>{});
+  }
+
+  Future<void> _handleBulkAction(_EntryAction action) async {
+    final paths = _selectedPaths.toList();
+    if (paths.isEmpty) return;
+    switch (action) {
+      case _EntryAction.selectAll:
+        return;
+      case _EntryAction.clearSelection:
+        _clearSelection();
+        return;
+      case _EntryAction.copy:
+        setState(() {
+          _clipboardPaths = paths;
+          _clipboardCut = false;
+        });
+        _snack(_language.t('snack.copied'));
+      case _EntryAction.cut:
+        setState(() {
+          _clipboardPaths = paths;
+          _clipboardCut = true;
+        });
+        _snack(_language.t('snack.cut'));
+      case _EntryAction.delete:
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text(_language.t('explorer.delete')),
+            content: Text(
+              '${_language.t('explorer.delete.confirm')}\n${paths.length}',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: Text(_language.t('common.cancel')),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(_language.t('explorer.delete')),
+              ),
+            ],
+          ),
+        );
+        if (ok != true) return;
+        for (final path in paths) {
+          await _explorer.deleteEntity(path);
+          await _removePathReferences(path);
+        }
+        _clearSelection();
+        _snack(_language.t('snack.deleted'));
+        await _refresh();
+      case _EntryAction.zipSelected:
+        await _archiveSelected(paths);
+      default:
+        _snack(_language.t('selection.unsupported.bulk'));
+    }
+  }
+
+  Future<void> _archiveSelected(List<String> paths) async {
+    final targetPath = _currentPath;
+    if (targetPath == null || _explorer.isVirtualPath(targetPath)) {
+      _snack(_language.t('selection.zip.local.only'));
+      return;
+    }
+    final controller = TextEditingController(text: 'archive.zip');
+    final archiveName = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('selection.zip')),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(labelText: _language.t('explorer.name')),
+          onSubmitted: (_) => Navigator.pop(context, controller.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: Text(_language.t('common.execute')),
+          ),
+        ],
+      ),
+    );
+    if (archiveName == null || archiveName.trim().isEmpty) return;
     try {
-      final result = _clipboardCut
-          ? await _explorer.moveEntityToDirectory(source, targetDirectory)
-          : await _explorer.copyEntityToDirectory(source, targetDirectory);
+      final file = await _explorer.createZipFromPaths(
+        paths,
+        Directory(targetPath),
+        archiveName: archiveName.trim().toLowerCase().endsWith('.zip')
+            ? archiveName.trim()
+            : '${archiveName.trim()}.zip',
+      );
+      _clearSelection();
+      _snack('${_language.t('snack.created')} ${file.path}');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _pasteClipboard(String? targetDirectory) async {
+    final sources = _clipboardPaths;
+    if (sources.isEmpty || targetDirectory == null) return;
+    try {
+      final results = <FileSystemEntity>[];
+      for (final source in sources) {
+        results.add(_clipboardCut
+            ? await _explorer.moveEntityToDirectory(source, targetDirectory)
+            : await _explorer.copyEntityToDirectory(source, targetDirectory));
+      }
       if (_clipboardCut) {
         setState(() {
-          _clipboardPath = null;
+          _clipboardPaths = const [];
           _clipboardCut = false;
         });
       }
-      _snack('${_language.t('snack.pasted')} ${result.path}');
+      _snack('${_language.t('snack.pasted')} ${results.length}');
       await _refresh();
     } catch (error) {
       _snack('${_language.t('snack.operation.error')} $error');
@@ -1324,6 +1708,134 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       await _refresh();
     } catch (error) {
       _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<String?> _passwordForFolderOperation() async {
+    if (_settings.hasCommonEncryption &&
+        !_settings.hasFilePassword &&
+        _commonEncryptionPassword != null &&
+        _commonEncryptionPassword!.isNotEmpty) {
+      return _commonEncryptionPassword;
+    }
+    return _passwordDialog(_language.t('encrypt.password.common'));
+  }
+
+  Future<void> _encryptFolderName(ExplorerEntry entry) async {
+    if (!entry.isDirectory || _explorer.isVirtualPath(entry.path)) return;
+    final password = await _passwordForFolderOperation();
+    if (password == null || password.isEmpty) return;
+    try {
+      final directory = await _explorer.encryptFolderName(
+        Directory(entry.path),
+        password: password,
+      );
+      await _replacePathReference(entry.path, directory.path);
+      _snack('${_language.t('snack.renamed')} ${directory.path}');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _decryptFolderName(ExplorerEntry entry) async {
+    if (!entry.isDirectory || _explorer.isVirtualPath(entry.path)) return;
+    final password = await _passwordForFolderOperation();
+    if (password == null || password.isEmpty) return;
+    try {
+      final directory = await _explorer.decryptFolderName(
+        Directory(entry.path),
+        password: password,
+      );
+      await _replacePathReference(entry.path, directory.path);
+      _snack('${_language.t('snack.renamed')} ${directory.path}');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _createFolderContainer(ExplorerEntry entry) async {
+    if (!entry.isDirectory || _explorer.isVirtualPath(entry.path)) return;
+    final password = await _passwordForFolderOperation();
+    if (password == null || password.isEmpty) return;
+    try {
+      final parent = Directory(entry.path).parent;
+      final zip = await _explorer.createZipFromPaths(
+        [entry.path],
+        parent,
+        archiveName: '${entry.name}.zip',
+      );
+      final encrypted = await _explorer.encryptFileToDirectory(
+        zip,
+        parent,
+        password: password,
+        keyMode: _settings.hasCommonEncryption
+            ? EncryptionKeyMode.common
+            : EncryptionKeyMode.unique,
+        algorithm: _settings.commonEncryptionAlgorithm,
+      );
+      await zip.delete();
+      _snack('${_language.t('snack.encrypted')} ${encrypted.path}');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.encrypt.error')} $error');
+    }
+  }
+
+  Future<void> _encryptFolderFiles(ExplorerEntry entry) async {
+    if (!entry.isDirectory || _explorer.isVirtualPath(entry.path)) return;
+    final password = await _passwordForFolderOperation();
+    if (password == null || password.isEmpty) return;
+    var count = 0;
+    try {
+      await for (final entity
+          in Directory(entry.path).list(recursive: true, followLinks: false)) {
+        if (entity is! File) continue;
+        final item = await _explorer.entryForPath(entity.path);
+        if (item == null || item.isEncrypted) continue;
+        await _explorer.encryptFileToDirectory(
+          entity,
+          entity.parent,
+          password: password,
+          keyMode: _settings.hasCommonEncryption
+              ? EncryptionKeyMode.common
+              : EncryptionKeyMode.unique,
+          algorithm: _settings.commonEncryptionAlgorithm,
+        );
+        count++;
+      }
+      _snack('${_language.t('snack.encrypted')} $count');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.encrypt.error')} $error');
+    }
+  }
+
+  Future<void> _decryptFolderFiles(ExplorerEntry entry) async {
+    if (!entry.isDirectory || _explorer.isVirtualPath(entry.path)) return;
+    final password = await _passwordForFolderOperation();
+    if (password == null || password.isEmpty) return;
+    var count = 0;
+    try {
+      await for (final entity
+          in Directory(entry.path).list(recursive: true, followLinks: false)) {
+        if (entity is! File) continue;
+        final item = await _explorer.entryForPath(entity.path);
+        if (item == null || !item.isEncrypted) continue;
+        await _explorer.decryptSelectedFile(
+          entity,
+          DecryptFileOptions(
+            password: password,
+            targetDirectory: entity.parent.path,
+          ),
+        );
+        count++;
+      }
+      _snack('${_language.t('snack.decrypted')} $count');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.decrypt.error')} $error');
     }
   }
 
@@ -1562,6 +2074,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   }
 
   Future<void> _unzipEntry(ExplorerEntry entry) async {
+    if (_explorer.isVirtualPath(entry.path)) {
+      _snack(_language.t('selection.zip.local.only'));
+      return;
+    }
     try {
       final target = await _explorer.extractZipToDirectory(
         File(entry.path),
@@ -2233,6 +2749,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                 }
               },
               onRecentList: _openRecentFiles,
+              onFavoriteList: _openFavoriteFiles,
               onExplorer: _openExplorerHome,
               onMediaSection: _openMediaSection,
               onSettings: () => setState(() => _page = ShellPage.settings),
@@ -2242,6 +2759,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                 ? _SettingsView(
                     language: _language,
                     settings: _settings,
+                    plugins: _pluginDefs,
                     onSave: _saveSecurity,
                     onRequestAndroidStorageAccess:
                         _requestAndroidStorageAccessFromSettings,
@@ -2320,11 +2838,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                             onEditPreview: _openEditor,
                             onImageNavigate: _navigateImage,
                             onRememberMediaPosition: _rememberMediaPosition,
-                            canPaste: _clipboardPath != null,
+                            canPaste: _clipboardPaths.isNotEmpty,
                             favoritePaths: _settings.favoritePaths,
                             recentPaths: _settings.recentFilePaths,
+                            selectedPaths: _selectedPaths,
                             searchQuery: _searchQuery,
                             searchUseRegex: _searchUseRegex,
+                            searchFilters: _searchFilters,
                             localSearchEnabled:
                                 _searchMode == 'name' && !_searchRecursive,
                             onPathEdit: _editPathDialog,
@@ -2334,6 +2854,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                             onEmptyAreaAction: _handleEmptyAreaAction,
                             onRemoveRecent: _removeRecentPath,
                             onToggleFavorite: _toggleFavorite,
+                            onToggleSelection: _togglePathSelection,
+                            onSelectAllEntries: _selectAllEntries,
+                            onClearSelection: _clearSelection,
+                            onBulkAction: _handleBulkAction,
                             onEntry: _openEntry,
                             onEntryFullscreen: (entry) =>
                                 _openEntry(entry, forceFullScreen: true),
@@ -2786,9 +3310,14 @@ enum _EntryAction {
   addFavorite,
   removeFavorite,
   removeRecent,
+  selectAll,
+  clearSelection,
+  zipSelected,
   encrypt,
   decrypt,
   folderContainer,
+  folderEncryptName,
+  folderDecryptName,
   folderEncrypt,
   folderDecrypt,
   useAsGallery,
@@ -2909,6 +3438,7 @@ class _Sidebar extends StatelessWidget {
     required this.onFavoritePath,
     required this.onRecentPath,
     required this.onRecentList,
+    required this.onFavoriteList,
     required this.onExplorer,
     required this.onMediaSection,
     required this.onSettings,
@@ -2925,6 +3455,7 @@ class _Sidebar extends StatelessWidget {
   final ValueChanged<String> onFavoritePath;
   final ValueChanged<String> onRecentPath;
   final VoidCallback onRecentList;
+  final VoidCallback onFavoriteList;
   final VoidCallback onExplorer;
   final ValueChanged<MediaSection> onMediaSection;
   final VoidCallback onSettings;
@@ -3029,6 +3560,12 @@ class _Sidebar extends StatelessWidget {
         ],
         if (favoritePaths.isNotEmpty) ...[
           _sectionTitle(language.t('favorites.title')),
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.star),
+            title: Text(language.t('favorites.open.all')),
+            onTap: onFavoriteList,
+          ),
           for (final path in favoritePaths)
             ListTile(
               dense: true,
@@ -3653,8 +4190,10 @@ class _ExplorerView extends StatelessWidget {
     required this.canPaste,
     required this.favoritePaths,
     required this.recentPaths,
+    required this.selectedPaths,
     required this.searchQuery,
     required this.searchUseRegex,
+    required this.searchFilters,
     required this.localSearchEnabled,
     required this.onPathEdit,
     required this.onSearch,
@@ -3663,6 +4202,10 @@ class _ExplorerView extends StatelessWidget {
     required this.onEmptyAreaAction,
     required this.onRemoveRecent,
     required this.onToggleFavorite,
+    required this.onToggleSelection,
+    required this.onSelectAllEntries,
+    required this.onClearSelection,
+    required this.onBulkAction,
     required this.onEntry,
     required this.onEntryFullscreen,
   });
@@ -3696,8 +4239,10 @@ class _ExplorerView extends StatelessWidget {
   final bool canPaste;
   final List<String> favoritePaths;
   final List<String> recentPaths;
+  final Set<String> selectedPaths;
   final String searchQuery;
   final bool searchUseRegex;
+  final _SearchFilters searchFilters;
   final bool localSearchEnabled;
   final VoidCallback onPathEdit;
   final VoidCallback onSearch;
@@ -3706,6 +4251,10 @@ class _ExplorerView extends StatelessWidget {
   final Future<void> Function(String, _EntryAction) onEmptyAreaAction;
   final ValueChanged<String> onRemoveRecent;
   final ValueChanged<ExplorerEntry> onToggleFavorite;
+  final ValueChanged<ExplorerEntry> onToggleSelection;
+  final ValueChanged<List<ExplorerEntry>> onSelectAllEntries;
+  final VoidCallback onClearSelection;
+  final Future<void> Function(_EntryAction) onBulkAction;
   final Future<void> Function(ExplorerEntry) onEntry;
   final Future<void> Function(ExplorerEntry) onEntryFullscreen;
 
@@ -3797,14 +4346,20 @@ class _ExplorerView extends StatelessWidget {
             canPaste: canPaste,
             favoritePaths: favoritePaths,
             recentPaths: recentPaths,
+            selectedPaths: selectedPaths,
             searchQuery: searchQuery,
             searchUseRegex: searchUseRegex,
+            searchFilters: searchFilters,
             localSearchEnabled: localSearchEnabled,
             onEntryAction: onEntryAction,
             currentPath: currentPath,
             onEmptyAreaAction: onEmptyAreaAction,
             onRemoveRecent: onRemoveRecent,
             onToggleFavorite: onToggleFavorite,
+            onToggleSelection: onToggleSelection,
+            onSelectAllEntries: onSelectAllEntries,
+            onClearSelection: onClearSelection,
+            onBulkAction: onBulkAction,
           );
           final pane = _PreviewPane(
             language: language,
@@ -3855,14 +4410,20 @@ class _EntryList extends StatelessWidget {
     required this.canPaste,
     required this.favoritePaths,
     required this.recentPaths,
+    required this.selectedPaths,
     required this.searchQuery,
     required this.searchUseRegex,
+    required this.searchFilters,
     required this.localSearchEnabled,
     required this.currentPath,
     required this.onEntryAction,
     required this.onEmptyAreaAction,
     required this.onRemoveRecent,
     required this.onToggleFavorite,
+    required this.onToggleSelection,
+    required this.onSelectAllEntries,
+    required this.onClearSelection,
+    required this.onBulkAction,
   });
 
   final AppLanguage language;
@@ -3875,14 +4436,20 @@ class _EntryList extends StatelessWidget {
   final bool canPaste;
   final List<String> favoritePaths;
   final List<String> recentPaths;
+  final Set<String> selectedPaths;
   final String searchQuery;
   final bool searchUseRegex;
+  final _SearchFilters searchFilters;
   final bool localSearchEnabled;
   final String? currentPath;
   final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
   final Future<void> Function(String, _EntryAction) onEmptyAreaAction;
   final ValueChanged<String> onRemoveRecent;
   final ValueChanged<ExplorerEntry> onToggleFavorite;
+  final ValueChanged<ExplorerEntry> onToggleSelection;
+  final ValueChanged<List<ExplorerEntry>> onSelectAllEntries;
+  final VoidCallback onClearSelection;
+  final Future<void> Function(_EntryAction) onBulkAction;
 
   @override
   Widget build(BuildContext context) {
@@ -3905,11 +4472,13 @@ class _EntryList extends StatelessWidget {
             ),
           );
         }
-        final entries = searchQuery.isEmpty || !localSearchEnabled
-            ? data.entries
-            : data.entries
-                .where((entry) => _matchesSearch(entry.name))
-                .toList();
+        final entries = (searchQuery.isEmpty || !localSearchEnabled
+                ? data.entries
+                : data.entries
+                    .where((entry) => _matchesSearch(entry.name))
+                    .toList())
+            .where(searchFilters.accepts)
+            .toList();
         if (entries.isEmpty) {
           return _EmptyExplorerArea(
             language: language,
@@ -3919,7 +4488,7 @@ class _EntryList extends StatelessWidget {
             child: Center(child: Text(language.t('explorer.empty'))),
           );
         }
-        return ListView.separated(
+        final listView = ListView.separated(
           padding: const EdgeInsets.all(12),
           itemCount: entries.length + 1,
           separatorBuilder: (_, __) => const Divider(height: 1),
@@ -3934,6 +4503,8 @@ class _EntryList extends StatelessWidget {
               );
             }
             final entry = entries[i];
+            final selectionMode = selectedPaths.isNotEmpty;
+            final selectedForBulk = selectedPaths.contains(entry.path);
             return GestureDetector(
               onSecondaryTapDown: (details) =>
                   _showEntryContextMenu(context, entry, details.globalPosition),
@@ -3946,10 +4517,20 @@ class _EntryList extends StatelessWidget {
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
-                leading: Icon(
-                  _icon(entry),
-                  color: _color(entry),
-                  size: 24 * fileIconScale,
+                leading: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onLongPress: () => onToggleSelection(entry),
+                  onTap: selectionMode ? () => onToggleSelection(entry) : null,
+                  child: selectionMode && !entry.isNavigationEntry
+                      ? Checkbox(
+                          value: selectedForBulk,
+                          onChanged: (_) => onToggleSelection(entry),
+                        )
+                      : Icon(
+                          _icon(entry),
+                          color: _color(entry),
+                          size: 24 * fileIconScale,
+                        ),
                 ),
                 title: Text(
                   entry.name,
@@ -3970,11 +4551,24 @@ class _EntryList extends StatelessWidget {
                     itemBuilder: (_) => _entryMenuItems(entry),
                   ),
                 ]),
-                onTap: () => onEntry(entry),
+                onTap: selectionMode
+                    ? () => onToggleSelection(entry)
+                    : () => onEntry(entry),
               ),
             );
           },
         );
+        if (selectedPaths.isEmpty) return listView;
+        return Column(children: [
+          _SelectionToolbar(
+            language: language,
+            selectedCount: selectedPaths.length,
+            onSelectAll: () => onSelectAllEntries(entries),
+            onClear: onClearSelection,
+            onAction: onBulkAction,
+          ),
+          Expanded(child: listView),
+        ]);
       },
     );
   }
@@ -4020,6 +4614,7 @@ class _EntryList extends StatelessWidget {
   List<PopupMenuEntry<_EntryAction>> _entryMenuItems(ExplorerEntry entry) {
     final isFavorite = favoritePaths.contains(entry.path);
     final isRecent = recentPaths.contains(entry.path);
+    final isVirtual = entry.path.startsWith('zip://');
     if (entry.isNavigationEntry) {
       return [
         PopupMenuItem(
@@ -4036,43 +4631,43 @@ class _EntryList extends StatelessWidget {
       const PopupMenuDivider(),
       PopupMenuItem(
         value: _EntryAction.createFolder,
-        enabled: entry.exists && entry.isDirectory,
+        enabled: entry.exists && entry.isDirectory && !isVirtual,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.folder')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createPlain,
-        enabled: entry.exists && entry.isDirectory,
+        enabled: entry.exists && entry.isDirectory && !isVirtual,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.plain')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createEncryptedPlain,
-        enabled: entry.exists && entry.isDirectory,
+        enabled: entry.exists && entry.isDirectory && !isVirtual,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.encrypted.plain')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createCsv,
-        enabled: entry.exists && entry.isDirectory,
+        enabled: entry.exists && entry.isDirectory && !isVirtual,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.csv')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createEncryptedCsv,
-        enabled: entry.exists && entry.isDirectory,
+        enabled: entry.exists && entry.isDirectory && !isVirtual,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.encrypted.csv')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createImage,
-        enabled: entry.exists && entry.isDirectory,
+        enabled: entry.exists && entry.isDirectory && !isVirtual,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.image')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createEncryptedImage,
-        enabled: entry.exists && entry.isDirectory,
+        enabled: entry.exists && entry.isDirectory && !isVirtual,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.encrypted.image')}'),
       ),
@@ -4093,27 +4688,27 @@ class _EntryList extends StatelessWidget {
       const PopupMenuDivider(),
       PopupMenuItem(
         value: _EntryAction.copy,
-        enabled: entry.exists,
+        enabled: entry.exists && !isVirtual,
         child: Text(language.t('explorer.copy')),
       ),
       PopupMenuItem(
         value: _EntryAction.cut,
-        enabled: entry.exists,
+        enabled: entry.exists && !isVirtual,
         child: Text(language.t('explorer.cut')),
       ),
       PopupMenuItem(
         value: _EntryAction.paste,
-        enabled: canPaste && entry.isDirectory && entry.exists,
+        enabled: canPaste && entry.isDirectory && entry.exists && !isVirtual,
         child: Text(language.t('explorer.paste')),
       ),
       PopupMenuItem(
         value: _EntryAction.rename,
-        enabled: entry.exists,
+        enabled: entry.exists && !isVirtual,
         child: Text(language.t('explorer.rename')),
       ),
       PopupMenuItem(
         value: _EntryAction.delete,
-        enabled: entry.exists,
+        enabled: entry.exists && !isVirtual,
         child: Text(language.t('explorer.delete')),
       ),
       PopupMenuItem(
@@ -4122,7 +4717,7 @@ class _EntryList extends StatelessWidget {
       ),
       PopupMenuItem(
         value: _EntryAction.send,
-        enabled: entry.exists,
+        enabled: entry.exists && !isVirtual,
         child: Text(language.t('explorer.send')),
       ),
       if (!entry.isDirectory) const PopupMenuDivider(),
@@ -4130,32 +4725,44 @@ class _EntryList extends StatelessWidget {
           FileViewerService.extensionForName(entry.path) == '.zip')
         PopupMenuItem(
           value: _EntryAction.unzip,
-          enabled: entry.exists,
+          enabled: entry.exists && !isVirtual,
           child: Text(language.t('explorer.unzip')),
         ),
       if (!entry.isDirectory && !entry.isEncrypted)
         PopupMenuItem(
           value: _EntryAction.encrypt,
-          enabled: entry.exists,
+          enabled: entry.exists && !isVirtual,
           child: Text(language.t('explorer.encrypt')),
         ),
       if (!entry.isDirectory && entry.isEncrypted)
         PopupMenuItem(
           value: _EntryAction.decrypt,
-          enabled: entry.exists,
+          enabled: entry.exists && !isVirtual,
           child: Text(language.t('decrypt.action')),
         ),
       if (entry.isDirectory) const PopupMenuDivider(),
       if (entry.isDirectory)
         PopupMenuItem(
           value: _EntryAction.folderContainer,
-          enabled: entry.exists,
+          enabled: entry.exists && !isVirtual,
           child: Text(language.t('explorer.folder.container')),
         ),
       if (entry.isDirectory)
         PopupMenuItem(
+          value: _EntryAction.folderEncryptName,
+          enabled: entry.exists && !isVirtual,
+          child: Text(language.t('explorer.folder.encrypt.name')),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.folderDecryptName,
+          enabled: entry.exists && !isVirtual,
+          child: Text(language.t('explorer.folder.decrypt.name')),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
           value: _EntryAction.folderEncrypt,
-          enabled: entry.exists,
+          enabled: entry.exists && !isVirtual,
           child: Text(language.t('explorer.folder.encrypt')),
         ),
       if (entry.isDirectory)
@@ -4218,6 +4825,8 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.send:
       case _EntryAction.unzip:
       case _EntryAction.folderContainer:
+      case _EntryAction.folderEncryptName:
+      case _EntryAction.folderDecryptName:
       case _EntryAction.folderEncrypt:
       case _EntryAction.folderDecrypt:
       case _EntryAction.useAsGallery:
@@ -4230,6 +4839,10 @@ class _EntryList extends StatelessWidget {
         onToggleFavorite(entry);
       case _EntryAction.removeRecent:
         onRemoveRecent(entry.path);
+      case _EntryAction.selectAll:
+      case _EntryAction.clearSelection:
+      case _EntryAction.zipSelected:
+        onEntryAction(entry, action);
     }
   }
 
@@ -4260,6 +4873,76 @@ class _EntryList extends StatelessWidget {
 
   String _date(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+}
+
+class _SelectionToolbar extends StatelessWidget {
+  const _SelectionToolbar({
+    required this.language,
+    required this.selectedCount,
+    required this.onSelectAll,
+    required this.onClear,
+    required this.onAction,
+  });
+
+  final AppLanguage language;
+  final int selectedCount;
+  final VoidCallback onSelectAll;
+  final VoidCallback onClear;
+  final Future<void> Function(_EntryAction) onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Theme.of(context).colorScheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(children: [
+          IconButton(
+            onPressed: onClear,
+            icon: const Icon(Icons.close),
+            tooltip: language.t('selection.clear'),
+          ),
+          Expanded(
+            child: Text(
+              '${language.t('selection.count')}: $selectedCount',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+          ),
+          TextButton.icon(
+            onPressed: onSelectAll,
+            icon: const Icon(Icons.select_all),
+            label: Text(language.t('selection.all')),
+          ),
+          PopupMenuButton<_EntryAction>(
+            icon: const Icon(Icons.more_vert),
+            onSelected: (action) => unawaited(onAction(action)),
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: _EntryAction.copy,
+                child: Text(language.t('explorer.copy')),
+              ),
+              PopupMenuItem(
+                value: _EntryAction.cut,
+                child: Text(language.t('explorer.cut')),
+              ),
+              PopupMenuItem(
+                value: _EntryAction.delete,
+                child: Text(language.t('explorer.delete')),
+              ),
+              PopupMenuItem(
+                value: _EntryAction.zipSelected,
+                child: Text(language.t('selection.zip')),
+              ),
+              PopupMenuItem(
+                value: _EntryAction.clearSelection,
+                child: Text(language.t('selection.clear')),
+              ),
+            ],
+          ),
+        ]),
+      ),
+    );
+  }
 }
 
 class _EmptyExplorerArea extends StatelessWidget {
@@ -4690,7 +5373,7 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   late final VideoController _controller;
   Future<void>? _openFuture;
   StreamSubscription<String>? _errorSubscription;
-  Directory? _tempMediaDirectory;
+  _InMemoryMediaServer? _memoryMediaServer;
   var _shuffle = false;
   var _repeatOne = false;
   String? _error;
@@ -4725,7 +5408,7 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     unawaited(_rememberCurrentPosition());
     _errorSubscription?.cancel();
     _player.dispose();
-    unawaited(_clearTempMedia());
+    unawaited(_clearMemoryMedia());
     super.dispose();
   }
 
@@ -4745,13 +5428,15 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
   Future<void> _openPlaylist() async {
     setState(() => _error = null);
     try {
-      await _clearTempMedia();
+      await _clearMemoryMedia();
       final medias = <Media>[];
       for (var i = 0; i < widget.playlist.length; i++) {
         final item = widget.playlist[i];
         if (item.bytes != null) {
-          final path = await _writeTempMedia(item, i);
-          medias.add(Media(Uri.file(path).toString()));
+          final server =
+              _memoryMediaServer ??= await _InMemoryMediaServer.start();
+          final uri = server.add(item, i);
+          medias.add(Media(uri.toString()));
         } else if (item.path != null && item.path!.isNotEmpty) {
           medias.add(Media(Uri.file(item.path!).toString()));
         }
@@ -4776,35 +5461,10 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     }
   }
 
-  Future<String> _writeTempMedia(MediaPreviewItem item, int index) async {
-    final directory =
-        _tempMediaDirectory ??= await Directory.systemTemp.createTemp(
-      'secure_vault_media_',
-    );
-    final extension = FileViewerService.extensionForName(item.title);
-    final fallbackExtension =
-        item.kind == FileContentKind.video ? '.mp4' : '.mp3';
-    final safeName = _safeFileName(item.title).trim().isEmpty
-        ? 'media_$index${extension.isEmpty ? fallbackExtension : extension}'
-        : _safeFileName(item.title);
-    final file = File(
-      '${directory.path}${Platform.pathSeparator}${index.toString().padLeft(3, '0')}_$safeName',
-    );
-    await file.writeAsBytes(item.bytes!, flush: true);
-    return file.path;
-  }
-
-  Future<void> _clearTempMedia() async {
-    final directory = _tempMediaDirectory;
-    _tempMediaDirectory = null;
-    if (directory == null) return;
-    try {
-      if (await directory.exists()) {
-        await directory.delete(recursive: true);
-      }
-    } catch (_) {
-      // Temporary preview files are best-effort cleanup.
-    }
+  Future<void> _clearMemoryMedia() async {
+    final server = _memoryMediaServer;
+    _memoryMediaServer = null;
+    await server?.close();
   }
 
   Future<void> _toggleShuffle() async {
@@ -4917,6 +5577,121 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
       },
     );
   }
+}
+
+class _InMemoryMediaServer {
+  _InMemoryMediaServer._(this._server) {
+    _subscription = _server.listen(_handleRequest);
+  }
+
+  final HttpServer _server;
+  late final StreamSubscription<HttpRequest> _subscription;
+  final _items = <String, _InMemoryMediaEntry>{};
+
+  static Future<_InMemoryMediaServer> start() async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    return _InMemoryMediaServer._(server);
+  }
+
+  Uri add(MediaPreviewItem item, int index) {
+    final id = '${DateTime.now().microsecondsSinceEpoch}_$index';
+    final title = _safeFileName(item.title).trim().isEmpty
+        ? 'media_$index'
+        : _safeFileName(item.title);
+    _items[id] = _InMemoryMediaEntry(
+      title: title,
+      bytes: item.bytes!,
+      contentType: _contentType(item),
+    );
+    return Uri.parse(
+      'http://127.0.0.1:${_server.port}/media/$id/${Uri.encodeComponent(title)}',
+    );
+  }
+
+  Future<void> close() async {
+    _items.clear();
+    await _subscription.cancel();
+    await _server.close(force: true);
+  }
+
+  void _handleRequest(HttpRequest request) {
+    unawaited(() async {
+      try {
+        final segments = request.uri.pathSegments;
+        if (segments.length < 2 || segments.first != 'media') {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        final item = _items[segments[1]];
+        if (item == null) {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        final bytes = item.bytes;
+        final range = request.headers.value(HttpHeaders.rangeHeader);
+        var start = 0;
+        var end = bytes.length - 1;
+        if (range != null && range.startsWith('bytes=')) {
+          final spec = range.substring('bytes='.length).split('-');
+          start = int.tryParse(spec.first) ?? 0;
+          if (spec.length > 1 && spec[1].isNotEmpty) {
+            end = int.tryParse(spec[1]) ?? end;
+          }
+          start = start.clamp(0, bytes.length - 1).toInt();
+          end = end.clamp(start, bytes.length - 1).toInt();
+          request.response.statusCode = HttpStatus.partialContent;
+          request.response.headers.set(
+            HttpHeaders.contentRangeHeader,
+            'bytes $start-$end/${bytes.length}',
+          );
+        }
+        request.response.headers
+          ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+          ..set(HttpHeaders.contentTypeHeader, item.contentType)
+          ..set(HttpHeaders.contentLengthHeader, end - start + 1)
+          ..set(HttpHeaders.cacheControlHeader, 'no-store');
+        request.response.add(bytes.sublist(start, end + 1));
+        await request.response.close();
+      } catch (_) {
+        request.response.statusCode = HttpStatus.internalServerError;
+        await request.response.close();
+      }
+    }());
+  }
+
+  String _contentType(MediaPreviewItem item) {
+    final extension = FileViewerService.extensionForName(item.title);
+    return switch (extension) {
+      '.mp3' => 'audio/mpeg',
+      '.wav' => 'audio/wav',
+      '.flac' => 'audio/flac',
+      '.ogg' => 'audio/ogg',
+      '.m4a' || '.aac' => 'audio/mp4',
+      '.webm' =>
+        item.kind == FileContentKind.video ? 'video/webm' : 'audio/webm',
+      '.mkv' => 'video/x-matroska',
+      '.mov' => 'video/quicktime',
+      '.avi' => 'video/x-msvideo',
+      '.mp4' || '.m4v' => 'video/mp4',
+      _ => item.kind == FileContentKind.video
+          ? 'application/octet-stream'
+          : 'audio/mpeg',
+    };
+  }
+}
+
+class _InMemoryMediaEntry {
+  const _InMemoryMediaEntry({
+    required this.title,
+    required this.bytes,
+    required this.contentType,
+  });
+
+  final String title;
+  final Uint8List bytes;
+  final String contentType;
 }
 
 class _MediaTransportControls extends StatelessWidget {
@@ -5782,10 +6557,110 @@ String _ensureExtension(String path, String extension) {
 String _safeFileName(String value) =>
     value.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
 
+class _PluginSettingsDialog extends StatefulWidget {
+  const _PluginSettingsDialog({
+    required this.language,
+    required this.plugins,
+    required this.onInstallPluginZip,
+  });
+
+  final AppLanguage language;
+  final List<CloudPluginDefinition> plugins;
+  final Future<String> Function(String path) onInstallPluginZip;
+
+  @override
+  State<_PluginSettingsDialog> createState() => _PluginSettingsDialogState();
+}
+
+class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
+  final _zipController = TextEditingController();
+  String? _message;
+  var _busy = false;
+
+  @override
+  void dispose() {
+    _zipController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final language = widget.language;
+    return Dialog.fullscreen(
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(language.t('settings.plugins.window.title')),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ),
+        body: ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            Text(language.t('settings.plugins.note')),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _zipController,
+              decoration: InputDecoration(
+                labelText: language.t('settings.plugin.zip.path'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: _busy ? null : _install,
+              icon: const Icon(Icons.extension_outlined),
+              label: Text(language.t('settings.plugin.install')),
+            ),
+            if (_message != null) ...[
+              const SizedBox(height: 12),
+              SelectableText(_message!),
+            ],
+            const Divider(height: 32),
+            for (final plugin in widget.plugins)
+              Card(
+                elevation: 0,
+                child: ListTile(
+                  leading: const Icon(Icons.extension_outlined),
+                  title: Text('${plugin.name} ${plugin.version}'),
+                  subtitle: SelectableText(
+                    [
+                      plugin.description ?? '',
+                      plugin.pluginType,
+                      plugin.manifestPath,
+                      if (plugin.capabilities.isNotEmpty)
+                        plugin.capabilities.join(', '),
+                    ].where((item) => item.trim().isNotEmpty).join('\n'),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _install() async {
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    try {
+      final message = await widget.onInstallPluginZip(_zipController.text);
+      if (mounted) setState(() => _message = message);
+    } catch (error) {
+      if (mounted) setState(() => _message = '$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+}
+
 class _SettingsView extends StatefulWidget {
   const _SettingsView({
     required this.language,
     required this.settings,
+    required this.plugins,
     required this.onSave,
     required this.onRequestAndroidStorageAccess,
     required this.onClear,
@@ -5799,6 +6674,7 @@ class _SettingsView extends StatefulWidget {
 
   final AppLanguage language;
   final SecuritySettings settings;
+  final List<CloudPluginDefinition> plugins;
   final Future<void> Function({
     required String? appPassword,
     required String? appPasswordCurrent,
@@ -6485,6 +7361,12 @@ class _SettingsViewState extends State<_SettingsView> {
       const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.plugins'), [
         Text(language.t('settings.plugins.note')),
+        OutlinedButton.icon(
+          onPressed: _openPluginSettings,
+          icon: const Icon(Icons.settings_applications_outlined),
+          label: Text(language.t('settings.plugins.open.window')),
+        ),
+        const SizedBox(height: 8),
         TextField(
           controller: _pluginZipPath,
           decoration: InputDecoration(
@@ -6656,6 +7538,17 @@ class _SettingsViewState extends State<_SettingsView> {
     } catch (error) {
       _snack('${widget.language.t('settings.language.invalid')} $error');
     }
+  }
+
+  Future<void> _openPluginSettings() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => _PluginSettingsDialog(
+        language: widget.language,
+        plugins: widget.plugins,
+        onInstallPluginZip: widget.onInstallPluginZip,
+      ),
+    );
   }
 
   Future<void> _exportConfiguration() async {

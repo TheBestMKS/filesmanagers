@@ -77,6 +77,7 @@ class AppLanguage {
     'favorites.add': 'Add to favorites',
     'favorites.remove': 'Remove from favorites',
     'favorites.missing': 'Favorite path is unavailable.',
+    'favorites.open.all': 'Show all favorites',
     'locations.heading': 'LOCATIONS',
     'lock.prompt': 'Enter the application password.',
     'lock.failed': 'Failed login attempts',
@@ -379,6 +380,30 @@ class AppLanguage {
     'provider.plugin': 'JSON plugin found:',
     'provider.plugin.detail':
         'It describes auth, listFiles, fileInfo, and fileStream. The request executor is connected through a separate adapter.',
+    'settings.plugins.window.title': 'Plugin settings',
+    'settings.plugins.open.window': 'Open plugin settings window',
+    'selection.zip.local.only':
+        'ZIP operations are available only for local folders.',
+    'selection.unsupported.bulk':
+        'This bulk action is not available for the current selection.',
+    'selection.zip': 'Archive selected to ZIP',
+    'selection.clear': 'Clear selection',
+    'selection.all': 'Select all',
+    'selection.count': 'Selected',
+    'filter.duration.max': 'Max duration, seconds',
+    'filter.duration.min': 'Min duration, seconds',
+    'filter.modified.to': 'Modified to YYYY-MM-DD',
+    'filter.modified.from': 'Modified from YYYY-MM-DD',
+    'filter.created.to': 'Created to YYYY-MM-DD',
+    'filter.created.from': 'Created from YYYY-MM-DD',
+    'filter.size.max': 'Max size, bytes',
+    'filter.size.min': 'Min size, bytes',
+    'path.root.unavailable':
+        'Root access cannot be requested from this desktop build.',
+    'path.unavailable.ask':
+        'This path is unavailable now. If you continue, the current folder may stop working. Continue?',
+    'explorer.folder.decrypt.name': 'Decrypt folder name',
+    'explorer.folder.encrypt.name': 'Encrypt folder name',
   };
 
   static const _russianStrings = <String, String>{

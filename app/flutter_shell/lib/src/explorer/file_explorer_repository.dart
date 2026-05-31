@@ -19,6 +19,24 @@ class FileExplorerRepository {
 
   static const int _fileContainerFixedSize = 106;
   static const int _fileParamsTlvTag = 0x1001;
+  static const String _zipScheme = 'zip://';
+  static const String _folderMetaFileName = '.folder.cryptmeta';
+
+  bool isVirtualPath(String path) => _ZipVirtualPath.tryParse(path) != null;
+
+  String zipRootPath(String archivePath) => _ZipVirtualPath.build(archivePath);
+
+  String parentPathFor(String path) {
+    final zip = _ZipVirtualPath.tryParse(path);
+    if (zip != null) {
+      if (zip.innerPath.isEmpty) {
+        return File(zip.archivePath).parent.path;
+      }
+      final parts = zip.innerPath.split('/')..removeLast();
+      return _ZipVirtualPath.build(zip.archivePath, parts.join('/'));
+    }
+    return File(path).parent.path;
+  }
 
   Future<List<ExplorerLocation>> loadLocations(
       List<CloudPluginDefinition> plugins) async {
@@ -142,6 +160,11 @@ class FileExplorerRepository {
     String? filePassword,
     bool decryptNames = true,
   }) async {
+    final zipPath = _ZipVirtualPath.tryParse(path);
+    if (zipPath != null) {
+      return _listZipDirectory(zipPath);
+    }
+
     final directory = Directory(path);
     if (!await directory.exists()) {
       return DirectorySnapshot(
@@ -167,13 +190,21 @@ class FileExplorerRepository {
         final stat = await entity.stat();
         final name = basename(entity.path);
         if (entity is Directory) {
+          final displayName = decryptNames
+              ? await _folderDisplayName(
+                  entity,
+                  commonPassword: commonPassword,
+                  filePassword: filePassword,
+                )
+              : name;
           entries.add(
             ExplorerEntry(
-              name: name,
+              name: displayName,
               path: entity.path,
               kind: ExplorerEntryKind.directory,
               sizeBytes: 0,
               modifiedAt: stat.modified,
+              createdAt: stat.changed,
             ),
           );
           continue;
@@ -206,6 +237,7 @@ class FileExplorerRepository {
               kind: kind,
               sizeBytes: stat.size,
               modifiedAt: stat.modified,
+              createdAt: stat.changed,
               containerInfo: info,
             ),
           );
@@ -284,6 +316,7 @@ class FileExplorerRepository {
                   kind: entry.kind,
                   sizeBytes: entry.sizeBytes,
                   modifiedAt: entry.modifiedAt,
+                  createdAt: entry.createdAt,
                   containerInfo: entry.containerInfo,
                   exists: entry.exists,
                 ));
@@ -308,6 +341,11 @@ class FileExplorerRepository {
   }
 
   Future<ExplorerEntry?> entryForPath(String path) async {
+    final zipPath = _ZipVirtualPath.tryParse(path);
+    if (zipPath != null) {
+      return _entryForZipPath(zipPath);
+    }
+
     final type = await FileSystemEntity.type(path, followLinks: false);
     if (type == FileSystemEntityType.notFound) {
       return null;
@@ -323,6 +361,7 @@ class FileExplorerRepository {
         kind: ExplorerEntryKind.directory,
         sizeBytes: 0,
         modifiedAt: stat.modified,
+        createdAt: stat.changed,
       );
     }
     final kind = _kindForFile(name);
@@ -337,6 +376,7 @@ class FileExplorerRepository {
       kind: kind,
       sizeBytes: stat.size,
       modifiedAt: stat.modified,
+      createdAt: stat.changed,
       containerInfo: info,
     );
   }
@@ -405,6 +445,11 @@ class FileExplorerRepository {
     String? password,
     String? commonPassword,
   }) async {
+    final zipPath = _ZipVirtualPath.tryParse(path);
+    if (zipPath != null) {
+      return _previewZipFile(zipPath);
+    }
+
     final file = File(path);
     final name = basename(path);
     if (!await file.exists()) {
@@ -662,6 +707,94 @@ class FileExplorerRepository {
     return outDir;
   }
 
+  Future<File> createZipFromPaths(
+    Iterable<String> sourcePaths,
+    Directory targetDir, {
+    required String archiveName,
+  }) async {
+    await targetDir.create(recursive: true);
+    final archive = Archive();
+    for (final sourcePath in sourcePaths) {
+      final type = await FileSystemEntity.type(sourcePath, followLinks: false);
+      if (type == FileSystemEntityType.directory) {
+        await _addDirectoryToZipArchive(
+          archive,
+          Directory(sourcePath),
+          rootName: basename(sourcePath),
+        );
+      } else if (type == FileSystemEntityType.file) {
+        final file = File(sourcePath);
+        final stat = await file.stat();
+        final archiveFile = ArchiveFile(
+          basename(sourcePath),
+          stat.size,
+          await file.readAsBytes(),
+        )..lastModTime = stat.modified.millisecondsSinceEpoch ~/ 1000;
+        archive.addFile(archiveFile);
+      }
+    }
+    final target = await _availableFile(targetDir, archiveName);
+    final bytes = ZipEncoder().encode(archive);
+    await target.writeAsBytes(bytes, flush: true);
+    return target;
+  }
+
+  Future<Directory> encryptFolderName(
+    Directory source, {
+    required String password,
+  }) async {
+    if (!await source.exists()) {
+      throw FileSystemException('Folder not found', source.path);
+    }
+    final currentName = basename(source.path);
+    if (currentName.startsWith('d_') && currentName.endsWith('.cryptdir')) {
+      return source;
+    }
+    final parent = source.parent;
+    final directoryId = _hex(VaultCrypto.randomBytes(16));
+    final target = Directory(
+      '${parent.path}${Platform.pathSeparator}d_$directoryId.cryptdir',
+    );
+    final renamed = await source.rename(target.path);
+    final envelope = await VaultCrypto.encryptTextEnvelope(
+      jsonEncode(<String, Object?>{
+        'schema': 'securevault.folderName.v1',
+        'name': currentName,
+        'renamedAtUtcMs': DateTime.now().toUtc().millisecondsSinceEpoch,
+      }),
+      password: password,
+    );
+    final metaFile =
+        File('${renamed.path}${Platform.pathSeparator}$_folderMetaFileName');
+    await metaFile.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(<String, Object?>{
+        'schema': 'securevault.folderMeta.v1',
+        'folderNameEnvelope': envelope,
+      }),
+      flush: true,
+    );
+    return renamed;
+  }
+
+  Future<Directory> decryptFolderName(
+    Directory source, {
+    required String password,
+  }) async {
+    final originalName = await _decryptFolderName(source, password: password);
+    if (originalName == null || originalName.trim().isEmpty) {
+      throw const FormatException(
+          'Folder does not contain encrypted metadata.');
+    }
+    final parent = source.parent;
+    final target = await _availableDirectory(parent, originalName);
+    final metaFile =
+        File('${source.path}${Platform.pathSeparator}$_folderMetaFileName');
+    if (await metaFile.exists()) {
+      await metaFile.delete();
+    }
+    return source.rename(target.path);
+  }
+
   Future<FileSystemEntity> copyEntityToDirectory(
     String sourcePath,
     String targetDirectory,
@@ -748,8 +881,254 @@ class FileExplorerRepository {
     throw FileSystemException('Path not found', path);
   }
 
+  Future<DirectorySnapshot> _listZipDirectory(_ZipVirtualPath zip) async {
+    final archiveFile = File(zip.archivePath);
+    if (!await archiveFile.exists()) {
+      return DirectorySnapshot(
+        path: zip.fullPath,
+        entries: const [],
+        error: 'ZIP archive not found.',
+      );
+    }
+    try {
+      final archive = ZipDecoder().decodeBytes(
+        await archiveFile.readAsBytes(),
+        verify: false,
+      );
+      final prefix = zip.innerPath.isEmpty ? '' : '${zip.innerPath}/';
+      final directories = <String, DateTime>{};
+      final files = <String, ArchiveFile>{};
+      for (final item in archive.files) {
+        final name = _normalizeZipEntryName(item.name);
+        if (name.isEmpty || !name.startsWith(prefix)) continue;
+        final rest = name.substring(prefix.length);
+        if (rest.isEmpty) continue;
+        final slash = rest.indexOf('/');
+        if (slash >= 0) {
+          final dir = rest.substring(0, slash);
+          if (dir.isNotEmpty) {
+            directories[dir] = item.lastModDateTime;
+          }
+          continue;
+        }
+        if (item.isFile) {
+          files[rest] = item;
+        } else {
+          directories[rest] = item.lastModDateTime;
+        }
+      }
+
+      final entries = <ExplorerEntry>[];
+      entries.add(
+        ExplorerEntry(
+          name: '...',
+          path: zip.innerPath.isEmpty
+              ? archiveFile.parent.path
+              : _ZipVirtualPath.build(
+                  zip.archivePath,
+                  zip.innerPath.split('/')..removeLast(),
+                ),
+          kind: ExplorerEntryKind.directory,
+          sizeBytes: 0,
+          modifiedAt: DateTime.now(),
+          isNavigationEntry: true,
+        ),
+      );
+      for (final item in directories.entries) {
+        entries.add(
+          ExplorerEntry(
+            name: item.key,
+            path: _ZipVirtualPath.build(
+              zip.archivePath,
+              _joinZipPath(zip.innerPath, item.key),
+            ),
+            kind: ExplorerEntryKind.directory,
+            sizeBytes: 0,
+            modifiedAt: item.value,
+          ),
+        );
+      }
+      for (final item in files.entries) {
+        final file = item.value;
+        entries.add(
+          ExplorerEntry(
+            name: item.key,
+            path: _ZipVirtualPath.build(
+              zip.archivePath,
+              _joinZipPath(zip.innerPath, item.key),
+            ),
+            kind: _kindForFile(item.key),
+            sizeBytes: file.size,
+            modifiedAt: file.lastModDateTime,
+          ),
+        );
+      }
+      entries.sort((a, b) {
+        if (a.isNavigationEntry != b.isNavigationEntry) {
+          return a.isNavigationEntry ? -1 : 1;
+        }
+        if (a.isDirectory != b.isDirectory) {
+          return a.isDirectory ? -1 : 1;
+        }
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+      return DirectorySnapshot(path: zip.fullPath, entries: entries);
+    } catch (error) {
+      return DirectorySnapshot(
+        path: zip.fullPath,
+        entries: const [],
+        error: 'ZIP archive could not be opened: $error',
+      );
+    }
+  }
+
+  Future<ExplorerEntry?> _entryForZipPath(_ZipVirtualPath zip) async {
+    if (!await File(zip.archivePath).exists()) return null;
+    if (zip.innerPath.isEmpty) {
+      final stat = await File(zip.archivePath).stat();
+      return ExplorerEntry(
+        name: basename(zip.archivePath),
+        path: zip.fullPath,
+        kind: ExplorerEntryKind.directory,
+        sizeBytes: stat.size,
+        modifiedAt: stat.modified,
+      );
+    }
+    final archive = ZipDecoder().decodeBytes(
+      await File(zip.archivePath).readAsBytes(),
+      verify: false,
+    );
+    final normalized = _normalizeZipEntryName(zip.innerPath);
+    final file = archive.findFile(normalized);
+    if (file != null) {
+      return ExplorerEntry(
+        name: _zipBasename(normalized),
+        path: zip.fullPath,
+        kind: file.isFile
+            ? _kindForFile(_zipBasename(normalized))
+            : ExplorerEntryKind.directory,
+        sizeBytes: file.isFile ? file.size : 0,
+        modifiedAt: file.lastModDateTime,
+      );
+    }
+    final prefix = normalized.endsWith('/') ? normalized : '$normalized/';
+    final hasChildren = archive.files.any(
+      (item) => _normalizeZipEntryName(item.name).startsWith(prefix),
+    );
+    if (!hasChildren) return null;
+    return ExplorerEntry(
+      name: _zipBasename(normalized),
+      path: zip.fullPath,
+      kind: ExplorerEntryKind.directory,
+      sizeBytes: 0,
+      modifiedAt: DateTime.now(),
+    );
+  }
+
+  Future<FilePreview> _previewZipFile(_ZipVirtualPath zip) async {
+    final archive = ZipDecoder().decodeBytes(
+      await File(zip.archivePath).readAsBytes(),
+      verify: false,
+    );
+    final file = archive.findFile(_normalizeZipEntryName(zip.innerPath));
+    if (file == null || !file.isFile) {
+      return FilePreview(
+        title: _zipBasename(zip.innerPath),
+        subtitle: 'ZIP entry is not a file.',
+        sourcePath: zip.fullPath,
+      );
+    }
+    final bytes = file.readBytes() ?? Uint8List(0);
+    return FileViewerService.previewBytes(
+      name: _zipBasename(file.name),
+      subtitle: 'ZIP entry, ${bytes.length} bytes',
+      bytes: bytes,
+      sourcePath: zip.fullPath,
+    );
+  }
+
+  Future<String> _folderDisplayName(
+    Directory directory, {
+    String? commonPassword,
+    String? filePassword,
+  }) async {
+    final name = basename(directory.path);
+    final password = filePassword?.isNotEmpty == true
+        ? filePassword
+        : commonPassword?.isNotEmpty == true
+            ? commonPassword
+            : null;
+    if (password == null) return name;
+    return await _decryptFolderName(directory, password: password)
+            .catchError((_) => null) ??
+        name;
+  }
+
+  Future<String?> _decryptFolderName(
+    Directory directory, {
+    required String password,
+  }) async {
+    final metaFile =
+        File('${directory.path}${Platform.pathSeparator}$_folderMetaFileName');
+    if (!await metaFile.exists()) return null;
+    final decoded = jsonDecode(await metaFile.readAsString());
+    if (decoded is! Map<String, Object?>) return null;
+    final envelope = decoded['folderNameEnvelope'];
+    if (envelope is! Map) return null;
+    final clear = await VaultCrypto.decryptTextEnvelope(
+      envelope.map((key, value) => MapEntry(key.toString(), value)),
+      password: password,
+    );
+    final json = jsonDecode(clear);
+    if (json is! Map<String, Object?>) return null;
+    return json['name'] as String?;
+  }
+
+  Future<void> _addDirectoryToZipArchive(
+    Archive archive,
+    Directory source, {
+    required String rootName,
+  }) async {
+    await for (final entity
+        in source.list(recursive: true, followLinks: false)) {
+      if (entity is! File) continue;
+      final relative = entity.path
+          .substring(source.path.length)
+          .replaceFirst(RegExp(r'^[\\/]+'), '')
+          .replaceAll('\\', '/');
+      if (relative.isEmpty) continue;
+      final stat = await entity.stat();
+      final archiveFile = ArchiveFile(
+        '$rootName/$relative',
+        stat.size,
+        await entity.readAsBytes(),
+      )..lastModTime = stat.modified.millisecondsSinceEpoch ~/ 1000;
+      archive.addFile(archiveFile);
+    }
+  }
+
+  String _normalizeZipEntryName(String name) => name
+      .replaceAll('\\', '/')
+      .split('/')
+      .where((part) => part.isNotEmpty && part != '..')
+      .join('/');
+
+  String _joinZipPath(String base, String child) {
+    final cleanBase = _normalizeZipEntryName(base);
+    final cleanChild = _normalizeZipEntryName(child);
+    if (cleanBase.isEmpty) return cleanChild;
+    if (cleanChild.isEmpty) return cleanBase;
+    return '$cleanBase/$cleanChild';
+  }
+
+  String _zipBasename(String path) {
+    final normalized = _normalizeZipEntryName(path);
+    if (normalized.isEmpty) return basename(path);
+    return normalized.split('/').last;
+  }
+
   ExplorerEntryKind _kindForFile(String name) {
-    if (name == '.folder.cryptmeta') {
+    if (name == _folderMetaFileName) {
       return ExplorerEntryKind.folderMeta;
     }
     if (RegExp(r'^f_[0-9a-f]{32}\.crypt$').hasMatch(name) ||
@@ -1155,4 +1534,58 @@ class _CryptPayloadLayout {
   final Map<String, Object?> params;
   final int payloadOffset;
   final int encryptedHeaderLength;
+}
+
+class _ZipVirtualPath {
+  const _ZipVirtualPath({
+    required this.archivePath,
+    required this.innerPath,
+    required this.fullPath,
+  });
+
+  final String archivePath;
+  final String innerPath;
+  final String fullPath;
+
+  static _ZipVirtualPath? tryParse(String path) {
+    if (!path.startsWith(FileExplorerRepository._zipScheme)) return null;
+    final rest = path.substring(FileExplorerRepository._zipScheme.length);
+    final slash = rest.indexOf('/');
+    final encodedArchive = slash < 0 ? rest : rest.substring(0, slash);
+    if (encodedArchive.isEmpty) return null;
+    try {
+      final archivePath = utf8.decode(base64Url.decode(encodedArchive));
+      final inner =
+          slash < 0 ? '' : Uri.decodeComponent(rest.substring(slash + 1));
+      return _ZipVirtualPath(
+        archivePath: archivePath,
+        innerPath: inner
+            .replaceAll('\\', '/')
+            .split('/')
+            .where((part) => part.isNotEmpty && part != '..')
+            .join('/'),
+        fullPath: path,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String build(String archivePath, [Object? innerPath]) {
+    final encoded = base64Url.encode(utf8.encode(archivePath));
+    final inner = switch (innerPath) {
+      null => '',
+      List<String> parts => parts
+          .where((part) => part.trim().isNotEmpty && part.trim() != '..')
+          .join('/'),
+      _ => innerPath.toString(),
+    }
+        .replaceAll('\\', '/')
+        .split('/')
+        .where((part) => part.isNotEmpty && part != '..')
+        .join('/');
+    return inner.isEmpty
+        ? '${FileExplorerRepository._zipScheme}$encoded'
+        : '${FileExplorerRepository._zipScheme}$encoded/${Uri.encodeComponent(inner)}';
+  }
 }
