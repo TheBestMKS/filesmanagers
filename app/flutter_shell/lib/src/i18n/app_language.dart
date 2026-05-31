@@ -33,6 +33,21 @@ class AppLanguage {
     'about.version': 'Version',
     'about.description':
         'Protected explorer, encrypted previews, language packs, and native vault core details.',
+    'about.contacts':
+        'Contacts: SecureVault local build. Add maintainer contacts in the project settings when publishing.',
+    'about.crypto.test': 'Cryptography speed test',
+    'about.crypto.test.result': 'Result',
+    'about.memory.info': 'Memory usage information',
+    'about.memory.cache': 'Thumbnail memory cache',
+    'about.version.features': 'Current version functionality',
+    'about.features.text.editor':
+        'Text files can be edited as text, HEX or binary with encoding conversion and search.',
+    'about.features.preview.toolbar':
+        'Explorer toolbar separates navigation from search, preview toggle and overflow actions.',
+    'about.features.thumbnail.cache':
+        'Image, video and audio thumbnails are cached in memory and can be disabled in settings.',
+    'about.features.ebook.tts':
+        'EPUB/FB2 e-books open in the reader and can be read aloud via platform TTS.',
     'nav.explorer': 'Explorer',
     'nav.gallery': 'Gallery',
     'nav.music': 'Music',
@@ -97,6 +112,11 @@ class AppLanguage {
     'settings.thumbnails.video': 'Show video thumbnails',
     'settings.thumbnails.video.animate': 'Animate video thumbnails',
     'settings.thumbnails.audio': 'Show audio covers',
+    'settings.thumbnails.cache.memory': 'Cache thumbnails in memory',
+    'settings.preview.visible.default': 'Show preview area by default',
+    'settings.preview.remember.visibility': 'Remember preview area state',
+    'settings.path.dropdown.favorites':
+        'Show favorite folders in the path dropdown',
     'settings.android.lock.resume':
         'Ask for the app password after Android resume',
     'lock.prompt': 'Enter the application password.',
@@ -109,6 +129,8 @@ class AppLanguage {
     'common.saving': 'Saving...',
     'common.execute': 'Run',
     'common.path': 'Path',
+    'common.enabled': 'Enabled',
+    'common.disabled': 'Disabled',
     'common.target.folder': 'Target folder',
     'explorer.choose.location': 'Choose a location',
     'explorer.choose.location.left': 'Choose a location on the left.',
@@ -116,6 +138,7 @@ class AppLanguage {
     'explorer.access.error': 'Access denied or read error:',
     'explorer.up': 'Up',
     'explorer.refresh': 'Refresh',
+    'explorer.forward': 'Forward',
     'explorer.upload': 'Upload',
     'explorer.download': 'Download',
     'explorer.create': 'Create',
@@ -183,6 +206,15 @@ class AppLanguage {
     'preview.external.warning':
         'The file can be exposed to another application, temporary files, recent-file lists, thumbnails, or system caches. Continue only if you trust that app.',
     'preview.external.temp': 'Decrypted copy prepared for external opening.',
+    'preview.unsupported.title': 'Unsupported file type',
+    'preview.unsupported.body':
+        'SecureVault does not have a built-in viewer for this extension. Open it in another application?',
+    'preview.speak': 'Read aloud',
+    'csv.view.table': 'Table',
+    'csv.view.raw': 'Raw file',
+    'csv.delimiter.semicolon': 'Semicolon',
+    'csv.delimiter.comma': 'Comma',
+    'csv.delimiter.tab': 'Tab',
     'media.unavailable': 'No playable media source is available.',
     'media.error': 'Media playback error:',
     'media.decrypted.memory':
@@ -201,6 +233,15 @@ class AppLanguage {
     'editor.saved': 'Saved:',
     'editor.error': 'Editor error:',
     'editor.save.as': 'Save as',
+    'editor.text.title': 'Text / HEX / binary editor',
+    'editor.text.mode.text': 'Text',
+    'editor.text.mode.hex': 'HEX',
+    'editor.text.mode.binary': 'Binary',
+    'editor.text.search': 'Find in file',
+    'editor.text.search.none': 'Nothing found.',
+    'editor.text.convert': 'Encoding and output',
+    'editor.text.convert.note':
+        'Choose an encoding for text mode or edit bytes directly in HEX/binary mode. Encrypted previews stay in memory until you explicitly save.',
     'editor.output.path': 'Output path',
     'editor.output.format': 'Output format',
     'editor.image.title': 'Image editor',
@@ -433,6 +474,21 @@ class AppLanguage {
     'about.version': 'Версия',
     'about.description':
         'Защищенный проводник, просмотр зашифрованных файлов, языковые пакеты и сведения о нативном ядре хранилища.',
+    'about.contacts':
+        'Контакты: локальная сборка SecureVault. При публикации укажите контакты сопровождающего в настройках проекта.',
+    'about.crypto.test': 'Тест скорости криптографии',
+    'about.crypto.test.result': 'Результат',
+    'about.memory.info': 'Информация об используемой памяти',
+    'about.memory.cache': 'Кэш миниатюр в памяти',
+    'about.version.features': 'Функционал текущей версии',
+    'about.features.text.editor':
+        'Текстовые файлы редактируются как текст, HEX или двоичные данные с конвертацией кодировок и поиском.',
+    'about.features.preview.toolbar':
+        'Панель проводника разделяет навигацию, поиск, показ preview и действия в меню.',
+    'about.features.thumbnail.cache':
+        'Миниатюры картинок, видео и аудио кэшируются в памяти; кэш можно отключить в настройках.',
+    'about.features.ebook.tts':
+        'EPUB/FB2 открываются в читалке и могут читаться вслух через TTS платформы.',
     'nav.explorer': 'Проводник',
     'nav.gallery': 'Галерея',
     'nav.music': 'Музыка',
@@ -496,6 +552,14 @@ class AppLanguage {
     'settings.thumbnails.video': 'Показывать кадры видео',
     'settings.thumbnails.video.animate': 'Анимировать кадры видео',
     'settings.thumbnails.audio': 'Показывать обложки аудио',
+    'settings.thumbnails.cache.memory':
+        'Кэшировать миниатюры в оперативной памяти',
+    'settings.preview.visible.default':
+        'Показывать область просмотра по умолчанию',
+    'settings.preview.remember.visibility':
+        'Запоминать состояние области просмотра',
+    'settings.path.dropdown.favorites':
+        'Показывать избранные папки в выпадающем списке пути',
     'settings.android.lock.resume':
         'Запрашивать пароль после возврата в Android',
     'lock.prompt': 'Введите пароль входа в приложение.',
@@ -508,6 +572,8 @@ class AppLanguage {
     'common.saving': 'Сохраняю...',
     'common.execute': 'Выполнить',
     'common.path': 'Путь',
+    'common.enabled': 'Включено',
+    'common.disabled': 'Отключено',
     'common.target.folder': 'Целевая папка',
     'explorer.choose.location': 'Выберите расположение',
     'explorer.choose.location.left': 'Выберите расположение слева.',
@@ -515,6 +581,7 @@ class AppLanguage {
     'explorer.access.error': 'Нет доступа или ошибка чтения:',
     'explorer.up': 'Вверх',
     'explorer.refresh': 'Обновить',
+    'explorer.forward': 'Вперед',
     'explorer.upload': 'Загрузить',
     'explorer.download': 'Выгрузить',
     'explorer.create': 'Создать',
@@ -584,6 +651,15 @@ class AppLanguage {
         'Файл может быть раскрыт другой программе, временным файлам, спискам последних документов, миниатюрам или системному кэшу. Продолжайте только если доверяете этой программе.',
     'preview.external.temp':
         'Расшифрованная копия подготовлена для внешнего открытия.',
+    'preview.unsupported.title': 'Неподдерживаемый тип файла',
+    'preview.unsupported.body':
+        'Для этого расширения нет встроенного просмотрщика SecureVault. Открыть файл в другой программе?',
+    'preview.speak': 'Читать вслух',
+    'csv.view.table': 'Таблица',
+    'csv.view.raw': 'Обычный файл',
+    'csv.delimiter.semicolon': 'Точка с запятой',
+    'csv.delimiter.comma': 'Запятая',
+    'csv.delimiter.tab': 'Табуляция',
     'media.unavailable': 'Нет доступного источника для воспроизведения.',
     'media.error': 'Ошибка воспроизведения:',
     'media.decrypted.memory':
@@ -602,6 +678,15 @@ class AppLanguage {
     'editor.saved': 'Сохранено:',
     'editor.error': 'Ошибка редактора:',
     'editor.save.as': 'Сохранить как',
+    'editor.text.title': 'Редактор текста / HEX / двоичный',
+    'editor.text.mode.text': 'Текст',
+    'editor.text.mode.hex': 'HEX',
+    'editor.text.mode.binary': 'Двоичный',
+    'editor.text.search': 'Поиск по тексту',
+    'editor.text.search.none': 'Ничего не найдено.',
+    'editor.text.convert': 'Кодировка и сохранение',
+    'editor.text.convert.note':
+        'Выберите кодировку для текстового режима или редактируйте байты напрямую в HEX/двоичном режиме. Зашифрованный preview остается в памяти до явного сохранения.',
     'editor.output.path': 'Путь сохранения',
     'editor.output.format': 'Формат сохранения',
     'editor.image.title': 'Редактор изображений',

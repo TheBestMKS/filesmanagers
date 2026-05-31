@@ -71,6 +71,11 @@ class SecuritySettings {
     this.showVideoThumbnails = true,
     this.animateVideoThumbnails = false,
     this.showAudioArtwork = true,
+    this.cacheThumbnailsInMemory = true,
+    this.previewVisibleByDefault = false,
+    this.rememberPreviewVisibility = false,
+    this.savedPreviewVisible = false,
+    this.includeFavoritesInPathDropdown = false,
     this.locationSidebarCount = 5,
     this.requirePasswordOnAndroidResume = false,
   });
@@ -137,6 +142,11 @@ class SecuritySettings {
   final bool showVideoThumbnails;
   final bool animateVideoThumbnails;
   final bool showAudioArtwork;
+  final bool cacheThumbnailsInMemory;
+  final bool previewVisibleByDefault;
+  final bool rememberPreviewVisibility;
+  final bool savedPreviewVisible;
+  final bool includeFavoritesInPathDropdown;
   final int locationSidebarCount;
   final bool requirePasswordOnAndroidResume;
 
@@ -219,6 +229,11 @@ class SecuritySettings {
     bool? showVideoThumbnails,
     bool? animateVideoThumbnails,
     bool? showAudioArtwork,
+    bool? cacheThumbnailsInMemory,
+    bool? previewVisibleByDefault,
+    bool? rememberPreviewVisibility,
+    bool? savedPreviewVisible,
+    bool? includeFavoritesInPathDropdown,
     int? locationSidebarCount,
     bool? requirePasswordOnAndroidResume,
   }) {
@@ -322,6 +337,15 @@ class SecuritySettings {
       animateVideoThumbnails:
           animateVideoThumbnails ?? this.animateVideoThumbnails,
       showAudioArtwork: showAudioArtwork ?? this.showAudioArtwork,
+      cacheThumbnailsInMemory:
+          cacheThumbnailsInMemory ?? this.cacheThumbnailsInMemory,
+      previewVisibleByDefault:
+          previewVisibleByDefault ?? this.previewVisibleByDefault,
+      rememberPreviewVisibility:
+          rememberPreviewVisibility ?? this.rememberPreviewVisibility,
+      savedPreviewVisible: savedPreviewVisible ?? this.savedPreviewVisible,
+      includeFavoritesInPathDropdown:
+          includeFavoritesInPathDropdown ?? this.includeFavoritesInPathDropdown,
       locationSidebarCount: locationSidebarCount ?? this.locationSidebarCount,
       requirePasswordOnAndroidResume:
           requirePasswordOnAndroidResume ?? this.requirePasswordOnAndroidResume,
@@ -441,6 +465,14 @@ class SecuritySettings {
       showVideoThumbnails: json['showVideoThumbnails'] as bool? ?? true,
       animateVideoThumbnails: json['animateVideoThumbnails'] as bool? ?? false,
       showAudioArtwork: json['showAudioArtwork'] as bool? ?? true,
+      cacheThumbnailsInMemory: json['cacheThumbnailsInMemory'] as bool? ?? true,
+      previewVisibleByDefault:
+          json['previewVisibleByDefault'] as bool? ?? false,
+      rememberPreviewVisibility:
+          json['rememberPreviewVisibility'] as bool? ?? false,
+      savedPreviewVisible: json['savedPreviewVisible'] as bool? ?? false,
+      includeFavoritesInPathDropdown:
+          json['includeFavoritesInPathDropdown'] as bool? ?? false,
       locationSidebarCount: json['locationSidebarCount'] as int? ?? 5,
       requirePasswordOnAndroidResume:
           json['requirePasswordOnAndroidResume'] as bool? ?? false,
@@ -512,6 +544,11 @@ class SecuritySettings {
       'showVideoThumbnails': showVideoThumbnails,
       'animateVideoThumbnails': animateVideoThumbnails,
       'showAudioArtwork': showAudioArtwork,
+      'cacheThumbnailsInMemory': cacheThumbnailsInMemory,
+      'previewVisibleByDefault': previewVisibleByDefault,
+      'rememberPreviewVisibility': rememberPreviewVisibility,
+      'savedPreviewVisible': savedPreviewVisible,
+      'includeFavoritesInPathDropdown': includeFavoritesInPathDropdown,
       'locationSidebarCount': locationSidebarCount,
       'requirePasswordOnAndroidResume': requirePasswordOnAndroidResume,
     };
@@ -666,6 +703,15 @@ class SecuritySettingsRepository {
     return next;
   }
 
+  Future<SecuritySettings> setPreviewVisibility(
+    SecuritySettings current,
+    bool visible,
+  ) async {
+    final next = current.copyWith(savedPreviewVisible: visible);
+    await save(next);
+    return next;
+  }
+
   Future<SecuritySettings> updateMediaFolders(
     SecuritySettings current, {
     List<String>? galleryFolders,
@@ -793,6 +839,11 @@ class SecuritySettingsRepository {
     bool? showVideoThumbnails,
     bool? animateVideoThumbnails,
     bool? showAudioArtwork,
+    bool? cacheThumbnailsInMemory,
+    bool? previewVisibleByDefault,
+    bool? rememberPreviewVisibility,
+    bool? savedPreviewVisible,
+    bool? includeFavoritesInPathDropdown,
     int? locationSidebarCount,
     bool? requirePasswordOnAndroidResume,
   }) async {
@@ -857,6 +908,11 @@ class SecuritySettingsRepository {
       showVideoThumbnails: showVideoThumbnails,
       animateVideoThumbnails: animateVideoThumbnails,
       showAudioArtwork: showAudioArtwork,
+      cacheThumbnailsInMemory: cacheThumbnailsInMemory,
+      previewVisibleByDefault: previewVisibleByDefault,
+      rememberPreviewVisibility: rememberPreviewVisibility,
+      savedPreviewVisible: savedPreviewVisible,
+      includeFavoritesInPathDropdown: includeFavoritesInPathDropdown,
       locationSidebarCount: locationSidebarCount,
       requirePasswordOnAndroidResume: requirePasswordOnAndroidResume,
       recentFilePaths: rememberRecentFiles == false

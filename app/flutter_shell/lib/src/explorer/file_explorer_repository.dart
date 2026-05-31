@@ -1061,21 +1061,6 @@ class FileExplorerRepository {
         }
       }
       final entries = <ExplorerEntry>[];
-      if (torrent.innerPath.isNotEmpty) {
-        entries.add(
-          ExplorerEntry(
-            name: '...',
-            path: _TorrentVirtualPath.build(
-              torrent.torrentPath,
-              _zipParent(torrent.innerPath),
-            ),
-            kind: ExplorerEntryKind.directory,
-            sizeBytes: 0,
-            modifiedAt: DateTime.now(),
-            isNavigationEntry: true,
-          ),
-        );
-      }
       for (final directory in directories.entries) {
         entries.add(ExplorerEntry(
           name: directory.key,
@@ -1783,14 +1768,27 @@ class FileExplorerRepository {
         return text != null && matcher.matches(text);
       }
       final kind = FileViewerService.kindForName(entry.path);
-      if (kind != FileContentKind.text && kind != FileContentKind.html) {
+      if (kind != FileContentKind.text &&
+          kind != FileContentKind.html &&
+          kind != FileContentKind.ebook &&
+          kind != FileContentKind.document) {
         return false;
       }
       final file = File(entry.path);
       if (await file.length() > 2 * 1024 * 1024) {
+        if (kind == FileContentKind.ebook || kind == FileContentKind.document) {
+          final preview = await FileViewerService.previewPlainFile(file);
+          final text = preview.text;
+          return text != null && matcher.matches(text);
+        }
         return false;
       }
-      return matcher.matches(await file.readAsString());
+      if (kind == FileContentKind.text || kind == FileContentKind.html) {
+        return matcher.matches(await file.readAsString());
+      }
+      final preview = await FileViewerService.previewPlainFile(file);
+      final text = preview.text;
+      return text != null && matcher.matches(text);
     } catch (_) {
       return false;
     }

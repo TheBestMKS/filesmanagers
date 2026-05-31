@@ -45,6 +45,7 @@ enum FileContentKind {
   video,
   audio,
   document,
+  ebook,
   html,
   archive,
   unknown,

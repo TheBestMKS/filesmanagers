@@ -64,6 +64,13 @@ class FileViewerService {
     '.pptx',
     '.ppt'
   };
+  static const ebookExtensions = {
+    '.epub',
+    '.fb2',
+    '.mobi',
+    '.azw',
+    '.azw3',
+  };
   static const videoExtensions = {
     '.mp4',
     '.mkv',
@@ -91,6 +98,7 @@ class FileViewerService {
     if (archiveExtensions.contains(extension)) return FileContentKind.archive;
     if (textExtensions.contains(extension)) return FileContentKind.text;
     if (documentExtensions.contains(extension)) return FileContentKind.document;
+    if (ebookExtensions.contains(extension)) return FileContentKind.ebook;
     if (videoExtensions.contains(extension)) return FileContentKind.video;
     if (audioExtensions.contains(extension)) return FileContentKind.audio;
     return FileContentKind.unknown;
@@ -121,7 +129,7 @@ class FileViewerService {
           title: name,
           subtitle: 'Text, $size bytes',
           sourcePath: file.path,
-          text: _bytesToText(bytes),
+          text: bytesToText(bytes),
           bytes: bytes,
           contentKind: kind);
     }
@@ -131,7 +139,7 @@ class FileViewerService {
         title: name,
         subtitle: 'HTML, $size bytes',
         sourcePath: file.path,
-        text: _htmlSummary(_bytesToText(bytes)),
+        text: _htmlSummary(bytesToText(bytes)),
         bytes: bytes,
         contentKind: kind,
       );
@@ -143,6 +151,18 @@ class FileViewerService {
         subtitle: 'ZIP archive, $size bytes',
         sourcePath: file.path,
         text: _zipSummary(bytes),
+        bytes: bytes,
+        contentKind: kind,
+      );
+    }
+    if (kind == FileContentKind.ebook && size <= 80 * 1024 * 1024) {
+      final bytes = await file.readAsBytes();
+      final text = await _extractEbookText(name, bytes);
+      return FilePreview(
+        title: name,
+        subtitle: 'E-book, $size bytes',
+        sourcePath: file.path,
+        text: text.isEmpty ? bytesToText(bytes) : text,
         bytes: bytes,
         contentKind: kind,
       );
@@ -169,6 +189,17 @@ class FileViewerService {
         subtitle: _kindSubtitle(kind, size),
         sourcePath: file.path,
         text: _mediaSummary(name, bytes),
+        bytes: bytes,
+        contentKind: kind,
+      );
+    }
+    if (kind == FileContentKind.unknown && size <= 5 * 1024 * 1024) {
+      final bytes = await file.readAsBytes();
+      return FilePreview(
+        title: name,
+        subtitle: _kindSubtitle(kind, size),
+        sourcePath: file.path,
+        text: bytesToText(bytes),
         bytes: bytes,
         contentKind: kind,
       );
@@ -204,7 +235,7 @@ class FileViewerService {
           title: name,
           subtitle: subtitle,
           sourcePath: sourcePath,
-          text: _bytesToText(bytes),
+          text: bytesToText(bytes),
           bytes: bytes,
           containerInfo: containerInfo,
           decrypted: true,
@@ -215,7 +246,7 @@ class FileViewerService {
           title: name,
           subtitle: subtitle,
           sourcePath: sourcePath,
-          text: _htmlSummary(_bytesToText(bytes)),
+          text: _htmlSummary(bytesToText(bytes)),
           bytes: bytes,
           containerInfo: containerInfo,
           decrypted: true,
@@ -227,6 +258,18 @@ class FileViewerService {
           subtitle: subtitle,
           sourcePath: sourcePath,
           text: _zipSummary(bytes),
+          bytes: bytes,
+          containerInfo: containerInfo,
+          decrypted: true,
+          contentKind: kind);
+    }
+    if (kind == FileContentKind.ebook) {
+      final text = await _extractEbookText(name, bytes);
+      return FilePreview(
+          title: name,
+          subtitle: subtitle,
+          sourcePath: sourcePath,
+          text: text.isEmpty ? bytesToText(bytes) : text,
           bytes: bytes,
           containerInfo: containerInfo,
           decrypted: true,
@@ -273,6 +316,7 @@ class FileViewerService {
       FileContentKind.video => 'Video file, $size bytes',
       FileContentKind.audio => 'Audio file, $size bytes',
       FileContentKind.document => 'Document file, $size bytes',
+      FileContentKind.ebook => 'E-book file, $size bytes',
       FileContentKind.html => 'HTML page, $size bytes',
       FileContentKind.archive => 'Archive file, $size bytes',
       FileContentKind.image => 'Image file, $size bytes',
@@ -289,6 +333,8 @@ class FileViewerService {
         'Audio preview is protected in memory. Native playback plugins require Windows symlink support on this machine, so SecureVault does not write decrypted audio to disk automatically.',
       FileContentKind.document =>
         'This document type is recognized. Text extraction is built in for PDF, DOCX, ODT, XLSX, PPTX, and RTF where possible.',
+      FileContentKind.ebook =>
+        'This e-book can be read in the built-in reader. TTS is available from the preview menu when the platform provides speech synthesis.',
       FileContentKind.html =>
         'HTML pages are rendered as a safe in-app text preview. External browser opening is available after the disclosure warning.',
       FileContentKind.archive =>
@@ -299,12 +345,33 @@ class FileViewerService {
     };
   }
 
-  static String _bytesToText(List<int> bytes) {
+  static const knownTextEncodings = <String>[
+    'utf-8',
+    'windows-1251',
+    'latin1',
+    'utf-16le',
+    'utf-16be',
+  ];
+
+  static String bytesToText(List<int> bytes, {String encoding = 'auto'}) {
+    return decodeText(bytes, encoding: encoding, trim: true);
+  }
+
+  static String decodeText(
+    List<int> bytes, {
+    String encoding = 'auto',
+    bool trim = false,
+  }) {
+    String text;
     try {
-      final text = utf8.decode(bytes, allowMalformed: false);
-      return text.length > 12000
-          ? '${text.substring(0, 12000)}\n\n...trimmed...'
-          : text;
+      text = switch (encoding.toLowerCase()) {
+        'windows-1251' || 'cp1251' => _decodeWindows1251(bytes),
+        'latin1' || 'iso-8859-1' => latin1.decode(bytes),
+        'utf-16le' => _decodeUtf16(bytes, Endian.little),
+        'utf-16be' => _decodeUtf16(bytes, Endian.big),
+        'utf-8' => utf8.decode(bytes, allowMalformed: false),
+        _ => _decodeAuto(bytes),
+      };
     } catch (_) {
       final sample = bytes
           .take(128)
@@ -312,6 +379,21 @@ class FileViewerService {
           .join(' ');
       return 'Binary file. First bytes:\n$sample';
     }
+    if (!trim) return text;
+    return text.length > 12000
+        ? '${text.substring(0, 12000)}\n\n...trimmed...'
+        : text;
+  }
+
+  static Uint8List encodeText(String text, {String encoding = 'utf-8'}) {
+    final normalized = encoding.toLowerCase();
+    return Uint8List.fromList(switch (normalized) {
+      'windows-1251' || 'cp1251' => _encodeWindows1251(text),
+      'latin1' || 'iso-8859-1' => latin1.encode(text),
+      'utf-16le' => _encodeUtf16(text, Endian.little),
+      'utf-16be' => _encodeUtf16(text, Endian.big),
+      _ => utf8.encode(text),
+    });
   }
 
   static String _htmlSummary(String html) {
@@ -376,6 +458,43 @@ class FileViewerService {
     } catch (error) {
       return 'Preview extraction failed: $error';
     }
+  }
+
+  static Future<String> _extractEbookText(String name, List<int> bytes) async {
+    final extension = extensionForName(name);
+    try {
+      return switch (extension) {
+        '.epub' => _extractEpubText(bytes),
+        '.fb2' => _extractFb2Text(bytes),
+        _ => _trimText(bytesToText(bytes, encoding: 'auto')),
+      };
+    } catch (error) {
+      return 'E-book preview extraction failed: $error';
+    }
+  }
+
+  static String _extractEpubText(List<int> bytes) {
+    final archive = ZipDecoder().decodeBytes(bytes, verify: false);
+    final parts = <String>[];
+    for (final file in archive.files) {
+      final name = file.name.toLowerCase();
+      if (!file.isFile ||
+          !(name.endsWith('.xhtml') ||
+              name.endsWith('.html') ||
+              name.endsWith('.htm') ||
+              name.endsWith('.xml'))) {
+        continue;
+      }
+      final html = utf8.decode(file.content as List<int>, allowMalformed: true);
+      parts.add(_stripMarkup(html));
+      if (parts.join(' ').length > 20000) break;
+    }
+    return _trimText(parts.join(' '));
+  }
+
+  static String _extractFb2Text(List<int> bytes) {
+    final xmlText = bytesToText(bytes, encoding: 'auto');
+    return _trimText(_stripMarkup(xmlText));
   }
 
   static String _extractPdfText(List<int> bytes) {
@@ -456,4 +575,148 @@ class FileViewerService {
         ? '${normalized.substring(0, 12000)}\n\n...trimmed...'
         : normalized;
   }
+
+  static String _stripMarkup(String value) {
+    return value
+        .replaceAll(
+            RegExp(r'<script[\s\S]*?</script>', caseSensitive: false), ' ')
+        .replaceAll(
+            RegExp(r'<style[\s\S]*?</style>', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'<[^>]+>'), ' ')
+        .replaceAll(RegExp(r'&nbsp;'), ' ')
+        .replaceAll(RegExp(r'&amp;'), '&')
+        .replaceAll(RegExp(r'&lt;'), '<')
+        .replaceAll(RegExp(r'&gt;'), '>')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static String _decodeAuto(List<int> bytes) {
+    if (bytes.length >= 2) {
+      if (bytes[0] == 0xFF && bytes[1] == 0xFE) {
+        return _decodeUtf16(bytes.sublist(2), Endian.little);
+      }
+      if (bytes[0] == 0xFE && bytes[1] == 0xFF) {
+        return _decodeUtf16(bytes.sublist(2), Endian.big);
+      }
+    }
+    try {
+      return utf8.decode(bytes, allowMalformed: false);
+    } catch (_) {
+      return _decodeWindows1251(bytes);
+    }
+  }
+
+  static String _decodeUtf16(List<int> bytes, Endian endian) {
+    final buffer = StringBuffer();
+    for (var i = 0; i + 1 < bytes.length; i += 2) {
+      final code = endian == Endian.little
+          ? bytes[i] | (bytes[i + 1] << 8)
+          : (bytes[i] << 8) | bytes[i + 1];
+      buffer.writeCharCode(code);
+    }
+    return buffer.toString();
+  }
+
+  static List<int> _encodeUtf16(String text, Endian endian) {
+    final out = <int>[];
+    for (final unit in text.codeUnits) {
+      if (endian == Endian.little) {
+        out
+          ..add(unit & 0xFF)
+          ..add((unit >> 8) & 0xFF);
+      } else {
+        out
+          ..add((unit >> 8) & 0xFF)
+          ..add(unit & 0xFF);
+      }
+    }
+    return out;
+  }
+
+  static String _decodeWindows1251(List<int> bytes) =>
+      String.fromCharCodes(bytes.map(_windows1251ToUnicode));
+
+  static List<int> _encodeWindows1251(String text) =>
+      text.runes.map(_unicodeToWindows1251).toList();
+
+  static int _windows1251ToUnicode(int byte) {
+    if (byte < 0x80) return byte;
+    if (byte >= 0xC0) return 0x0410 + (byte - 0xC0);
+    return _cp1251Upper[byte - 0x80];
+  }
+
+  static int _unicodeToWindows1251(int rune) {
+    if (rune < 0x80) return rune;
+    if (rune >= 0x0410 && rune <= 0x044F) return 0xC0 + (rune - 0x0410);
+    final index = _cp1251Upper.indexOf(rune);
+    return index >= 0 ? index + 0x80 : 0x3F;
+  }
+
+  static const _cp1251Upper = <int>[
+    0x0402,
+    0x0403,
+    0x201A,
+    0x0453,
+    0x201E,
+    0x2026,
+    0x2020,
+    0x2021,
+    0x20AC,
+    0x2030,
+    0x0409,
+    0x2039,
+    0x040A,
+    0x040C,
+    0x040B,
+    0x040F,
+    0x0452,
+    0x2018,
+    0x2019,
+    0x201C,
+    0x201D,
+    0x2022,
+    0x2013,
+    0x2014,
+    0x0000,
+    0x2122,
+    0x0459,
+    0x203A,
+    0x045A,
+    0x045C,
+    0x045B,
+    0x045F,
+    0x00A0,
+    0x040E,
+    0x045E,
+    0x0408,
+    0x00A4,
+    0x0490,
+    0x00A6,
+    0x00A7,
+    0x0401,
+    0x00A9,
+    0x0404,
+    0x00AB,
+    0x00AC,
+    0x00AD,
+    0x00AE,
+    0x0407,
+    0x00B0,
+    0x00B1,
+    0x0406,
+    0x0456,
+    0x0491,
+    0x00B5,
+    0x00B6,
+    0x00B7,
+    0x0451,
+    0x2116,
+    0x0454,
+    0x00BB,
+    0x0458,
+    0x0405,
+    0x0455,
+    0x0457,
+  ];
 }

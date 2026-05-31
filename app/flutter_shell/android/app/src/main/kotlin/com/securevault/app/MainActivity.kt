@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
 import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -21,6 +22,7 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 import java.util.UUID
 
 class MainActivity : FlutterActivity() {
@@ -32,6 +34,8 @@ class MainActivity : FlutterActivity() {
             System.loadLibrary("crypt_core")
         }
     }
+
+    private var textToSpeech: TextToSpeech? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,6 +70,15 @@ class MainActivity : FlutterActivity() {
                 "readVideoThumbnail" -> {
                     val path = call.arguments as? String
                     result.success(if (path.isNullOrBlank()) null else readVideoThumbnail(path))
+                }
+                "speakText" -> {
+                    val text = call.arguments as? String
+                    if (text.isNullOrBlank()) {
+                        result.success(null)
+                    } else {
+                        speakText(text)
+                        result.success(null)
+                    }
                 }
                 "openExternal" -> {
                     val path = call.arguments as? String
@@ -109,6 +122,16 @@ class MainActivity : FlutterActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+    }
+
+    override fun onDestroy() {
+        try {
+            textToSpeech?.stop()
+            textToSpeech?.shutdown()
+        } catch (_: Exception) {
+        }
+        textToSpeech = null
+        super.onDestroy()
     }
 
     private fun resolveIntentToLocalPath(intent: Intent?): String? {
@@ -212,6 +235,20 @@ class MainActivity : FlutterActivity() {
             try {
                 retriever.release()
             } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun speakText(text: String) {
+        val current = textToSpeech
+        if (current != null) {
+            current.speak(text, TextToSpeech.QUEUE_FLUSH, null, "securevault-tts")
+            return
+        }
+        textToSpeech = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                textToSpeech?.language = Locale.getDefault()
+                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "securevault-tts")
             }
         }
     }

@@ -1,7 +1,7 @@
 name: secure_vault_shell
 description: Flutter shell for the secure vault explorer.
 publish_to: "none"
-version: 0.10.2
+version: 0.11.0
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -33,3 +33,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/i18n/
+    - assets/icons/logo_program.png

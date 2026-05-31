@@ -135,11 +135,97 @@ class PlatformServices {
     );
   }
 
+  static Future<void> speakText(String text) async {
+    final value = text.trim();
+    if (value.isEmpty) return;
+    if (Platform.isAndroid) {
+      await _channel.invokeMethod<void>('speakText', value);
+      return;
+    }
+    if (Platform.isWindows) {
+      const script = r'''
+param([string]$Text)
+Add-Type -AssemblyName System.Speech
+$speaker = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$speaker.Speak($Text)
+''';
+      await Process.start(
+        'powershell',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script, value],
+        mode: ProcessStartMode.detached,
+        runInShell: false,
+      );
+      return;
+    }
+    if (Platform.isLinux) {
+      try {
+        await Process.start(
+          'spd-say',
+          [value],
+          mode: ProcessStartMode.detached,
+          runInShell: false,
+        );
+      } catch (_) {}
+    }
+  }
+
+  static Future<String?> pickFile() async {
+    if (Platform.isWindows) {
+      return _runPowerShellPicker(r'''
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Multiselect = $false
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  Write-Output $dialog.FileName
+}
+''');
+    }
+    if (Platform.isLinux) {
+      final result = await Process.run('zenity', ['--file-selection'])
+          .catchError((_) => Process.run('kdialog', ['--getopenfilename']));
+      if (result.exitCode == 0) return result.stdout.toString().trim();
+    }
+    return null;
+  }
+
+  static Future<String?> pickDirectory() async {
+    if (Platform.isWindows) {
+      return _runPowerShellPicker(r'''
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  Write-Output $dialog.SelectedPath
+}
+''');
+    }
+    if (Platform.isLinux) {
+      final result =
+          await Process.run('zenity', ['--file-selection', '--directory'])
+              .catchError(
+                  (_) => Process.run('kdialog', ['--getexistingdirectory']));
+      if (result.exitCode == 0) return result.stdout.toString().trim();
+    }
+    return null;
+  }
+
   static List<String> _splitCommand(String command) {
     final matches = RegExp(r'"([^"]+)"|(\S+)').allMatches(command);
     final parts = [
       for (final match in matches) match.group(1) ?? match.group(2)!,
     ];
     return parts.isEmpty ? [command] : parts;
+  }
+
+  static Future<String?> _runPowerShellPicker(String script) async {
+    final result = await Process.run(
+      'powershell',
+      ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      runInShell: false,
+    );
+    if (result.exitCode != 0) return null;
+    final value = result.stdout.toString().trim();
+    return value.isEmpty ? null : value;
   }
 }
