@@ -150,6 +150,19 @@ class FileExplorerRepository {
 
     final entries = <ExplorerEntry>[];
     try {
+      final parent = directory.parent.path;
+      if (_normalizePath(parent) != _normalizePath(directory.path)) {
+        entries.add(
+          ExplorerEntry(
+            name: '...',
+            path: parent,
+            kind: ExplorerEntryKind.directory,
+            sizeBytes: 0,
+            modifiedAt: DateTime.now(),
+            isNavigationEntry: true,
+          ),
+        );
+      }
       await for (final entity in directory.list(followLinks: false)) {
         final stat = await entity.stat();
         final name = basename(entity.path);
@@ -203,6 +216,88 @@ class FileExplorerRepository {
           path: path, entries: entries, error: error.message);
     }
 
+    entries.sort((a, b) {
+      if (a.isNavigationEntry != b.isNavigationEntry) {
+        return a.isNavigationEntry ? -1 : 1;
+      }
+      if (a.isDirectory != b.isDirectory) {
+        return a.isDirectory ? -1 : 1;
+      }
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return DirectorySnapshot(path: path, entries: entries);
+  }
+
+  Future<DirectorySnapshot> searchDirectory(
+    String path, {
+    required String query,
+    required String mode,
+    required bool useRegex,
+    required bool recursive,
+    String? commonPassword,
+    String? filePassword,
+    bool decryptNames = true,
+  }) async {
+    final directory = Directory(path);
+    if (!await directory.exists()) {
+      return DirectorySnapshot(
+        path: path,
+        entries: const [],
+        error: 'Папка не найдена.',
+      );
+    }
+    final matcher = _SearchMatcher(query, useRegex: useRegex);
+    final entries = <ExplorerEntry>[];
+    try {
+      await for (final entity
+          in directory.list(recursive: recursive, followLinks: false)) {
+        final entry = await entryForPath(entity.path);
+        if (entry == null || entry.isNavigationEntry) continue;
+        final nameMatches = matcher.matches(entry.name) ||
+            matcher.matches(basename(entry.path));
+        var contentMatches = false;
+        if (!entry.isDirectory && mode != 'name') {
+          contentMatches = await _fileContentMatches(
+            entry,
+            matcher,
+            commonPassword: commonPassword,
+            filePassword: filePassword,
+          );
+        }
+        final accepted = switch (mode) {
+          'content' => contentMatches,
+          'nameContent' => nameMatches || contentMatches,
+          _ => nameMatches,
+        };
+        if (accepted) {
+          if (decryptNames && entry.isEncrypted) {
+            try {
+              final preview = await previewFile(
+                entry.path,
+                password: filePassword,
+                commonPassword: commonPassword,
+              );
+              if (preview.decrypted) {
+                entries.add(ExplorerEntry(
+                  name: preview.title,
+                  path: entry.path,
+                  kind: entry.kind,
+                  sizeBytes: entry.sizeBytes,
+                  modifiedAt: entry.modifiedAt,
+                  containerInfo: entry.containerInfo,
+                  exists: entry.exists,
+                ));
+                continue;
+              }
+            } catch (_) {}
+          }
+          entries.add(entry);
+        }
+      }
+    } on FileSystemException catch (error) {
+      return DirectorySnapshot(
+          path: path, entries: entries, error: error.message);
+    }
     entries.sort((a, b) {
       if (a.isDirectory != b.isDirectory) {
         return a.isDirectory ? -1 : 1;
@@ -607,6 +702,20 @@ class FileExplorerRepository {
     throw FileSystemException('Path not found', sourcePath);
   }
 
+  Future<Directory> createDirectory(String targetDirectory, String name) async {
+    final normalized = name.trim();
+    if (normalized.isEmpty ||
+        normalized.contains('/') ||
+        normalized.contains('\\')) {
+      throw ArgumentError('Invalid folder name.');
+    }
+    final targetDir = Directory(targetDirectory);
+    await targetDir.create(recursive: true);
+    final directory = await _availableDirectory(targetDir, normalized);
+    await directory.create(recursive: true);
+    return directory;
+  }
+
   Future<FileSystemEntity> renameEntity(String path, String newName) async {
     final normalized = newName.trim();
     if (normalized.isEmpty ||
@@ -942,6 +1051,44 @@ class FileExplorerRepository {
     }
   }
 
+  Future<bool> _fileContentMatches(
+    ExplorerEntry entry,
+    _SearchMatcher matcher, {
+    String? commonPassword,
+    String? filePassword,
+  }) async {
+    try {
+      if (entry.isEncrypted) {
+        final preview = await previewFile(
+          entry.path,
+          password: filePassword,
+          commonPassword: commonPassword,
+        );
+        final text = preview.text;
+        return text != null && matcher.matches(text);
+      }
+      final kind = FileViewerService.kindForName(entry.path);
+      if (kind != FileContentKind.text && kind != FileContentKind.html) {
+        return false;
+      }
+      final file = File(entry.path);
+      if (await file.length() > 2 * 1024 * 1024) {
+        return false;
+      }
+      return matcher.matches(await file.readAsString());
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String _normalizePath(String path) {
+    var value = path.replaceAll('\\', '/');
+    if (value.length > 1 && value.endsWith('/')) {
+      value = value.substring(0, value.length - 1);
+    }
+    return Platform.isWindows ? value.toLowerCase() : value;
+  }
+
   String _requirePassword(String? password) {
     if (password == null || password.isEmpty) {
       throw ArgumentError('Для операции с зашифрованным видом нужен пароль.');
@@ -971,6 +1118,24 @@ class FileExplorerRepository {
 
   String _hex(List<int> bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+class _SearchMatcher {
+  _SearchMatcher(String query, {required bool useRegex})
+      : _query = query,
+        _regex = useRegex && query.isNotEmpty
+            ? RegExp(query, caseSensitive: false, multiLine: true)
+            : null;
+
+  final String _query;
+  final RegExp? _regex;
+
+  bool matches(String value) {
+    if (_query.isEmpty) return true;
+    final regex = _regex;
+    if (regex != null) return regex.hasMatch(value);
+    return value.toLowerCase().contains(_query.toLowerCase());
+  }
 }
 
 class _OpenedCryptFile {

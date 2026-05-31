@@ -101,6 +101,7 @@ class ExplorerEntry {
     required this.modifiedAt,
     this.containerInfo,
     this.exists = true,
+    this.isNavigationEntry = false,
   });
 
   final String name;
@@ -110,6 +111,7 @@ class ExplorerEntry {
   final DateTime modifiedAt;
   final VaultContainerInfo? containerInfo;
   final bool exists;
+  final bool isNavigationEntry;
 
   bool get isDirectory => kind == ExplorerEntryKind.directory;
   bool get isEncrypted =>

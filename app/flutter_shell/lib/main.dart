@@ -19,7 +19,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.6.0';
+const _appVersion = '0.7.0';
 
 void main(List<String> args) {
   MediaKit.ensureInitialized();
@@ -63,6 +63,20 @@ class _CreatedFileSpec {
   final Uint8List bytes;
 }
 
+class _SearchDialogResult {
+  const _SearchDialogResult({
+    required this.query,
+    required this.mode,
+    required this.useRegex,
+    required this.recursive,
+  });
+
+  final String query;
+  final String mode;
+  final bool useRegex;
+  final bool recursive;
+}
+
 class VaultHomeScreen extends StatefulWidget {
   const VaultHomeScreen({super.key, this.initialOpenPath});
 
@@ -102,6 +116,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   bool _clipboardCut = false;
   bool _showingRecent = false;
   String _searchQuery = '';
+  String _searchMode = 'name';
+  bool _searchUseRegex = false;
+  bool _searchRecursive = false;
+  bool _goingUp = false;
 
   @override
   void initState() {
@@ -130,6 +148,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         locations.where((e) => e.enabled && e.path != null).firstOrNull;
 
     String? currentPath = first?.path;
+    if (settings.rememberLastFolder &&
+        settings.lastOpenedFolder != null &&
+        settings.lastOpenedFolder!.trim().isNotEmpty &&
+        await Directory(settings.lastOpenedFolder!.trim()).exists()) {
+      currentPath = settings.lastOpenedFolder!.trim();
+    }
     ExplorerEntry? selected;
     Future<FilePreview>? preview;
     final initialPath = widget.initialOpenPath ??
@@ -154,6 +178,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     setState(() {
       _settings = settings;
       _language = language;
+      _searchMode = settings.searchMode;
+      _searchUseRegex = settings.searchUseRegex;
+      _searchRecursive = settings.searchRecursive;
       _commonEncryptionPassword = commonPassword;
       _runtime = runtime;
       _pluginDefs = pluginDefs;
@@ -258,6 +285,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   }
 
   void _openPath(String path) {
+    unawaited(_rememberOpenedFolder(path));
     setState(() {
       _page = ShellPage.explorer;
       _showingRecent = false;
@@ -268,6 +296,34 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _imagePlaylist = const [];
       _snapshot = _directorySnapshot(path);
     });
+  }
+
+  Future<void> _rememberOpenedFolder(String path) async {
+    if (!_settings.rememberLastFolder || path.trim().isEmpty) return;
+    final next = await _settingsRepo
+        .recordLastOpenedFolder(_settings, path)
+        .catchError((_) => _settings);
+    if (mounted && next.lastOpenedFolder != _settings.lastOpenedFolder) {
+      setState(() => _settings = next);
+    }
+  }
+
+  Future<void> _openPathSafely(String path, {bool fromUp = false}) async {
+    final type = await FileSystemEntity.type(path, followLinks: false);
+    if (type == FileSystemEntityType.directory) {
+      _openPath(path);
+      return;
+    }
+    final policy = _settings.navigationPolicy;
+    if (policy == 'allow') {
+      _openPath(path);
+      return;
+    }
+    if (fromUp && policy == 'fallbackToLocations') {
+      _openExplorerHome();
+      return;
+    }
+    _snack(_language.t('path.unavailable'));
   }
 
   Future<DirectorySnapshot> _directorySnapshot(String path) =>
@@ -318,7 +374,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       _showProvider(location);
       return;
     }
-    _openPath(location.path!);
+    unawaited(_openPathSafely(location.path!));
   }
 
   void _openExplorerHome() {
@@ -582,7 +638,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       return;
     }
     if (entry.isDirectory) {
-      _openPath(entry.path);
+      await _openPathSafely(entry.path);
       return;
     }
     final previewFuture = _explorer.previewFile(
@@ -809,6 +865,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
   }
 
   void _goUp() {
+    if (_goingUp) return;
     if (_showingRecent) {
       setState(() {
         _showingRecent = false;
@@ -823,9 +880,19 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     }
     final path = _currentPath;
     if (path == null) return;
-    final parent =
-        Uri.file(path).resolve('..').toFilePath(windows: path.contains('\\'));
-    if (parent != path) _openPath(parent);
+    _goingUp = true;
+    unawaited(() async {
+      try {
+        final parent = Directory(path).parent.path;
+        if (_normalizePath(parent) != _normalizePath(path)) {
+          await _openPathSafely(parent, fromUp: true);
+        } else {
+          _openExplorerHome();
+        }
+      } finally {
+        _goingUp = false;
+      }
+    }());
   }
 
   Future<void> _openWithPassword() async {
@@ -882,7 +949,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       return;
     }
     if (type == FileSystemEntityType.directory) {
-      _openPath(path.trim());
+      await _openPathSafely(path.trim());
     } else {
       final entry = await _explorer.entryForPath(path.trim());
       if (entry == null) {
@@ -895,30 +962,132 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
 
   Future<void> _searchDialog() async {
     final controller = TextEditingController(text: _searchQuery);
-    final query = await showDialog<String>(
+    var mode = _searchMode;
+    var useRegex = _searchUseRegex;
+    var recursive = _searchRecursive;
+    final result = await showDialog<_SearchDialogResult>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(_language.t('search.title')),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: InputDecoration(labelText: _language.t('search.query')),
-          onSubmitted: (_) => Navigator.pop(context, controller.text),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(_language.t('search.title')),
+          content: SizedBox(
+            width: 440,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  decoration:
+                      InputDecoration(labelText: _language.t('search.query')),
+                  onSubmitted: (_) => Navigator.pop(
+                    context,
+                    _SearchDialogResult(
+                      query: controller.text,
+                      mode: mode,
+                      useRegex: useRegex,
+                      recursive: recursive,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: mode,
+                  decoration:
+                      InputDecoration(labelText: _language.t('search.mode')),
+                  items: [
+                    DropdownMenuItem(
+                      value: 'name',
+                      child: Text(_language.t('search.mode.name')),
+                    ),
+                    DropdownMenuItem(
+                      value: 'nameContent',
+                      child: Text(_language.t('search.mode.name.content')),
+                    ),
+                    DropdownMenuItem(
+                      value: 'content',
+                      child: Text(_language.t('search.mode.content')),
+                    ),
+                  ],
+                  onChanged: (value) =>
+                      setDialogState(() => mode = value ?? 'name'),
+                ),
+                SwitchListTile(
+                  value: useRegex,
+                  onChanged: (value) => setDialogState(() => useRegex = value),
+                  title: Text(_language.t('search.regex')),
+                ),
+                SwitchListTile(
+                  value: recursive,
+                  onChanged: (value) => setDialogState(() => recursive = value),
+                  title: Text(_language.t('search.recursive')),
+                ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(
+                context,
+                _SearchDialogResult(
+                  query: '',
+                  mode: mode,
+                  useRegex: useRegex,
+                  recursive: recursive,
+                ),
+              ),
+              child: Text(_language.t('search.clear')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                context,
+                _SearchDialogResult(
+                  query: controller.text,
+                  mode: mode,
+                  useRegex: useRegex,
+                  recursive: recursive,
+                ),
+              ),
+              child: Text(_language.t('search.apply')),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, ''),
-            child: Text(_language.t('search.clear')),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: Text(_language.t('search.apply')),
-          ),
-        ],
       ),
     );
-    if (query == null) return;
-    setState(() => _searchQuery = query.trim());
+    if (result == null) return;
+    final query = result.query.trim();
+    final nextSettings = _settings.copyWith(
+      searchMode: result.mode,
+      searchUseRegex: result.useRegex,
+      searchRecursive: result.recursive,
+    );
+    unawaited(_settingsRepo.save(nextSettings));
+    setState(() {
+      _settings = nextSettings;
+      _searchQuery = query;
+      _searchMode = result.mode;
+      _searchUseRegex = result.useRegex;
+      _searchRecursive = result.recursive;
+    });
+    final path = _currentPath;
+    if (path == null || _showingRecent) return;
+    if (query.isEmpty) {
+      setState(() => _snapshot = _directorySnapshot(path));
+      return;
+    }
+    if (result.mode != 'name' || result.recursive) {
+      setState(() {
+        _snapshot = _explorer.searchDirectory(
+          path,
+          query: query,
+          mode: result.mode,
+          useRegex: result.useRegex,
+          recursive: result.recursive,
+          commonPassword: _commonEncryptionPassword,
+          filePassword: _activeFilePassword(),
+          decryptNames: _settings.decryptNamesInExplorer,
+        );
+      });
+    }
   }
 
   Future<void> _searchFiltersDialog() async {
@@ -987,6 +1156,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     switch (action) {
       case _EntryAction.open:
         await _openEntry(entry);
+      case _EntryAction.createFolder:
+        await _createFolder(entry);
       case _EntryAction.createPlain:
         await _createFile(entry, _CreateFileKind.plain);
       case _EntryAction.createEncryptedPlain:
@@ -1036,7 +1207,26 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       case _EntryAction.folderEncrypt:
       case _EntryAction.folderDecrypt:
         _snack(_language.t('snack.folder.actions.next'));
+      case _EntryAction.useAsGallery:
+      case _EntryAction.useAsVideo:
+      case _EntryAction.useAsMusic:
+      case _EntryAction.useAsMultimedia:
+        await _useFolderAs(entry, action);
     }
+  }
+
+  Future<void> _handleEmptyAreaAction(
+    String directoryPath,
+    _EntryAction action,
+  ) async {
+    final entry = ExplorerEntry(
+      name: basename(directoryPath),
+      path: directoryPath,
+      kind: ExplorerEntryKind.directory,
+      sizeBytes: 0,
+      modifiedAt: DateTime.now(),
+    );
+    await _handleEntryAction(entry, action);
   }
 
   Future<void> _pasteClipboard(String? targetDirectory) async {
@@ -1093,6 +1283,82 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       await _refresh();
     } catch (error) {
       _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _createFolder(ExplorerEntry entry) async {
+    final targetDir = entry.isDirectory ? entry.path : _currentPath;
+    if (targetDir == null) return;
+    final controller = TextEditingController(text: 'New folder');
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('create.folder')),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(labelText: _language.t('explorer.name')),
+          onSubmitted: (_) => Navigator.pop(context, controller.text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: Text(_language.t('explorer.create')),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.trim().isEmpty) return;
+    try {
+      final directory = await _explorer.createDirectory(targetDir, name);
+      _snack('${_language.t('snack.created')} ${directory.path}');
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _useFolderAs(ExplorerEntry entry, _EntryAction action) async {
+    if (!entry.isDirectory || !entry.exists) return;
+    var gallery = _settings.galleryFolders;
+    var music = _settings.musicFolders;
+    var video = _settings.videoFolders;
+    List<String> addPath(List<String> values) {
+      final next = <String>[entry.path, ...values];
+      final seen = <String>{};
+      return [
+        for (final item in next)
+          if (seen.add(Platform.isWindows ? item.toLowerCase() : item)) item,
+      ];
+    }
+
+    switch (action) {
+      case _EntryAction.useAsGallery:
+        gallery = addPath(gallery);
+      case _EntryAction.useAsMusic:
+        music = addPath(music);
+      case _EntryAction.useAsVideo:
+        video = addPath(video);
+      case _EntryAction.useAsMultimedia:
+        gallery = addPath(gallery);
+        music = addPath(music);
+        video = addPath(video);
+      default:
+        return;
+    }
+    final next = await _settingsRepo.updateMediaFolders(
+      _settings,
+      galleryFolders: gallery,
+      musicFolders: music,
+      videoFolders: video,
+    );
+    if (mounted) {
+      setState(() => _settings = next);
+      _snack(_language.t('settings.saved'));
     }
   }
 
@@ -1587,10 +1853,44 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
             appBar: AppBar(
               title: Text(currentPreview.title),
               actions: [
-                IconButton(
-                  onPressed: () => _openPreviewExternal(currentPreview),
-                  icon: const Icon(Icons.open_in_new),
-                  tooltip: _language.t('preview.external'),
+                PopupMenuButton<_PreviewAction>(
+                  icon: const Icon(Icons.more_vert),
+                  onSelected: (action) {
+                    switch (action) {
+                      case _PreviewAction.password:
+                        _openWithPassword();
+                      case _PreviewAction.window:
+                        break;
+                      case _PreviewAction.edit:
+                        _openEditor(currentPreview);
+                      case _PreviewAction.external:
+                        _openPreviewExternal(currentPreview);
+                      case _PreviewAction.hide:
+                        Navigator.pop(context);
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    if (_selected?.isEncrypted == true)
+                      PopupMenuItem(
+                        value: _PreviewAction.password,
+                        child: Text(_language.t('preview.open.password')),
+                      ),
+                    if (currentPreview.contentKind == FileContentKind.image ||
+                        currentPreview.contentKind == FileContentKind.audio ||
+                        currentPreview.contentKind == FileContentKind.video)
+                      PopupMenuItem(
+                        value: _PreviewAction.edit,
+                        child: Text(_language.t('editor.open')),
+                      ),
+                    PopupMenuItem(
+                      value: _PreviewAction.external,
+                      child: Text(_language.t('preview.external')),
+                    ),
+                    PopupMenuItem(
+                      value: _PreviewAction.hide,
+                      child: Text(_language.t('common.cancel')),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -1684,6 +1984,21 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     required List<String> documentFolders,
     required String documentExclusions,
     required bool torrentEnabled,
+    required bool storeSettingsInUserProfile,
+    required bool rememberLastFolder,
+    required String navigationPolicy,
+    required double interfaceTextScale,
+    required double toolbarIconScale,
+    required String searchMode,
+    required bool searchUseRegex,
+    required bool searchRecursive,
+    required String? programProxy,
+    required String? globalPluginProxy,
+    required bool enableBackgroundVideo,
+    required bool enableMiniVideo,
+    required bool enableMiniAudio,
+    required bool continueMediaInBackground,
+    required bool autoCloseMediaOnSectionChange,
   }) async {
     if (languageCode == 'custom' &&
         (customLanguagePath == null || customLanguagePath.trim().isEmpty)) {
@@ -1691,6 +2006,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     }
     if (languageCode == 'custom') {
       await AppLanguage.fromFile(customLanguagePath!.trim());
+    }
+
+    if (storeSettingsInUserProfile != _settings.storeSettingsInUserProfile) {
+      await AppPaths.setUseUserDataDirectory(storeSettingsInUserProfile);
     }
 
     final next = await _settingsRepo.setPasswords(
@@ -1728,6 +2047,21 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       documentFolders: documentFolders,
       documentExclusions: documentExclusions,
       torrentEnabled: torrentEnabled,
+      storeSettingsInUserProfile: storeSettingsInUserProfile,
+      rememberLastFolder: rememberLastFolder,
+      navigationPolicy: navigationPolicy,
+      interfaceTextScale: interfaceTextScale,
+      toolbarIconScale: toolbarIconScale,
+      searchMode: searchMode,
+      searchUseRegex: searchUseRegex,
+      searchRecursive: searchRecursive,
+      programProxy: programProxy,
+      globalPluginProxy: globalPluginProxy,
+      enableBackgroundVideo: enableBackgroundVideo,
+      enableMiniVideo: enableMiniVideo,
+      enableMiniAudio: enableMiniAudio,
+      continueMediaInBackground: continueMediaInBackground,
+      autoCloseMediaOnSectionChange: autoCloseMediaOnSectionChange,
     );
     await PlatformServices.setScreenProtection(next.blockScreenCapture);
     final language = await AppLanguage.load(next);
@@ -1735,6 +2069,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     setState(() {
       _settings = next;
       _language = language;
+      _searchMode = next.searchMode;
+      _searchUseRegex = next.searchUseRegex;
+      _searchRecursive = next.searchRecursive;
       if (!next.hasFilePassword) {
         _settingsRepo.loadCommonEncryptionPassword(next).then((value) {
           if (mounted) setState(() => _commonEncryptionPassword = value);
@@ -1781,6 +2118,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
     final pluginDefs = await _plugins.loadPlugins();
     setState(() => _pluginDefs = pluginDefs);
     return '${_language.t('settings.plugin.installed')} ${dir.path}';
+  }
+
+  Future<String> _exportConfigurationArchive() async {
+    final file = await _settingsRepo.exportConfigurationArchive();
+    return '${_language.t('settings.export.done')} ${file.path}';
   }
 
   Future<String> _exportLanguageSample() => AppLanguage.exportEnglishSample();
@@ -1836,14 +2178,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     if (_locked) {
-      return _LockScreen(
-        language: _language,
-        onUnlock: _unlock,
-        failed: _settings.failedLoginAttempts,
+      return _scaledInterface(
+        _LockScreen(
+          language: _language,
+          onUnlock: _unlock,
+          failed: _settings.failedLoginAttempts,
+        ),
       );
     }
 
-    return Scaffold(
+    return _scaledInterface(Scaffold(
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, c) {
@@ -1888,6 +2232,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                     onValidateLanguageFile: _validateLanguageFile,
                     onInstallLanguageFile: _installLanguageFile,
                     onInstallPluginZip: _installPluginZip,
+                    onExportConfigurationArchive: _exportConfigurationArchive,
                     onExportLanguageSample: _exportLanguageSample,
                   )
                 : _page == ShellPage.gallery
@@ -1937,6 +2282,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                             previewVisible: _previewVisible,
                             fileTextScale: _effectiveTextScale(context),
                             fileIconScale: _effectiveIconScale(context),
+                            toolbarIconScale: _settings.toolbarIconScale
+                                .clamp(0.75, 2.5)
+                                .toDouble(),
                             onPreviewResize: (delta) => setState(
                               () => _previewWidth =
                                   (_previewWidth - delta).clamp(280.0, 1800.0),
@@ -1952,10 +2300,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
                             favoritePaths: _settings.favoritePaths,
                             recentPaths: _settings.recentFilePaths,
                             searchQuery: _searchQuery,
+                            searchUseRegex: _searchUseRegex,
+                            localSearchEnabled:
+                                _searchMode == 'name' && !_searchRecursive,
                             onPathEdit: _editPathDialog,
                             onSearch: _searchDialog,
                             onSearchFilters: _searchFiltersDialog,
                             onEntryAction: _handleEntryAction,
+                            onEmptyAreaAction: _handleEmptyAreaAction,
                             onRemoveRecent: _removeRecentPath,
                             onToggleFavorite: _toggleFavorite,
                             onEntry: _openEntry,
@@ -1982,6 +2334,15 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
           },
         ),
       ),
+    ));
+  }
+
+  Widget _scaledInterface(Widget child) {
+    final scale = _settings.interfaceTextScale.clamp(0.75, 2.2).toDouble();
+    return MediaQuery(
+      data:
+          MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(scale)),
+      child: child,
     );
   }
 
@@ -2336,6 +2697,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen> {
         '_',
       );
 
+  String _normalizePath(String path) {
+    var value = path.replaceAll('\\', '/');
+    if (value.length > 1 && value.endsWith('/')) {
+      value = value.substring(0, value.length - 1);
+    }
+    return Platform.isWindows ? value.toLowerCase() : value;
+  }
+
   String? _activeFilePassword() {
     final password = _filePassword;
     if (password == null || password.isEmpty) {
@@ -2375,6 +2744,7 @@ enum _CommonSetupDecision { cancel, unique, settings }
 
 enum _EntryAction {
   open,
+  createFolder,
   createPlain,
   createEncryptedPlain,
   createCsv,
@@ -2397,6 +2767,10 @@ enum _EntryAction {
   folderContainer,
   folderEncrypt,
   folderDecrypt,
+  useAsGallery,
+  useAsVideo,
+  useAsMusic,
+  useAsMultimedia,
 }
 
 enum _PreviewAction { password, window, edit, external, hide }
@@ -3053,6 +3427,7 @@ class _ExplorerView extends StatelessWidget {
     required this.previewVisible,
     required this.fileTextScale,
     required this.fileIconScale,
+    required this.toolbarIconScale,
     required this.onPreviewResize,
     required this.onTogglePreview,
     required this.onOpenPassword,
@@ -3064,10 +3439,13 @@ class _ExplorerView extends StatelessWidget {
     required this.favoritePaths,
     required this.recentPaths,
     required this.searchQuery,
+    required this.searchUseRegex,
+    required this.localSearchEnabled,
     required this.onPathEdit,
     required this.onSearch,
     required this.onSearchFilters,
     required this.onEntryAction,
+    required this.onEmptyAreaAction,
     required this.onRemoveRecent,
     required this.onToggleFavorite,
     required this.onEntry,
@@ -3089,6 +3467,7 @@ class _ExplorerView extends StatelessWidget {
   final bool previewVisible;
   final double fileTextScale;
   final double fileIconScale;
+  final double toolbarIconScale;
   final ValueChanged<double> onPreviewResize;
   final VoidCallback onTogglePreview;
   final VoidCallback onOpenPassword;
@@ -3100,10 +3479,13 @@ class _ExplorerView extends StatelessWidget {
   final List<String> favoritePaths;
   final List<String> recentPaths;
   final String searchQuery;
+  final bool searchUseRegex;
+  final bool localSearchEnabled;
   final VoidCallback onPathEdit;
   final VoidCallback onSearch;
   final VoidCallback onSearchFilters;
   final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
+  final Future<void> Function(String, _EntryAction) onEmptyAreaAction;
   final ValueChanged<String> onRemoveRecent;
   final ValueChanged<ExplorerEntry> onToggleFavorite;
   final Future<void> Function(ExplorerEntry) onEntry;
@@ -3125,12 +3507,12 @@ class _ExplorerView extends StatelessWidget {
           children: [
             IconButton(
               onPressed: onUp,
-              icon: const Icon(Icons.arrow_upward),
+              icon: Icon(Icons.arrow_upward, size: 24 * toolbarIconScale),
               tooltip: language.t('explorer.up'),
             ),
             IconButton(
               onPressed: onRefresh,
-              icon: const Icon(Icons.refresh),
+              icon: Icon(Icons.refresh, size: 24 * toolbarIconScale),
               tooltip: language.t('explorer.refresh'),
             ),
             SizedBox(
@@ -3146,22 +3528,27 @@ class _ExplorerView extends StatelessWidget {
             ),
             IconButton.filled(
               onPressed: onImport,
-              icon: const Icon(Icons.file_upload_outlined),
+              icon:
+                  Icon(Icons.file_upload_outlined, size: 24 * toolbarIconScale),
               tooltip: language.t('explorer.upload'),
             ),
             IconButton.outlined(
               onPressed: onExport,
-              icon: const Icon(Icons.file_download_outlined),
+              icon: Icon(Icons.file_download_outlined,
+                  size: 24 * toolbarIconScale),
               tooltip: language.t('explorer.download'),
             ),
             IconButton(
               onPressed: onSearch,
-              icon: Icon(searchQuery.isEmpty ? Icons.search : Icons.search_off),
+              icon: Icon(
+                searchQuery.isEmpty ? Icons.search : Icons.search_off,
+                size: 24 * toolbarIconScale,
+              ),
               tooltip: language.t('search.title'),
             ),
             IconButton(
               onPressed: onSearchFilters,
-              icon: const Icon(Icons.tune_outlined),
+              icon: Icon(Icons.tune_outlined, size: 24 * toolbarIconScale),
               tooltip: language.t('search.filters'),
             ),
             IconButton(
@@ -3170,6 +3557,7 @@ class _ExplorerView extends StatelessWidget {
                 previewVisible
                     ? Icons.visibility_off_outlined
                     : Icons.visibility_outlined,
+                size: 24 * toolbarIconScale,
               ),
               tooltip: previewVisible
                   ? language.t('preview.hide')
@@ -3192,7 +3580,11 @@ class _ExplorerView extends StatelessWidget {
             favoritePaths: favoritePaths,
             recentPaths: recentPaths,
             searchQuery: searchQuery,
+            searchUseRegex: searchUseRegex,
+            localSearchEnabled: localSearchEnabled,
             onEntryAction: onEntryAction,
+            currentPath: currentPath,
+            onEmptyAreaAction: onEmptyAreaAction,
             onRemoveRecent: onRemoveRecent,
             onToggleFavorite: onToggleFavorite,
           );
@@ -3244,7 +3636,11 @@ class _EntryList extends StatelessWidget {
     required this.favoritePaths,
     required this.recentPaths,
     required this.searchQuery,
+    required this.searchUseRegex,
+    required this.localSearchEnabled,
+    required this.currentPath,
     required this.onEntryAction,
+    required this.onEmptyAreaAction,
     required this.onRemoveRecent,
     required this.onToggleFavorite,
   });
@@ -3260,7 +3656,11 @@ class _EntryList extends StatelessWidget {
   final List<String> favoritePaths;
   final List<String> recentPaths;
   final String searchQuery;
+  final bool searchUseRegex;
+  final bool localSearchEnabled;
+  final String? currentPath;
   final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
+  final Future<void> Function(String, _EntryAction) onEmptyAreaAction;
   final ValueChanged<String> onRemoveRecent;
   final ValueChanged<ExplorerEntry> onToggleFavorite;
 
@@ -3285,21 +3685,34 @@ class _EntryList extends StatelessWidget {
             ),
           );
         }
-        final entries = searchQuery.isEmpty
+        final entries = searchQuery.isEmpty || !localSearchEnabled
             ? data.entries
             : data.entries
-                .where((entry) => entry.name
-                    .toLowerCase()
-                    .contains(searchQuery.toLowerCase()))
+                .where((entry) => _matchesSearch(entry.name))
                 .toList();
         if (entries.isEmpty) {
-          return Center(child: Text(language.t('explorer.empty')));
+          return _EmptyExplorerArea(
+            language: language,
+            currentPath: currentPath,
+            canPaste: canPaste,
+            onAction: onEmptyAreaAction,
+            child: Center(child: Text(language.t('explorer.empty'))),
+          );
         }
         return ListView.separated(
           padding: const EdgeInsets.all(12),
-          itemCount: entries.length,
+          itemCount: entries.length + 1,
           separatorBuilder: (_, __) => const Divider(height: 1),
           itemBuilder: (context, i) {
+            if (i == entries.length) {
+              return _EmptyExplorerArea(
+                language: language,
+                currentPath: currentPath,
+                canPaste: canPaste,
+                onAction: onEmptyAreaAction,
+                child: const SizedBox(height: 240),
+              );
+            }
             final entry = entries[i];
             return GestureDetector(
               onSecondaryTapDown: (details) =>
@@ -3346,6 +3759,18 @@ class _EntryList extends StatelessWidget {
     );
   }
 
+  bool _matchesSearch(String value) {
+    if (searchQuery.isEmpty) return true;
+    if (searchUseRegex) {
+      try {
+        return RegExp(searchQuery, caseSensitive: false).hasMatch(value);
+      } catch (_) {
+        return value.toLowerCase().contains(searchQuery.toLowerCase());
+      }
+    }
+    return value.toLowerCase().contains(searchQuery.toLowerCase());
+  }
+
   Future<void> _showEntryContextMenu(
     BuildContext context,
     ExplorerEntry entry,
@@ -3375,12 +3800,26 @@ class _EntryList extends StatelessWidget {
   List<PopupMenuEntry<_EntryAction>> _entryMenuItems(ExplorerEntry entry) {
     final isFavorite = favoritePaths.contains(entry.path);
     final isRecent = recentPaths.contains(entry.path);
+    if (entry.isNavigationEntry) {
+      return [
+        PopupMenuItem(
+          value: _EntryAction.open,
+          child: Text(language.t('common.open')),
+        ),
+      ];
+    }
     return <PopupMenuEntry<_EntryAction>>[
       PopupMenuItem(
         value: _EntryAction.open,
         child: Text(language.t('common.open')),
       ),
       const PopupMenuDivider(),
+      PopupMenuItem(
+        value: _EntryAction.createFolder,
+        enabled: entry.exists && entry.isDirectory,
+        child: Text(
+            '${language.t('explorer.create')} > ${language.t('create.folder')}'),
+      ),
       PopupMenuItem(
         value: _EntryAction.createPlain,
         enabled: entry.exists && entry.isDirectory,
@@ -3505,6 +3944,35 @@ class _EntryList extends StatelessWidget {
           enabled: entry.exists,
           child: Text(language.t('explorer.folder.decrypt')),
         ),
+      if (entry.isDirectory) const PopupMenuDivider(),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.useAsGallery,
+          enabled: entry.exists,
+          child: Text(
+              '${language.t('explorer.use.as')} > ${language.t('explorer.use.as.gallery')}'),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.useAsVideo,
+          enabled: entry.exists,
+          child: Text(
+              '${language.t('explorer.use.as')} > ${language.t('explorer.use.as.video')}'),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.useAsMusic,
+          enabled: entry.exists,
+          child: Text(
+              '${language.t('explorer.use.as')} > ${language.t('explorer.use.as.music')}'),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.useAsMultimedia,
+          enabled: entry.exists,
+          child: Text(
+              '${language.t('explorer.use.as')} > ${language.t('explorer.use.as.multimedia')}'),
+        ),
     ];
   }
 
@@ -3512,6 +3980,7 @@ class _EntryList extends StatelessWidget {
     switch (action) {
       case _EntryAction.open:
         onEntry(entry);
+      case _EntryAction.createFolder:
       case _EntryAction.createPlain:
       case _EntryAction.createEncryptedPlain:
       case _EntryAction.createCsv:
@@ -3531,6 +4000,10 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.folderContainer:
       case _EntryAction.folderEncrypt:
       case _EntryAction.folderDecrypt:
+      case _EntryAction.useAsGallery:
+      case _EntryAction.useAsVideo:
+      case _EntryAction.useAsMusic:
+      case _EntryAction.useAsMultimedia:
         onEntryAction(entry, action);
       case _EntryAction.addFavorite:
       case _EntryAction.removeFavorite:
@@ -3540,13 +4013,15 @@ class _EntryList extends StatelessWidget {
     }
   }
 
-  IconData _icon(ExplorerEntry entry) => switch (entry.kind) {
-        ExplorerEntryKind.directory => Icons.folder,
-        ExplorerEntryKind.encryptedFile => Icons.lock_outline,
-        ExplorerEntryKind.folderMeta => Icons.description_outlined,
-        ExplorerEntryKind.file => Icons.insert_drive_file_outlined,
-        ExplorerEntryKind.unknown => Icons.help_outline,
-      };
+  IconData _icon(ExplorerEntry entry) => entry.isNavigationEntry
+      ? Icons.more_horiz
+      : switch (entry.kind) {
+          ExplorerEntryKind.directory => Icons.folder,
+          ExplorerEntryKind.encryptedFile => Icons.lock_outline,
+          ExplorerEntryKind.folderMeta => Icons.description_outlined,
+          ExplorerEntryKind.file => Icons.insert_drive_file_outlined,
+          ExplorerEntryKind.unknown => Icons.help_outline,
+        };
 
   Color? _color(ExplorerEntry entry) => switch (entry.kind) {
         ExplorerEntryKind.directory => const Color(0xFFD29522),
@@ -3565,6 +4040,89 @@ class _EntryList extends StatelessWidget {
 
   String _date(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+}
+
+class _EmptyExplorerArea extends StatelessWidget {
+  const _EmptyExplorerArea({
+    required this.language,
+    required this.currentPath,
+    required this.canPaste,
+    required this.onAction,
+    required this.child,
+  });
+
+  final AppLanguage language;
+  final String? currentPath;
+  final bool canPaste;
+  final Future<void> Function(String, _EntryAction) onAction;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapDown: (details) =>
+          _showMenu(context, details.globalPosition),
+      onLongPress: () => _showMenu(context, null),
+      child: child,
+    );
+  }
+
+  Future<void> _showMenu(BuildContext context, Offset? position) async {
+    final path = currentPath;
+    if (path == null) return;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final selected = await showMenu<_EntryAction>(
+      context: context,
+      position: position == null
+          ? RelativeRect.fromLTRB(
+              overlay.size.width / 2,
+              overlay.size.height / 2,
+              overlay.size.width / 2,
+              overlay.size.height / 2,
+            )
+          : RelativeRect.fromRect(
+              Rect.fromLTWH(position.dx, position.dy, 1, 1),
+              Offset.zero & overlay.size,
+            ),
+      items: [
+        PopupMenuItem(
+          value: _EntryAction.paste,
+          enabled: canPaste,
+          child: Text(language.t('explorer.paste')),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(
+          value: _EntryAction.createFolder,
+          child: Text(
+              '${language.t('explorer.create')} > ${language.t('create.folder')}'),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createPlain,
+          child: Text(
+              '${language.t('explorer.create')} > ${language.t('create.plain')}'),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createEncryptedPlain,
+          child: Text(
+              '${language.t('explorer.create')} > ${language.t('create.encrypted.plain')}'),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createCsv,
+          child: Text(
+              '${language.t('explorer.create')} > ${language.t('create.csv')}'),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createImage,
+          child: Text(
+              '${language.t('explorer.create')} > ${language.t('create.image')}'),
+        ),
+      ],
+    );
+    if (selected != null) {
+      await onAction(path, selected);
+    }
+  }
 }
 
 class _PreviewPane extends StatelessWidget {
@@ -4948,6 +5506,7 @@ class _SettingsView extends StatefulWidget {
     required this.onValidateLanguageFile,
     required this.onInstallLanguageFile,
     required this.onInstallPluginZip,
+    required this.onExportConfigurationArchive,
     required this.onExportLanguageSample,
   });
 
@@ -4987,6 +5546,21 @@ class _SettingsView extends StatefulWidget {
     required List<String> documentFolders,
     required String documentExclusions,
     required bool torrentEnabled,
+    required bool storeSettingsInUserProfile,
+    required bool rememberLastFolder,
+    required String navigationPolicy,
+    required double interfaceTextScale,
+    required double toolbarIconScale,
+    required String searchMode,
+    required bool searchUseRegex,
+    required bool searchRecursive,
+    required String? programProxy,
+    required String? globalPluginProxy,
+    required bool enableBackgroundVideo,
+    required bool enableMiniVideo,
+    required bool enableMiniAudio,
+    required bool continueMediaInBackground,
+    required bool autoCloseMediaOnSectionChange,
   }) onSave;
   final Future<void> Function() onRequestAndroidStorageAccess;
   final Future<void> Function() onClear;
@@ -4994,6 +5568,7 @@ class _SettingsView extends StatefulWidget {
   final Future<String> Function(String path) onValidateLanguageFile;
   final Future<String> Function(String path) onInstallLanguageFile;
   final Future<String> Function(String path) onInstallPluginZip;
+  final Future<String> Function() onExportConfigurationArchive;
   final Future<String> Function() onExportLanguageSample;
 
   @override
@@ -5015,6 +5590,10 @@ class _SettingsViewState extends State<_SettingsView> {
   late final TextEditingController _favoriteSidebarCount;
   late final TextEditingController _fileTextScale;
   late final TextEditingController _fileIconScale;
+  late final TextEditingController _interfaceTextScale;
+  late final TextEditingController _toolbarIconScale;
+  late final TextEditingController _programProxy;
+  late final TextEditingController _globalPluginProxy;
   late final TextEditingController _galleryFolders;
   late final TextEditingController _galleryExclusions;
   late final TextEditingController _musicFolders;
@@ -5035,8 +5614,19 @@ class _SettingsViewState extends State<_SettingsView> {
   late bool _autoScaleForDpi;
   late bool _torrentEnabled;
   late bool _blockScreenCapture;
+  late bool _storeSettingsInUserProfile;
+  late bool _rememberLastFolder;
+  late bool _searchUseRegex;
+  late bool _searchRecursive;
+  late bool _enableBackgroundVideo;
+  late bool _enableMiniVideo;
+  late bool _enableMiniAudio;
+  late bool _continueMediaInBackground;
+  late bool _autoCloseMediaOnSectionChange;
   late String _languageCode;
   late String _commonAlgorithm;
+  late String _navigationPolicy;
+  late String _searchMode;
   var _busy = false;
 
   @override
@@ -5052,7 +5642,19 @@ class _SettingsViewState extends State<_SettingsView> {
     _autoScaleForDpi = widget.settings.autoScaleForDpi;
     _torrentEnabled = widget.settings.torrentEnabled;
     _blockScreenCapture = widget.settings.blockScreenCapture;
+    _storeSettingsInUserProfile = widget.settings.storeSettingsInUserProfile;
+    _rememberLastFolder = widget.settings.rememberLastFolder;
+    _searchUseRegex = widget.settings.searchUseRegex;
+    _searchRecursive = widget.settings.searchRecursive;
+    _enableBackgroundVideo = widget.settings.enableBackgroundVideo;
+    _enableMiniVideo = widget.settings.enableMiniVideo;
+    _enableMiniAudio = widget.settings.enableMiniAudio;
+    _continueMediaInBackground = widget.settings.continueMediaInBackground;
+    _autoCloseMediaOnSectionChange =
+        widget.settings.autoCloseMediaOnSectionChange;
     _commonAlgorithm = widget.settings.commonEncryptionAlgorithm;
+    _navigationPolicy = widget.settings.navigationPolicy;
+    _searchMode = widget.settings.searchMode;
     _commonKeyFile = TextEditingController(
       text: widget.settings.commonEncryptionKeyFilePath ?? '',
     );
@@ -5073,6 +5675,18 @@ class _SettingsViewState extends State<_SettingsView> {
     );
     _fileIconScale = TextEditingController(
       text: widget.settings.fileIconScale.toStringAsFixed(2),
+    );
+    _interfaceTextScale = TextEditingController(
+      text: widget.settings.interfaceTextScale.toStringAsFixed(2),
+    );
+    _toolbarIconScale = TextEditingController(
+      text: widget.settings.toolbarIconScale.toStringAsFixed(2),
+    );
+    _programProxy = TextEditingController(
+      text: widget.settings.programProxy ?? '',
+    );
+    _globalPluginProxy = TextEditingController(
+      text: widget.settings.globalPluginProxy ?? '',
     );
     _galleryFolders = TextEditingController(
       text: widget.settings.galleryFolders.join('\n'),
@@ -5126,6 +5740,10 @@ class _SettingsViewState extends State<_SettingsView> {
     _favoriteSidebarCount.dispose();
     _fileTextScale.dispose();
     _fileIconScale.dispose();
+    _interfaceTextScale.dispose();
+    _toolbarIconScale.dispose();
+    _programProxy.dispose();
+    _globalPluginProxy.dispose();
     _galleryFolders.dispose();
     _galleryExclusions.dispose();
     _musicFolders.dispose();
@@ -5154,6 +5772,56 @@ class _SettingsViewState extends State<_SettingsView> {
       const SizedBox(height: 8),
       Text(language.t('settings.description')),
       const SizedBox(height: 18),
+      _settingsCard(context, language.t('settings.storage'), [
+        SwitchListTile(
+          value: _storeSettingsInUserProfile,
+          onChanged: (v) => setState(() => _storeSettingsInUserProfile = v),
+          title: Text(language.t('settings.storage.user')),
+          subtitle: Text(language.t('settings.storage.note')),
+        ),
+        SwitchListTile(
+          value: _rememberLastFolder,
+          onChanged: (v) => setState(() => _rememberLastFolder = v),
+          title: Text(language.t('settings.remember.last.folder')),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _navigationPolicy,
+          decoration: InputDecoration(
+              labelText: language.t('settings.navigation.policy')),
+          items: [
+            DropdownMenuItem(
+              value: 'ask',
+              child: Text(language.t('settings.navigation.ask')),
+            ),
+            DropdownMenuItem(
+              value: 'deny',
+              child: Text(language.t('settings.navigation.deny')),
+            ),
+            DropdownMenuItem(
+              value: 'allow',
+              child: Text(language.t('settings.navigation.allow')),
+            ),
+            DropdownMenuItem(
+              value: 'fallbackToLocations',
+              child: Text(language.t('settings.navigation.fallback')),
+            ),
+            DropdownMenuItem(
+              value: 'requestRoot',
+              child: Text(language.t('settings.navigation.root')),
+            ),
+          ],
+          onChanged: (value) => setState(
+              () => _navigationPolicy = value ?? 'fallbackToLocations'),
+        ),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          OutlinedButton.icon(
+            onPressed: _exportConfiguration,
+            icon: const Icon(Icons.archive_outlined),
+            label: Text(language.t('settings.export.config')),
+          ),
+        ]),
+      ]),
+      const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.passwords'), [
         if (widget.settings.hasAppPassword)
           TextField(
@@ -5347,6 +6015,50 @@ class _SettingsViewState extends State<_SettingsView> {
             labelText: language.t('settings.file.icon.scale'),
           ),
         ),
+        TextField(
+          controller: _interfaceTextScale,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.interface.text.scale'),
+          ),
+        ),
+        TextField(
+          controller: _toolbarIconScale,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.toolbar.icon.scale'),
+          ),
+        ),
+        DropdownButtonFormField<String>(
+          initialValue: _searchMode,
+          decoration:
+              InputDecoration(labelText: language.t('settings.search.default')),
+          items: [
+            DropdownMenuItem(
+              value: 'name',
+              child: Text(language.t('search.mode.name')),
+            ),
+            DropdownMenuItem(
+              value: 'nameContent',
+              child: Text(language.t('search.mode.name.content')),
+            ),
+            DropdownMenuItem(
+              value: 'content',
+              child: Text(language.t('search.mode.content')),
+            ),
+          ],
+          onChanged: (value) => setState(() => _searchMode = value ?? 'name'),
+        ),
+        SwitchListTile(
+          value: _searchUseRegex,
+          onChanged: (v) => setState(() => _searchUseRegex = v),
+          title: Text(language.t('search.regex')),
+        ),
+        SwitchListTile(
+          value: _searchRecursive,
+          onChanged: (v) => setState(() => _searchRecursive = v),
+          title: Text(language.t('search.recursive')),
+        ),
       ]),
       const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.media.sections'), [
@@ -5362,6 +6074,47 @@ class _SettingsViewState extends State<_SettingsView> {
           value: _torrentEnabled,
           onChanged: (v) => setState(() => _torrentEnabled = v),
           title: Text(language.t('settings.torrent.enabled')),
+        ),
+      ]),
+      const SizedBox(height: 12),
+      _settingsCard(context, language.t('settings.background.media'), [
+        SwitchListTile(
+          value: _enableBackgroundVideo,
+          onChanged: (v) => setState(() => _enableBackgroundVideo = v),
+          title: Text(language.t('settings.background.video')),
+        ),
+        SwitchListTile(
+          value: _enableMiniVideo,
+          onChanged: (v) => setState(() => _enableMiniVideo = v),
+          title: Text(language.t('settings.background.video.mini')),
+        ),
+        SwitchListTile(
+          value: _enableMiniAudio,
+          onChanged: (v) => setState(() => _enableMiniAudio = v),
+          title: Text(language.t('settings.background.audio.mini')),
+        ),
+        SwitchListTile(
+          value: _continueMediaInBackground,
+          onChanged: (v) => setState(() => _continueMediaInBackground = v),
+          title: Text(language.t('settings.background.continue')),
+        ),
+        SwitchListTile(
+          value: _autoCloseMediaOnSectionChange,
+          onChanged: (v) => setState(() => _autoCloseMediaOnSectionChange = v),
+          title: Text(language.t('settings.background.autoclose')),
+        ),
+      ]),
+      const SizedBox(height: 12),
+      _settingsCard(context, language.t('settings.proxy'), [
+        TextField(
+          controller: _programProxy,
+          decoration:
+              InputDecoration(labelText: language.t('settings.proxy.program')),
+        ),
+        TextField(
+          controller: _globalPluginProxy,
+          decoration:
+              InputDecoration(labelText: language.t('settings.proxy.plugins')),
         ),
       ]),
       const SizedBox(height: 12),
@@ -5557,6 +6310,26 @@ class _SettingsViewState extends State<_SettingsView> {
         documentFolders: _parseLines(_documentFolders.text),
         documentExclusions: _documentExclusions.text,
         torrentEnabled: _torrentEnabled,
+        storeSettingsInUserProfile: _storeSettingsInUserProfile,
+        rememberLastFolder: _rememberLastFolder,
+        navigationPolicy: _navigationPolicy,
+        interfaceTextScale:
+            double.tryParse(_interfaceTextScale.text.trim()) ?? 1.0,
+        toolbarIconScale: double.tryParse(_toolbarIconScale.text.trim()) ?? 1.0,
+        searchMode: _searchMode,
+        searchUseRegex: _searchUseRegex,
+        searchRecursive: _searchRecursive,
+        programProxy: _programProxy.text.trim().isEmpty
+            ? null
+            : _programProxy.text.trim(),
+        globalPluginProxy: _globalPluginProxy.text.trim().isEmpty
+            ? null
+            : _globalPluginProxy.text.trim(),
+        enableBackgroundVideo: _enableBackgroundVideo,
+        enableMiniVideo: _enableMiniVideo,
+        enableMiniAudio: _enableMiniAudio,
+        continueMediaInBackground: _continueMediaInBackground,
+        autoCloseMediaOnSectionChange: _autoCloseMediaOnSectionChange,
       );
     } catch (error) {
       _snack('${widget.language.t('settings.language.invalid')} $error');
@@ -5595,6 +6368,15 @@ class _SettingsViewState extends State<_SettingsView> {
       _snack(message);
     } catch (error) {
       _snack('${widget.language.t('settings.language.invalid')} $error');
+    }
+  }
+
+  Future<void> _exportConfiguration() async {
+    try {
+      final message = await widget.onExportConfigurationArchive();
+      _snack(message);
+    } catch (error) {
+      _snack('$error');
     }
   }
 

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:archive/archive.dart';
 
 import '../storage/app_paths.dart';
 import 'vault_crypto.dart';
@@ -48,6 +49,23 @@ class SecuritySettings {
     this.documentExclusions = '',
     this.torrentEnabled = true,
     this.androidStoragePermissionPromptDismissed = false,
+    this.storeSettingsInUserProfile = false,
+    this.rememberLastFolder = true,
+    this.lastOpenedFolder,
+    this.navigationPolicy = 'fallbackToLocations',
+    this.interfaceTextScale = 1.0,
+    this.toolbarIconScale = 1.0,
+    this.searchMode = 'name',
+    this.searchUseRegex = false,
+    this.searchRecursive = false,
+    this.programProxy,
+    this.globalPluginProxy,
+    this.pluginProxyById = const <String, String>{},
+    this.enableBackgroundVideo = true,
+    this.enableMiniVideo = true,
+    this.enableMiniAudio = true,
+    this.continueMediaInBackground = true,
+    this.autoCloseMediaOnSectionChange = false,
   });
 
   final String? appPasswordSalt;
@@ -90,6 +108,23 @@ class SecuritySettings {
   final String documentExclusions;
   final bool torrentEnabled;
   final bool androidStoragePermissionPromptDismissed;
+  final bool storeSettingsInUserProfile;
+  final bool rememberLastFolder;
+  final String? lastOpenedFolder;
+  final String navigationPolicy;
+  final double interfaceTextScale;
+  final double toolbarIconScale;
+  final String searchMode;
+  final bool searchUseRegex;
+  final bool searchRecursive;
+  final String? programProxy;
+  final String? globalPluginProxy;
+  final Map<String, String> pluginProxyById;
+  final bool enableBackgroundVideo;
+  final bool enableMiniVideo;
+  final bool enableMiniAudio;
+  final bool continueMediaInBackground;
+  final bool autoCloseMediaOnSectionChange;
 
   bool get hasAppPassword =>
       appPasswordSalt != null && appPasswordDigest != null;
@@ -145,6 +180,26 @@ class SecuritySettings {
     String? documentExclusions,
     bool? torrentEnabled,
     bool? androidStoragePermissionPromptDismissed,
+    bool? storeSettingsInUserProfile,
+    bool? rememberLastFolder,
+    String? lastOpenedFolder,
+    bool clearLastOpenedFolder = false,
+    String? navigationPolicy,
+    double? interfaceTextScale,
+    double? toolbarIconScale,
+    String? searchMode,
+    bool? searchUseRegex,
+    bool? searchRecursive,
+    String? programProxy,
+    bool clearProgramProxy = false,
+    String? globalPluginProxy,
+    bool clearGlobalPluginProxy = false,
+    Map<String, String>? pluginProxyById,
+    bool? enableBackgroundVideo,
+    bool? enableMiniVideo,
+    bool? enableMiniAudio,
+    bool? continueMediaInBackground,
+    bool? autoCloseMediaOnSectionChange,
   }) {
     return SecuritySettings(
       appPasswordSalt:
@@ -214,6 +269,32 @@ class SecuritySettings {
       androidStoragePermissionPromptDismissed:
           androidStoragePermissionPromptDismissed ??
               this.androidStoragePermissionPromptDismissed,
+      storeSettingsInUserProfile:
+          storeSettingsInUserProfile ?? this.storeSettingsInUserProfile,
+      rememberLastFolder: rememberLastFolder ?? this.rememberLastFolder,
+      lastOpenedFolder: clearLastOpenedFolder
+          ? null
+          : lastOpenedFolder ?? this.lastOpenedFolder,
+      navigationPolicy: navigationPolicy ?? this.navigationPolicy,
+      interfaceTextScale: interfaceTextScale ?? this.interfaceTextScale,
+      toolbarIconScale: toolbarIconScale ?? this.toolbarIconScale,
+      searchMode: searchMode ?? this.searchMode,
+      searchUseRegex: searchUseRegex ?? this.searchUseRegex,
+      searchRecursive: searchRecursive ?? this.searchRecursive,
+      programProxy:
+          clearProgramProxy ? null : programProxy ?? this.programProxy,
+      globalPluginProxy: clearGlobalPluginProxy
+          ? null
+          : globalPluginProxy ?? this.globalPluginProxy,
+      pluginProxyById: pluginProxyById ?? this.pluginProxyById,
+      enableBackgroundVideo:
+          enableBackgroundVideo ?? this.enableBackgroundVideo,
+      enableMiniVideo: enableMiniVideo ?? this.enableMiniVideo,
+      enableMiniAudio: enableMiniAudio ?? this.enableMiniAudio,
+      continueMediaInBackground:
+          continueMediaInBackground ?? this.continueMediaInBackground,
+      autoCloseMediaOnSectionChange:
+          autoCloseMediaOnSectionChange ?? this.autoCloseMediaOnSectionChange,
     );
   }
 
@@ -223,6 +304,7 @@ class SecuritySettings {
     final associations = json['extensionAssociations'];
     final favorites = json['favoritePaths'];
     final recent = json['recentFilePaths'];
+    final pluginProxy = json['pluginProxyById'];
     List<String> listField(String key) {
       final value = json[key];
       return value is List
@@ -288,6 +370,31 @@ class SecuritySettings {
       torrentEnabled: json['torrentEnabled'] as bool? ?? true,
       androidStoragePermissionPromptDismissed:
           json['androidStoragePermissionPromptDismissed'] as bool? ?? false,
+      storeSettingsInUserProfile:
+          json['storeSettingsInUserProfile'] as bool? ?? false,
+      rememberLastFolder: json['rememberLastFolder'] as bool? ?? true,
+      lastOpenedFolder: json['lastOpenedFolder'] as String?,
+      navigationPolicy:
+          json['navigationPolicy'] as String? ?? 'fallbackToLocations',
+      interfaceTextScale:
+          (json['interfaceTextScale'] as num?)?.toDouble() ?? 1.0,
+      toolbarIconScale: (json['toolbarIconScale'] as num?)?.toDouble() ?? 1.0,
+      searchMode: json['searchMode'] as String? ?? 'name',
+      searchUseRegex: json['searchUseRegex'] as bool? ?? false,
+      searchRecursive: json['searchRecursive'] as bool? ?? false,
+      programProxy: json['programProxy'] as String?,
+      globalPluginProxy: json['globalPluginProxy'] as String?,
+      pluginProxyById: pluginProxy is Map
+          ? pluginProxy
+              .map((key, value) => MapEntry(key.toString(), value.toString()))
+          : const <String, String>{},
+      enableBackgroundVideo: json['enableBackgroundVideo'] as bool? ?? true,
+      enableMiniVideo: json['enableMiniVideo'] as bool? ?? true,
+      enableMiniAudio: json['enableMiniAudio'] as bool? ?? true,
+      continueMediaInBackground:
+          json['continueMediaInBackground'] as bool? ?? true,
+      autoCloseMediaOnSectionChange:
+          json['autoCloseMediaOnSectionChange'] as bool? ?? false,
     );
   }
 
@@ -334,6 +441,23 @@ class SecuritySettings {
       'torrentEnabled': torrentEnabled,
       'androidStoragePermissionPromptDismissed':
           androidStoragePermissionPromptDismissed,
+      'storeSettingsInUserProfile': storeSettingsInUserProfile,
+      'rememberLastFolder': rememberLastFolder,
+      'lastOpenedFolder': lastOpenedFolder,
+      'navigationPolicy': navigationPolicy,
+      'interfaceTextScale': interfaceTextScale,
+      'toolbarIconScale': toolbarIconScale,
+      'searchMode': searchMode,
+      'searchUseRegex': searchUseRegex,
+      'searchRecursive': searchRecursive,
+      'programProxy': programProxy,
+      'globalPluginProxy': globalPluginProxy,
+      'pluginProxyById': pluginProxyById,
+      'enableBackgroundVideo': enableBackgroundVideo,
+      'enableMiniVideo': enableMiniVideo,
+      'enableMiniAudio': enableMiniAudio,
+      'continueMediaInBackground': continueMediaInBackground,
+      'autoCloseMediaOnSectionChange': autoCloseMediaOnSectionChange,
     };
   }
 }
@@ -439,6 +563,53 @@ class SecuritySettingsRepository {
     return next;
   }
 
+  Future<SecuritySettings> recordLastOpenedFolder(
+    SecuritySettings current,
+    String path,
+  ) async {
+    if (!current.rememberLastFolder || path.trim().isEmpty) {
+      return current;
+    }
+    final next = current.copyWith(lastOpenedFolder: path.trim());
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> updateMediaFolders(
+    SecuritySettings current, {
+    List<String>? galleryFolders,
+    List<String>? musicFolders,
+    List<String>? videoFolders,
+  }) async {
+    final next = current.copyWith(
+      galleryFolders: galleryFolders,
+      musicFolders: musicFolders,
+      videoFolders: videoFolders,
+    );
+    await save(next);
+    return next;
+  }
+
+  Future<File> exportConfigurationArchive({String? targetPath}) async {
+    final appData = await AppPaths.appDataDirectory();
+    final exportDir = await AppPaths.exportDirectory();
+    final timestamp = DateTime.now()
+        .toUtc()
+        .toIso8601String()
+        .replaceAll(RegExp(r'[:.]'), '-');
+    final target = File(
+      targetPath?.trim().isNotEmpty == true
+          ? targetPath!.trim()
+          : '${exportDir.path}${Platform.pathSeparator}securevault_configuration_$timestamp.zip',
+    );
+    await target.parent.create(recursive: true);
+    final archive = Archive();
+    await _addDirectoryToArchive(archive, appData, rootName: 'SecureVaultData');
+    final bytes = ZipEncoder().encode(archive);
+    await target.writeAsBytes(bytes, flush: true);
+    return target;
+  }
+
   List<String> _dedupePaths(Iterable<String> paths) {
     final seen = <String>{};
     final result = <String>[];
@@ -451,6 +622,29 @@ class SecuritySettingsRepository {
       }
     }
     return result;
+  }
+
+  Future<void> _addDirectoryToArchive(
+    Archive archive,
+    Directory directory, {
+    required String rootName,
+  }) async {
+    if (!await directory.exists()) return;
+    await for (final entity in directory.list(recursive: true)) {
+      if (entity is! File) continue;
+      final relative = entity.path
+          .substring(directory.path.length)
+          .replaceFirst(RegExp(r'^[\\/]+'), '')
+          .replaceAll('\\', '/');
+      if (relative.isEmpty) continue;
+      archive.addFile(
+        ArchiveFile(
+          '$rootName/$relative',
+          await entity.length(),
+          await entity.readAsBytes(),
+        ),
+      );
+    }
   }
 
   Future<SecuritySettings> setPasswords({
@@ -489,6 +683,22 @@ class SecuritySettingsRepository {
     String? documentExclusions,
     bool? torrentEnabled,
     bool? androidStoragePermissionPromptDismissed,
+    bool? storeSettingsInUserProfile,
+    bool? rememberLastFolder,
+    String? navigationPolicy,
+    double? interfaceTextScale,
+    double? toolbarIconScale,
+    String? searchMode,
+    bool? searchUseRegex,
+    bool? searchRecursive,
+    String? programProxy,
+    String? globalPluginProxy,
+    Map<String, String>? pluginProxyById,
+    bool? enableBackgroundVideo,
+    bool? enableMiniVideo,
+    bool? enableMiniAudio,
+    bool? continueMediaInBackground,
+    bool? autoCloseMediaOnSectionChange,
   }) async {
     var next = current.copyWith(
       useSeparateFilePassword: useSeparateFilePassword,
@@ -526,6 +736,28 @@ class SecuritySettingsRepository {
       torrentEnabled: torrentEnabled,
       androidStoragePermissionPromptDismissed:
           androidStoragePermissionPromptDismissed,
+      storeSettingsInUserProfile: storeSettingsInUserProfile,
+      rememberLastFolder: rememberLastFolder,
+      navigationPolicy: navigationPolicy,
+      interfaceTextScale: interfaceTextScale,
+      toolbarIconScale: toolbarIconScale,
+      searchMode: searchMode,
+      searchUseRegex: searchUseRegex,
+      searchRecursive: searchRecursive,
+      programProxy:
+          programProxy == null || programProxy.isEmpty ? null : programProxy,
+      clearProgramProxy: programProxy != null && programProxy.isEmpty,
+      globalPluginProxy: globalPluginProxy == null || globalPluginProxy.isEmpty
+          ? null
+          : globalPluginProxy,
+      clearGlobalPluginProxy:
+          globalPluginProxy != null && globalPluginProxy.isEmpty,
+      pluginProxyById: pluginProxyById,
+      enableBackgroundVideo: enableBackgroundVideo,
+      enableMiniVideo: enableMiniVideo,
+      enableMiniAudio: enableMiniAudio,
+      continueMediaInBackground: continueMediaInBackground,
+      autoCloseMediaOnSectionChange: autoCloseMediaOnSectionChange,
       recentFilePaths: rememberRecentFiles == false
           ? const <String>[]
           : current.recentFilePaths

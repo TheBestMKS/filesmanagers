@@ -1,9 +1,40 @@
+import 'dart:convert';
 import 'dart:io';
 
 class AppPaths {
   const AppPaths._();
 
+  static const _storageFileName = 'securevault_storage.json';
+  static const _programDataFolder = 'SecureVaultData';
+
   static Future<Directory> appDataDirectory() async {
+    if (await useUserDataDirectory()) {
+      return userDataDirectory();
+    }
+    return programDataDirectory();
+  }
+
+  static Future<Directory> programDataDirectory() async {
+    final override = Platform.environment['SECUREVAULT_DATA_DIR'];
+    if (override != null && override.trim().isNotEmpty) {
+      return _ensureDirectory(Directory(override.trim()));
+    }
+    if (Platform.isAndroid) {
+      return _ensureDirectory(
+        Directory('/data/user/0/com.securevault.app/files'),
+      );
+    }
+    final dir = Directory(
+      '${_programDirectory()}${Platform.pathSeparator}$_programDataFolder',
+    );
+    try {
+      return await _ensureDirectory(dir);
+    } on FileSystemException {
+      return userDataDirectory();
+    }
+  }
+
+  static Future<Directory> userDataDirectory() async {
     final basePath = switch (Platform.operatingSystem) {
       'android' => '/data/user/0/com.securevault.app/files',
       'windows' =>
@@ -11,11 +42,50 @@ class AppPaths {
       'linux' => _linuxDataPath(),
       _ => Directory.systemTemp.path,
     };
-    final dir = Directory('$basePath${Platform.pathSeparator}SecureVault');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
+    return _ensureDirectory(
+      Directory('$basePath${Platform.pathSeparator}SecureVault'),
+    );
+  }
+
+  static Future<bool> useUserDataDirectory() async {
+    final file = File(
+      '${_programDirectory()}${Platform.pathSeparator}$_programDataFolder'
+      '${Platform.pathSeparator}$_storageFileName',
+    );
+    if (!await file.exists()) {
+      return false;
     }
-    return dir;
+    try {
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is Map<String, Object?>) {
+        return decoded['storage'] == 'user';
+      }
+    } catch (_) {
+      return false;
+    }
+    return false;
+  }
+
+  static Future<void> setUseUserDataDirectory(bool value) async {
+    final dir = Directory(
+      '${_programDirectory()}${Platform.pathSeparator}$_programDataFolder',
+    );
+    await dir.create(recursive: true);
+    final file = File('${dir.path}${Platform.pathSeparator}$_storageFileName');
+    await file.writeAsString(
+      const JsonEncoder.withIndent('  ').convert(<String, Object?>{
+        'schema': 'securevault.storage.v1',
+        'storage': value ? 'user' : 'program',
+      }),
+      flush: true,
+    );
+  }
+
+  static Future<Directory> exportDirectory() async {
+    final appData = await appDataDirectory();
+    return _ensureDirectory(
+      Directory('${appData.path}${Platform.pathSeparator}exports'),
+    );
   }
 
   static Future<Directory> hiddenVaultDirectory() async {
@@ -75,5 +145,25 @@ class AppPaths {
       return '$home${Platform.pathSeparator}.local${Platform.pathSeparator}share';
     }
     return Directory.systemTemp.path;
+  }
+
+  static Future<Directory> _ensureDirectory(Directory dir) async {
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  static String _programDirectory() {
+    if (Platform.isAndroid) {
+      return '/data/user/0/com.securevault.app/files';
+    }
+    final current = Directory.current.path;
+    if (File('$current${Platform.pathSeparator}pubspec.yaml').existsSync()) {
+      return current;
+    }
+    final executable = File(Platform.resolvedExecutable);
+    final parent = executable.parent;
+    return parent.path.isEmpty ? current : parent.path;
   }
 }
