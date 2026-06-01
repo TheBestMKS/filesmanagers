@@ -123,10 +123,25 @@ class TorrentService {
 
   Future<File> downloadedFile(
       TorrentMetadata metadata, TorrentFileEntry file) async {
+    final candidates = await downloadedFileCandidates(metadata, file);
+    for (final candidate in candidates) {
+      if (await candidate.exists()) return candidate;
+    }
+    return candidates.first;
+  }
+
+  Future<List<File>> downloadedFileCandidates(
+      TorrentMetadata metadata, TorrentFileEntry file) async {
     final dir = await downloadDirectory(metadata);
-    return File(
-      '${dir.path}${Platform.pathSeparator}${file.path.replaceAll('/', Platform.pathSeparator)}',
-    );
+    final safeRelative = _safeTorrentRelativePath(file.path);
+    final candidates = <File>[
+      File(_joinPath(dir.path, safeRelative)),
+    ];
+    final root = _safeFileName(metadata.name);
+    if (root.isNotEmpty) {
+      candidates.add(File(_joinPath(dir.path, '$root/$safeRelative')));
+    }
+    return candidates;
   }
 
   Future<ProcessResult> startDownload(
@@ -134,8 +149,9 @@ class TorrentService {
     Iterable<TorrentFileEntry> selectedFiles = const [],
   }) async {
     final dir = await downloadDirectory(metadata);
+    final selected = selectedFiles.toList(growable: false);
     final select =
-        selectedFiles.map((file) => (file.index + 1).toString()).join(',');
+        selected.map((file) => (file.index + 1).toString()).join(',');
     final args = <String>[
       '--seed-time=0',
       '--continue=true',
@@ -144,6 +160,8 @@ class TorrentService {
       '--bt-prioritize-piece=head=64M,tail=16M',
       '--dir=${dir.path}',
       if (select.isNotEmpty) '--select-file=$select',
+      for (final file in selected)
+        '--index-out=${file.index + 1}=${_safeTorrentRelativePath(file.path)}',
       metadata.sourcePath,
     ];
     return Process.run(
@@ -199,8 +217,9 @@ class TorrentService {
     Iterable<TorrentFileEntry> selectedFiles = const [],
   }) async {
     final dir = await downloadDirectory(metadata);
+    final selected = selectedFiles.toList(growable: false);
     final select =
-        selectedFiles.map((file) => (file.index + 1).toString()).join(',');
+        selected.map((file) => (file.index + 1).toString()).join(',');
     final args = <String>[
       '--seed-time=0',
       '--continue=true',
@@ -212,6 +231,8 @@ class TorrentService {
       '--bt-prioritize-piece=head=64M,tail=16M',
       '--dir=${dir.path}',
       if (select.isNotEmpty) '--select-file=$select',
+      for (final file in selected)
+        '--index-out=${file.index + 1}=${_safeTorrentRelativePath(file.path)}',
       metadata.sourcePath,
     ];
     await Process.start(
@@ -353,18 +374,6 @@ class _TorrentHttpStreamer {
         await response.close();
         return;
       }
-      try {
-        await source.ensureDownloadStarted();
-      } catch (error) {
-        response.statusCode = HttpStatus.serviceUnavailable;
-        response.headers.contentType = ContentType.text;
-        response.write(
-          'Torrent engine is unavailable: $error\n'
-          'Install/bundle aria2c or set SECUREVAULT_ARIA2C.',
-        );
-        await response.close();
-        return;
-      }
 
       final totalSize = math.max(0, source.file.sizeBytes);
       final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
@@ -380,6 +389,20 @@ class _TorrentHttpStreamer {
       final start = range?.$1 ?? 0;
       final end = range?.$2 ?? math.max(0, totalSize - 1);
       final length = totalSize <= 0 ? null : end - start + 1;
+      if (request.method != 'HEAD') {
+        try {
+          await source.ensureDownloadStarted();
+        } catch (error) {
+          response.statusCode = HttpStatus.serviceUnavailable;
+          response.headers.contentType = ContentType.text;
+          response.write(
+            'Torrent engine is unavailable: $error\n'
+            'Install/bundle aria2c or set SECUREVAULT_ARIA2C.',
+          );
+          await response.close();
+          return;
+        }
+      }
       response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
       response.headers.contentType = _contentTypeFor(source.file.name);
       response.headers.set(
@@ -402,6 +425,7 @@ class _TorrentHttpStreamer {
         await response.close();
         return;
       }
+      await response.flush();
       await _writeRange(response, source.localFile, start, end);
     } catch (error) {
       try {
@@ -448,16 +472,17 @@ class _TorrentHttpStreamer {
   ) async {
     var position = start;
     var idleTicks = 0;
+    const maxIdleTicks = 2400; // 10 minutes at 250 ms, enough for slow peers.
     while (position <= end) {
       if (!await file.exists()) {
         await Future<void>.delayed(const Duration(milliseconds: 250));
-        if (++idleTicks > 360) break;
+        if (++idleTicks > maxIdleTicks) break;
         continue;
       }
       final available = await file.length().catchError((_) => 0);
       if (available <= position) {
         await Future<void>.delayed(const Duration(milliseconds: 250));
-        if (++idleTicks > 360) break;
+        if (++idleTicks > maxIdleTicks) break;
         continue;
       }
       idleTicks = 0;
@@ -493,6 +518,22 @@ class _TorrentHttpStreamer {
 
 String _safeFileName(String value) =>
     value.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
+
+String _safeTorrentRelativePath(String value) {
+  final parts = value
+      .replaceAll('\\', '/')
+      .split('/')
+      .map(_safeFileName)
+      .where((part) => part.isNotEmpty && part != '.' && part != '..')
+      .toList(growable: false);
+  if (parts.isEmpty) return 'torrent_file';
+  return parts.join('/');
+}
+
+String _joinPath(String root, String relative) {
+  final normalized = relative.replaceAll('/', Platform.pathSeparator);
+  return '$root${Platform.pathSeparator}$normalized';
+}
 
 String _normalizePath(String path) {
   final normalized = File(path).absolute.path;

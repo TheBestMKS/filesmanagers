@@ -24,7 +24,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.4';
+const _appVersion = '0.12.5';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
@@ -8032,6 +8032,9 @@ class _SharedMediaSession extends ChangeNotifier {
       } else if (item.path != null && item.path!.isNotEmpty) {
         final path = item.path!;
         if (path.startsWith('http://') || path.startsWith('https://')) {
+          if (_isLoopbackTorrentStream(path)) {
+            await _prewarmTorrentStream(path);
+          }
           medias.add(Media(path));
           continue;
         }
@@ -8081,6 +8084,42 @@ class _SharedMediaSession extends ChangeNotifier {
     final server = _memoryMediaServer;
     _memoryMediaServer = null;
     await server?.close();
+  }
+
+  bool _isLoopbackTorrentStream(String path) {
+    final uri = Uri.tryParse(path);
+    if (uri == null || uri.scheme != 'http') return false;
+    final host = uri.host.toLowerCase();
+    return uri.pathSegments.isNotEmpty &&
+        uri.pathSegments.first == 'torrent' &&
+        (host == '127.0.0.1' || host == 'localhost');
+  }
+
+  Future<void> _prewarmTorrentStream(String path) async {
+    final uri = Uri.parse(path);
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      final request =
+          await client.getUrl(uri).timeout(const Duration(seconds: 8));
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+      final response =
+          await request.close().timeout(const Duration(seconds: 45));
+      if (response.statusCode >= 400) {
+        final body = await utf8
+            .decodeStream(response)
+            .timeout(const Duration(seconds: 8), onTimeout: () => '');
+        throw StateError(body.trim().isEmpty
+            ? 'Torrent stream returned HTTP ${response.statusCode}.'
+            : body.trim());
+      }
+      await response.drain<void>().timeout(const Duration(seconds: 45));
+    } on TimeoutException catch (_) {
+      throw StateError(
+        'Torrent stream did not provide initial media bytes in time.',
+      );
+    } finally {
+      client.close(force: true);
+    }
   }
 }
 
