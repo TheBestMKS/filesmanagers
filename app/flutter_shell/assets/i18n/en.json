@@ -481,5 +481,7 @@
     "about.features.media.session": "Audio and video share one media session across preview, full-window mode and mini-player, with resume positions and media-key control.",
     "about.features.plugins": "Built-in real plugin executors cover WebDAV, FTP, embedded SFTP/SSH and embedded SMB2/3; plugin manager supports info, settings, export and delete.",
     "about.features.background.jobs": "Encryption and recursive folder processing show cancellable background progress at the bottom of the app."
-  }
+  },
+  "about.open.log": "Open program log",
+  "settings.interface.text.scale": "Overall interface scale"
 }

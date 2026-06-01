@@ -40,6 +40,7 @@ class AppLanguage {
     'about.memory.info': 'Memory usage information',
     'about.memory.cache': 'Thumbnail memory cache',
     'about.version.features': 'Current version functionality',
+    'about.open.log': 'Open program log',
     'about.features.text.editor':
         'Text files can be edited as text, HEX or binary with encoding conversion and search.',
     'about.features.preview.toolbar':
@@ -386,7 +387,7 @@ class AppLanguage {
     'settings.auto.dpi': 'Auto-adjust file text and icon size by device DPI',
     'settings.file.text.scale': 'File text scale',
     'settings.file.icon.scale': 'File icon scale',
-    'settings.interface.text.scale': 'Whole interface text scale',
+    'settings.interface.text.scale': 'Overall interface scale',
     'settings.toolbar.icon.scale': 'Path/search toolbar icon scale',
     'settings.search.default': 'Default search mode',
     'settings.media.sections': 'Media sections',
@@ -574,6 +575,7 @@ class AppLanguage {
     'about.memory.info': 'Информация об используемой памяти',
     'about.memory.cache': 'Кэш миниатюр в памяти',
     'about.version.features': 'Функционал текущей версии',
+    'about.open.log': 'Открыть лог программы',
     'about.features.text.editor':
         'Текстовые файлы редактируются как текст, HEX или двоичные данные с конвертацией кодировок и поиском.',
     'about.features.preview.toolbar':
@@ -930,7 +932,7 @@ class AppLanguage {
         'Автоматически подстраивать размер текста и иконок под DPI устройства',
     'settings.file.text.scale': 'Масштаб текста файлов',
     'settings.file.icon.scale': 'Масштаб иконок файлов',
-    'settings.interface.text.scale': 'Масштаб текста всего интерфейса',
+    'settings.interface.text.scale': 'Общий масштаб интерфейса',
     'settings.toolbar.icon.scale': 'Масштаб иконок пути и поиска',
     'settings.search.default': 'Режим поиска по умолчанию',
     'settings.media.sections': 'Медиа-разделы',

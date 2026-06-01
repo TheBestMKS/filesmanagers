@@ -51,6 +51,17 @@ class VaultCrypto {
     return _packBox(box);
   }
 
+  static Future<Uint8List> encryptBytesWithKey(
+    List<int> clearBytes, {
+    required SecretKey key,
+    List<int> aad = const [],
+    String algorithm = xchacha20Poly1305,
+  }) async {
+    final box = await _cipherFor(algorithm)
+        .encrypt(clearBytes, secretKey: key, aad: aad);
+    return _packBox(box);
+  }
+
   static Future<Uint8List> decryptBytes(
     List<int> packedBox, {
     required String password,
@@ -59,6 +70,21 @@ class VaultCrypto {
     String algorithm = xchacha20Poly1305,
   }) async {
     final key = await deriveKey(password, salt);
+    final box = _unpackBox(
+      Uint8List.fromList(packedBox),
+      nonceLength: nonceLengthFor(algorithm),
+    );
+    final clear =
+        await _cipherFor(algorithm).decrypt(box, secretKey: key, aad: aad);
+    return Uint8List.fromList(clear);
+  }
+
+  static Future<Uint8List> decryptBytesWithKey(
+    List<int> packedBox, {
+    required SecretKey key,
+    List<int> aad = const [],
+    String algorithm = xchacha20Poly1305,
+  }) async {
     final box = _unpackBox(
       Uint8List.fromList(packedBox),
       nonceLength: nonceLengthFor(algorithm),

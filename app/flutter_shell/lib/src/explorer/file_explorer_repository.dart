@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:cryptography/cryptography.dart';
 
 import '../ffi/crypt_bindings.dart';
 import '../plugins/cloud_plugin_registry.dart' hide basename;
@@ -24,6 +26,8 @@ class FileExplorerRepository {
 
   static const int _fileContainerFixedSize = 106;
   static const int _fileParamsTlvTag = 0x1001;
+  static const int _chunkedEncryptionThreshold = 32 * 1024 * 1024;
+  static const int _chunkedEncryptionChunkSize = 2 * 1024 * 1024;
   static const String _zipScheme = 'zip://';
   static const String _remoteScheme = 'remote://';
   static const String _torrentScheme = 'torrent://';
@@ -280,7 +284,7 @@ class FileExplorerRepository {
               );
               if (password != null) {
                 displayName = await _decryptAppCryptName(
-                        await entity.readAsBytes(),
+                        await _readCryptHeaderBytes(entity),
                         password: password)
                     .catchError((_) => name);
               }
@@ -700,7 +704,7 @@ class FileExplorerRepository {
     if (!await file.exists()) {
       return null;
     }
-    return _readCryptParameters(await file.readAsBytes());
+    return _readCryptParameters(await _readCryptHeaderBytes(file));
   }
 
   Future<File> importFile(TransferOptions options) async {
@@ -771,12 +775,15 @@ class FileExplorerRepository {
     required String password,
     EncryptionKeyMode keyMode = EncryptionKeyMode.unique,
     String algorithm = EncryptionAlgorithm.xchacha20Poly1305,
+    void Function(int completedBytes, int totalBytes)? onProgress,
+    bool Function()? shouldCancel,
   }) async {
-    final sourceBytes = await source.readAsBytes();
     final sourceStat = await source.stat();
     final salt = VaultCrypto.randomBytes(16);
     final fileId = VaultCrypto.randomBytes(16);
     final fileName = basename(source.path);
+    final target = await _availableFile(targetDir, 'f_${_hex(fileId)}.crypt');
+    final key = await VaultCrypto.deriveKey(password, salt);
     final headerPlain = utf8.encode(jsonEncode(<String, Object?>{
       'schema': 'securevault.fileHeader.v1',
       'name': fileName,
@@ -785,20 +792,41 @@ class FileExplorerRepository {
       'updatedAtUtcMs': sourceStat.modified.toUtc().millisecondsSinceEpoch,
     }));
 
-    final encryptedHeader = await VaultCrypto.encryptBytes(
+    final encryptedHeader = await VaultCrypto.encryptBytesWithKey(
       headerPlain,
-      password: password,
-      salt: salt,
+      key: key,
       aad: utf8.encode('securevault.file.header.v1'),
       algorithm: algorithm,
     );
-    final encryptedPayload = await VaultCrypto.encryptBytes(
+
+    if (sourceStat.size >= _chunkedEncryptionThreshold) {
+      return _encryptFileToDirectoryChunked(
+        source: source,
+        target: target,
+        sourceStat: sourceStat,
+        fileId: fileId,
+        fileName: fileName,
+        salt: salt,
+        keyMode: keyMode,
+        algorithm: algorithm,
+        key: key,
+        encryptedHeader: encryptedHeader,
+        onProgress: onProgress,
+        shouldCancel: shouldCancel,
+      );
+    }
+
+    if (shouldCancel?.call() == true) {
+      throw FileSystemException('Operation cancelled.', source.path);
+    }
+    final sourceBytes = await source.readAsBytes();
+    final encryptedPayload = await VaultCrypto.encryptBytesWithKey(
       sourceBytes,
-      password: password,
-      salt: salt,
+      key: key,
       aad: utf8.encode('securevault.file.payload.v1:$fileName'),
       algorithm: algorithm,
     );
+    onProgress?.call(sourceStat.size, sourceStat.size);
 
     final params = utf8.encode(jsonEncode(<String, Object?>{
       'schema': 'securevault.fileCrypto.v1',
@@ -809,6 +837,7 @@ class FileExplorerRepository {
       'box': 'nonce+cipherText+mac',
       'nonceLength': VaultCrypto.nonceLengthFor(algorithm),
       'macLength': 16,
+      'payloadEncoding': 'single-box-v1',
     }));
 
     final containerBytes = _buildFileContainerBytes(
@@ -823,15 +852,124 @@ class FileExplorerRepository {
       updatedAtUtcMs: DateTime.now().toUtc().millisecondsSinceEpoch,
     );
 
-    final target = await _availableFile(targetDir, 'f_${_hex(fileId)}.crypt');
     await target.writeAsBytes(containerBytes, flush: true);
     return target;
   }
 
+  Future<File> _encryptFileToDirectoryChunked({
+    required File source,
+    required File target,
+    required FileStat sourceStat,
+    required Uint8List fileId,
+    required String fileName,
+    required Uint8List salt,
+    required EncryptionKeyMode keyMode,
+    required String algorithm,
+    required SecretKey key,
+    required Uint8List encryptedHeader,
+    void Function(int completedBytes, int totalBytes)? onProgress,
+    bool Function()? shouldCancel,
+  }) async {
+    final payloadTemp = File('${target.path}.payload.tmp');
+    IOSink? payloadSink;
+    RandomAccessFile? input;
+    var processed = 0;
+    var chunkIndex = 0;
+    var storedPayloadSize = 0;
+    try {
+      payloadSink = payloadTemp.openWrite();
+      input = await source.open();
+      while (processed < sourceStat.size) {
+        if (shouldCancel?.call() == true) {
+          throw FileSystemException('Operation cancelled.', source.path);
+        }
+        final remaining = sourceStat.size - processed;
+        final readLength = math.min(_chunkedEncryptionChunkSize, remaining);
+        final chunk = await input.read(readLength);
+        if (chunk.isEmpty) break;
+        final encryptedChunk = await VaultCrypto.encryptBytesWithKey(
+          chunk,
+          key: key,
+          aad: utf8.encode(
+            'securevault.file.payload.chunk.v1:$fileName:$chunkIndex',
+          ),
+          algorithm: algorithm,
+        );
+        payloadSink.add(_u32(encryptedChunk.length));
+        payloadSink.add(encryptedChunk);
+        storedPayloadSize += 4 + encryptedChunk.length;
+        processed += chunk.length;
+        chunkIndex++;
+        onProgress?.call(processed, sourceStat.size);
+        await Future<void>.delayed(Duration.zero);
+      }
+      await payloadSink.flush();
+      await payloadSink.close();
+      payloadSink = null;
+      await input.close();
+      input = null;
+
+      final params = utf8.encode(jsonEncode(<String, Object?>{
+        'schema': 'securevault.fileCrypto.v1',
+        'kdf': 'argon2id',
+        'cipher': algorithm,
+        'keyMode': keyMode.name,
+        'salt': base64UrlEncode(salt),
+        'box': 'nonce+cipherText+mac',
+        'nonceLength': VaultCrypto.nonceLengthFor(algorithm),
+        'macLength': 16,
+        'payloadEncoding': 'chunked-v1',
+        'chunkSize': _chunkedEncryptionChunkSize,
+        'chunkCount': chunkIndex,
+      }));
+
+      final prefix = _buildFileContainerPrefix(
+        fileId: fileId,
+        originalSize: sourceStat.size,
+        storedSize: storedPayloadSize,
+        encryptedHeader: encryptedHeader,
+        tlvValue: params,
+        createdAtUtcMs: sourceStat.changed.toUtc().millisecondsSinceEpoch,
+        updatedAtUtcMs: DateTime.now().toUtc().millisecondsSinceEpoch,
+      );
+
+      final output = target.openWrite();
+      output.add(prefix);
+      await output.addStream(payloadTemp.openRead());
+      await output.flush();
+      await output.close();
+      try {
+        await payloadTemp.delete();
+      } catch (_) {}
+      onProgress?.call(sourceStat.size, sourceStat.size);
+      return target;
+    } catch (_) {
+      try {
+        await payloadSink?.close();
+      } catch (_) {}
+      try {
+        await input?.close();
+      } catch (_) {}
+      if (await payloadTemp.exists()) {
+        try {
+          await payloadTemp.delete();
+        } catch (_) {}
+      }
+      if (await target.exists()) {
+        try {
+          await target.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
+  }
+
   Future<File> encryptSelectedFile(
     File source,
-    EncryptFileOptions options,
-  ) async {
+    EncryptFileOptions options, {
+    void Function(int completedBytes, int totalBytes)? onProgress,
+    bool Function()? shouldCancel,
+  }) async {
     final targetDir = Directory(options.targetDirectory);
     await targetDir.create(recursive: true);
     final encrypted = await encryptFileToDirectory(
@@ -840,6 +978,8 @@ class FileExplorerRepository {
       password: options.password,
       keyMode: options.mode,
       algorithm: options.algorithm,
+      onProgress: onProgress,
+      shouldCancel: shouldCancel,
     );
     if (options.deleteSourceAfter) {
       await source.delete();
@@ -1043,6 +1183,52 @@ class FileExplorerRepository {
     final directory = await _availableDirectory(targetDir, normalized);
     await directory.create(recursive: true);
     return directory;
+  }
+
+  Future<String> createFile(
+    String targetDirectory,
+    String name,
+    List<int> bytes,
+  ) async {
+    final normalized = name.trim();
+    if (normalized.isEmpty ||
+        normalized.contains('/') ||
+        normalized.contains('\\')) {
+      throw ArgumentError('Invalid file name.');
+    }
+    final remote = _RemoteVirtualPath.tryParse(targetDirectory);
+    if (remote != null) {
+      final client = _remote.clientFor(remote.pluginId);
+      final remotePath =
+          await _availableRemoteFile(client, remote.innerPath, normalized);
+      await client.writeBytes(remotePath, bytes);
+      return _RemoteVirtualPath.build(remote.pluginId, remotePath);
+    }
+    final targetDir = Directory(targetDirectory);
+    await targetDir.create(recursive: true);
+    final target = await _availableFile(targetDir, normalized);
+    await target.writeAsBytes(bytes, flush: true);
+    return target.path;
+  }
+
+  Future<String> _availableRemoteFile(
+    RemoteFileSystemClient client,
+    String parentPath,
+    String preferredName,
+  ) async {
+    final dotIndex = preferredName.lastIndexOf('.');
+    final stem =
+        dotIndex <= 0 ? preferredName : preferredName.substring(0, dotIndex);
+    final ext = dotIndex <= 0 ? '' : preferredName.substring(dotIndex);
+    var candidateName = preferredName;
+    var candidatePath = _remoteJoin(parentPath, candidateName);
+    var index = 1;
+    while (await client.stat(candidatePath) != null) {
+      candidateName = '$stem-$index$ext';
+      candidatePath = _remoteJoin(parentPath, candidateName);
+      index++;
+    }
+    return candidatePath;
   }
 
   Future<FileSystemEntity> renameEntity(String path, String newName) async {
@@ -1588,6 +1774,9 @@ class FileExplorerRepository {
   Future<VaultContainerInfo?> _inspectContainer(
       File file, ExplorerEntryKind kind) async {
     try {
+      if (kind == ExplorerEntryKind.encryptedFile) {
+        return await _inspectFileContainerHeader(file);
+      }
       final bytes = await file.readAsBytes();
       return kind == ExplorerEntryKind.folderMeta
           ? _bindings.inspectFolderMeta(bytes)
@@ -1595,6 +1784,28 @@ class FileExplorerRepository {
     } catch (_) {
       return null;
     }
+  }
+
+  Future<VaultContainerInfo?> _inspectFileContainerHeader(File file) async {
+    final stat = await file.stat();
+    final data = await _readCryptHeaderBytes(file);
+    if (data.length < _fileContainerFixedSize) return null;
+    final layout = _readCryptPayloadLayout(data);
+    return VaultContainerInfo(
+      statusCode: 0,
+      containerType: _readU16(data, 8),
+      formatMajor: _readU16(data, 10),
+      formatMinor: _readU16(data, 12),
+      headerSize: _readU16(data, 14),
+      extensionCount: _readU16(data, 16),
+      flags: _readU32(data, 18),
+      chunkSize: _readU32(data, 98),
+      originalSize: _readU64(data, 74),
+      storedSize: _readU64(data, 82),
+      encryptedHeaderLength: layout.encryptedHeaderLength,
+      encryptedPayloadLength: math.max(
+          0, stat.size - layout.payloadOffset - layout.encryptedHeaderLength),
+    );
   }
 
   Future<_OpenedCryptFile> _decryptAppCrypt(List<int> bytes,
@@ -1625,11 +1836,11 @@ class FileExplorerRepository {
     offset += encryptedHeaderLength;
     final encryptedPayload = data.sublist(offset);
     final salt = base64Url.decode(saltText);
+    final key = await VaultCrypto.deriveKey(password, salt);
 
-    final headerJsonBytes = await VaultCrypto.decryptBytes(
+    final headerJsonBytes = await VaultCrypto.decryptBytesWithKey(
       encryptedHeader,
-      password: password,
-      salt: salt,
+      key: key,
       aad: utf8.encode('securevault.file.header.v1'),
       algorithm: algorithm,
     );
@@ -1638,14 +1849,56 @@ class FileExplorerRepository {
       throw const FormatException('Заголовок не является JSON.');
     }
     final name = headerJson['name'] as String? ?? 'decrypted-file.bin';
-    final payload = await VaultCrypto.decryptBytes(
-      encryptedPayload,
-      password: password,
-      salt: salt,
-      aad: utf8.encode('securevault.file.payload.v1:$name'),
-      algorithm: algorithm,
-    );
+    final payload = params['payloadEncoding'] == 'chunked-v1'
+        ? await _decryptChunkedPayload(
+            encryptedPayload,
+            key: key,
+            name: name,
+            algorithm: algorithm,
+          )
+        : await VaultCrypto.decryptBytesWithKey(
+            encryptedPayload,
+            key: key,
+            aad: utf8.encode('securevault.file.payload.v1:$name'),
+            algorithm: algorithm,
+          );
     return _OpenedCryptFile(name: name, payload: payload);
+  }
+
+  Future<Uint8List> _decryptChunkedPayload(
+    Uint8List encryptedPayload, {
+    required SecretKey key,
+    required String name,
+    required String algorithm,
+  }) async {
+    final out = BytesBuilder(copy: false);
+    var offset = 0;
+    var chunkIndex = 0;
+    while (offset < encryptedPayload.length) {
+      if (offset + 4 > encryptedPayload.length) {
+        throw const FormatException('Chunked payload length is truncated.');
+      }
+      final chunkLength = _readU32(encryptedPayload, offset);
+      offset += 4;
+      if (offset + chunkLength > encryptedPayload.length) {
+        throw const FormatException('Chunked payload chunk is truncated.');
+      }
+      final encryptedChunk =
+          encryptedPayload.sublist(offset, offset + chunkLength);
+      offset += chunkLength;
+      final clearChunk = await VaultCrypto.decryptBytesWithKey(
+        encryptedChunk,
+        key: key,
+        aad: utf8.encode(
+          'securevault.file.payload.chunk.v1:$name:$chunkIndex',
+        ),
+        algorithm: algorithm,
+      );
+      out.add(clearChunk);
+      chunkIndex++;
+      await Future<void>.delayed(Duration.zero);
+    }
+    return out.takeBytes();
   }
 
   Future<String> _decryptAppCryptName(List<int> bytes,
@@ -1666,10 +1919,9 @@ class FileExplorerRepository {
       layout.payloadOffset,
       layout.payloadOffset + layout.encryptedHeaderLength,
     );
-    final headerJsonBytes = await VaultCrypto.decryptBytes(
+    final headerJsonBytes = await VaultCrypto.decryptBytesWithKey(
       encryptedHeader,
-      password: password,
-      salt: base64Url.decode(saltText),
+      key: await VaultCrypto.deriveKey(password, base64Url.decode(saltText)),
       aad: utf8.encode('securevault.file.header.v1'),
       algorithm: algorithm,
     );
@@ -1733,6 +1985,35 @@ class FileExplorerRepository {
     }
   }
 
+  Future<Uint8List> _readCryptHeaderBytes(File file) async {
+    RandomAccessFile? raf;
+    try {
+      raf = await file.open();
+      final fixed = await raf.read(_fileContainerFixedSize);
+      if (fixed.length < _fileContainerFixedSize) return fixed;
+      final fixedData = Uint8List.fromList(fixed);
+      final extensionCount = _readU16(fixedData, 16);
+      final encryptedHeaderLength = _readU32(fixedData, 102);
+      final out = BytesBuilder(copy: false)..add(fixedData);
+      for (var i = 0; i < extensionCount; i++) {
+        final tlvHeader = await raf.read(4);
+        if (tlvHeader.length < 4) break;
+        out.add(tlvHeader);
+        final tlvData = Uint8List.fromList(tlvHeader);
+        final length = _readU16(tlvData, 2);
+        if (length > 0) {
+          out.add(await raf.read(length));
+        }
+      }
+      if (encryptedHeaderLength > 0) {
+        out.add(await raf.read(encryptedHeaderLength));
+      }
+      return out.takeBytes();
+    } finally {
+      await raf?.close();
+    }
+  }
+
   _CryptPayloadLayout _readCryptPayloadLayout(Uint8List data) {
     if (data.length < _fileContainerFixedSize) {
       throw const FormatException('Файл меньше фиксированного заголовка.');
@@ -1781,6 +2062,33 @@ class FileExplorerRepository {
     required int createdAtUtcMs,
     required int updatedAtUtcMs,
   }) {
+    final prefix = _buildFileContainerPrefix(
+      fileId: fileId,
+      originalSize: originalSize,
+      storedSize: storedSize,
+      encryptedHeader: encryptedHeader,
+      tlvValue: tlvValue,
+      createdAtUtcMs: createdAtUtcMs,
+      updatedAtUtcMs: updatedAtUtcMs,
+    );
+    final out = BytesBuilder();
+    out.add(prefix);
+    out.add(encryptedPayload);
+    return out.toBytes();
+  }
+
+  Uint8List _buildFileContainerPrefix({
+    required Uint8List fileId,
+    required int originalSize,
+    required int storedSize,
+    required Uint8List encryptedHeader,
+    required List<int> tlvValue,
+    required int createdAtUtcMs,
+    required int updatedAtUtcMs,
+  }) {
+    if (tlvValue.length > 0xFFFF) {
+      throw StateError('Container TLV is too large: ${tlvValue.length}');
+    }
     final out = BytesBuilder();
     out.add(_commonHeader(
         containerType: 1,
@@ -1806,7 +2114,6 @@ class FileExplorerRepository {
     out.add(_u16(tlvValue.length));
     out.add(tlvValue);
     out.add(encryptedHeader);
-    out.add(encryptedPayload);
     return out.toBytes();
   }
 
@@ -1939,6 +2246,8 @@ class FileExplorerRepository {
       ByteData.sublistView(data).getUint16(offset, Endian.little);
   int _readU32(Uint8List data, int offset) =>
       ByteData.sublistView(data).getUint32(offset, Endian.little);
+  int _readU64(Uint8List data, int offset) =>
+      ByteData.sublistView(data).getUint64(offset, Endian.little);
 
   Uint8List _u16(int value) {
     final data = ByteData(2)..setUint16(0, value, Endian.little);

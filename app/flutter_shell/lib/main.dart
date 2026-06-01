@@ -14,6 +14,7 @@ import 'src/explorer/explorer_models.dart';
 import 'src/explorer/file_explorer_repository.dart';
 import 'src/ffi/crypt_bindings.dart';
 import 'src/i18n/app_language.dart';
+import 'src/logging/app_log.dart';
 import 'src/platform_services.dart';
 import 'src/plugins/cloud_plugin_registry.dart' hide basename;
 import 'src/plugins/connection_profile.dart';
@@ -23,11 +24,12 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.2';
+const _appVersion = '0.12.3';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
   MediaKit.ensureInitialized();
+  unawaited(AppLog.write('Application start ${args.join(' ')}'));
   runApp(SecureVaultApp(initialPath: args.isEmpty ? null : args.first));
 }
 
@@ -2412,30 +2414,45 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     final spec = await _createFileDialog(kind);
     if (spec == null) return;
     try {
-      final file = File('$targetDir${Platform.pathSeparator}${spec.name}');
-      final target = await _availableCreatedFile(file);
-      await target.writeAsBytes(spec.bytes, flush: true);
       if (kind == _CreateFileKind.encryptedPlain ||
           kind == _CreateFileKind.encryptedCsv ||
           kind == _CreateFileKind.encryptedImage) {
         final password = await _passwordForGeneratedEncryption();
         if (password == null || password.isEmpty) {
-          await target.delete();
           return;
         }
-        final encrypted = await _explorer.encryptFileToDirectory(
-          target,
-          Directory(targetDir),
-          password: password,
-          keyMode: _settings.hasCommonEncryption
-              ? EncryptionKeyMode.common
-              : EncryptionKeyMode.unique,
-          algorithm: _settings.commonEncryptionAlgorithm,
-        );
-        await target.delete();
-        _snack('${_language.t('snack.created')} ${encrypted.path}');
+        final tempDir = await Directory.systemTemp.createTemp('securevault_');
+        try {
+          final plain =
+              File('${tempDir.path}${Platform.pathSeparator}${spec.name}');
+          await plain.writeAsBytes(spec.bytes, flush: true);
+          final encrypted = await _explorer.encryptFileToDirectory(
+            plain,
+            tempDir,
+            password: password,
+            keyMode: _settings.hasCommonEncryption
+                ? EncryptionKeyMode.common
+                : EncryptionKeyMode.unique,
+            algorithm: _settings.commonEncryptionAlgorithm,
+          );
+          final createdPath = await _explorer.createFile(
+            targetDir,
+            basename(encrypted.path),
+            await encrypted.readAsBytes(),
+          );
+          _snack('${_language.t('snack.created')} $createdPath');
+        } finally {
+          try {
+            await tempDir.delete(recursive: true);
+          } catch (_) {}
+        }
       } else {
-        _snack('${_language.t('snack.created')} ${target.path}');
+        final createdPath = await _explorer.createFile(
+          targetDir,
+          spec.name,
+          spec.bytes,
+        );
+        _snack('${_language.t('snack.created')} $createdPath');
       }
       await _refresh();
     } catch (error) {
@@ -2841,22 +2858,6 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     return (255, 255, 255);
   }
 
-  Future<File> _availableCreatedFile(File desired) async {
-    if (!await desired.exists()) return desired;
-    final parent = desired.parent;
-    final name = basename(desired.path);
-    final dot = name.lastIndexOf('.');
-    final stem = dot <= 0 ? name : name.substring(0, dot);
-    final ext = dot <= 0 ? '' : name.substring(dot);
-    var index = 1;
-    while (true) {
-      final candidate =
-          File('${parent.path}${Platform.pathSeparator}$stem-$index$ext');
-      if (!await candidate.exists()) return candidate;
-      index++;
-    }
-  }
-
   Future<String?> _passwordForGeneratedEncryption() async {
     if (_settings.hasCommonEncryption &&
         !_settings.hasFilePassword &&
@@ -2998,6 +2999,53 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     }
   }
 
+  Future<void> _removeFavoritePath(String path) async {
+    final next = await _settingsRepo.updateFavorites(
+      _settings,
+      _settings.favoritePaths.where((item) => item != path).toList(),
+    );
+    if (mounted) setState(() => _settings = next);
+  }
+
+  Future<void> _editLocationProfile(ExplorerLocation location) async {
+    final profileId = _profileIdForLocation(location);
+    if (profileId == null) return;
+    await _editConnectionProfile(_entryForLocationProfile(location, profileId));
+  }
+
+  Future<void> _deleteLocationProfile(ExplorerLocation location) async {
+    final profileId = _profileIdForLocation(location);
+    if (profileId == null) return;
+    await _deleteConnectionProfile(
+        _entryForLocationProfile(location, profileId));
+  }
+
+  String? _profileIdForLocation(ExplorerLocation location) {
+    if (location.id.startsWith('profile-')) {
+      return location.id.substring('profile-'.length);
+    }
+    final pluginId = location.pluginId;
+    if (pluginId != null && pluginId.startsWith('profile-')) {
+      return pluginId.substring('profile-'.length);
+    }
+    return null;
+  }
+
+  ExplorerEntry _entryForLocationProfile(
+    ExplorerLocation location,
+    String profileId,
+  ) {
+    return ExplorerEntry(
+      name: location.name,
+      path: location.path ?? '',
+      kind: ExplorerEntryKind.directory,
+      sizeBytes: 0,
+      modifiedAt: DateTime.now(),
+      exists: location.enabled,
+      connectionProfileId: profileId,
+    );
+  }
+
   Future<void> _replacePathReference(String oldPath, String newPath) async {
     var next = _settings;
     if (next.favoritePaths.contains(oldPath)) {
@@ -3060,16 +3108,35 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       return;
     }
 
-    final job = _startBackgroundJob(_language.t('jobs.encrypt.file'));
+    final totalBytes = math.max(1, selected.sizeBytes);
+    final job = _startBackgroundJob(
+      _language.t('jobs.encrypt.file'),
+      total: totalBytes,
+    );
+    var lastUiProgress = DateTime.fromMillisecondsSinceEpoch(0);
     try {
       _updateBackgroundJob(job, status: selected.path);
       final file = await _explorer.encryptSelectedFile(
         File(selected.path),
         options,
+        shouldCancel: () => job.cancelled,
+        onProgress: (completed, total) {
+          final now = DateTime.now();
+          if (completed >= total ||
+              now.difference(lastUiProgress).inMilliseconds >= 220) {
+            lastUiProgress = now;
+            _updateBackgroundJob(
+              job,
+              completed: completed.clamp(0, totalBytes).toInt(),
+              status:
+                  '${(completed / math.max(1, total) * 100).toStringAsFixed(1)}% ${selected.name}',
+            );
+          }
+        },
       );
       _updateBackgroundJob(
         job,
-        completed: 1,
+        completed: totalBytes,
         done: true,
         status: file.path,
       );
@@ -3691,17 +3758,21 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   double _effectiveTextScale(BuildContext context) {
+    final interfaceScale =
+        _settings.interfaceTextScale.clamp(0.55, 2.2).toDouble();
     final dpi = _settings.autoScaleForDpi
         ? (MediaQuery.of(context).devicePixelRatio / 2.5).clamp(0.9, 1.35)
         : 1.0;
-    return (_settings.fileTextScale * dpi).clamp(0.75, 2.2);
+    return (_settings.fileTextScale * dpi * interfaceScale).clamp(0.55, 2.2);
   }
 
   double _effectiveIconScale(BuildContext context) {
+    final interfaceScale =
+        _settings.interfaceTextScale.clamp(0.55, 2.2).toDouble();
     final dpi = _settings.autoScaleForDpi
         ? (MediaQuery.of(context).devicePixelRatio / 2.5).clamp(0.9, 1.35)
         : 1.0;
-    return (_settings.fileIconScale * dpi).clamp(0.75, 2.5);
+    return (_settings.fileIconScale * dpi * interfaceScale).clamp(0.55, 2.5);
   }
 
   Future<void> _showAbout() async {
@@ -3752,6 +3823,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                     icon: const Icon(Icons.fact_check_outlined),
                     label: Text(_language.t('about.version.features')),
                   ),
+                  OutlinedButton.icon(
+                    onPressed: _openLogFile,
+                    icon: const Icon(Icons.article_outlined),
+                    label: Text(_language.t('about.open.log')),
+                  ),
                 ]),
               ],
             ),
@@ -3765,6 +3841,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         ],
       ),
     );
+  }
+
+  Future<void> _openLogFile() async {
+    try {
+      final file = await AppLog.file();
+      await AppLog.write('Log file opened from About dialog.');
+      await PlatformServices.openExternal(file.path);
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
   }
 
   Future<void> _showCryptoBenchmark() async {
@@ -3887,6 +3973,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                     page: _page,
                     onLocation: _selectLocation,
                     onFavoritePath: _openFavoritePath,
+                    onRemoveFavoritePath: _removeFavoritePath,
                     onRecentPath: (path) async {
                       final entry = await _explorer.entryForPath(path);
                       if (entry == null) {
@@ -3895,8 +3982,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                         await _openEntry(entry);
                       }
                     },
+                    onRemoveRecentPath: _removeRecentPath,
                     onRecentList: _openRecentFiles,
                     onFavoriteList: _openFavoriteFiles,
+                    onEditLocationProfile: _editLocationProfile,
+                    onDeleteLocationProfile: _deleteLocationProfile,
                     onExplorer: _openExplorerHome,
                     onAllLocations: _openLocationsHome,
                     onAddLocation: _showAddLocationDialog,
@@ -4124,7 +4214,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   Widget _scaledInterface(Widget child) {
-    final scale = _settings.interfaceTextScale.clamp(0.75, 2.2).toDouble();
+    final scale = _settings.interfaceTextScale.clamp(0.55, 2.2).toDouble();
     return MediaQuery(
       data:
           MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(scale)),
@@ -4686,9 +4776,13 @@ class _Sidebar extends StatelessWidget {
     required this.page,
     required this.onLocation,
     required this.onFavoritePath,
+    required this.onRemoveFavoritePath,
     required this.onRecentPath,
+    required this.onRemoveRecentPath,
     required this.onRecentList,
     required this.onFavoriteList,
+    required this.onEditLocationProfile,
+    required this.onDeleteLocationProfile,
     required this.onExplorer,
     required this.onAllLocations,
     required this.onAddLocation,
@@ -4706,9 +4800,13 @@ class _Sidebar extends StatelessWidget {
   final ShellPage page;
   final ValueChanged<ExplorerLocation> onLocation;
   final ValueChanged<String> onFavoritePath;
+  final ValueChanged<String> onRemoveFavoritePath;
   final ValueChanged<String> onRecentPath;
+  final ValueChanged<String> onRemoveRecentPath;
   final VoidCallback onRecentList;
   final VoidCallback onFavoriteList;
+  final ValueChanged<ExplorerLocation> onEditLocationProfile;
+  final ValueChanged<ExplorerLocation> onDeleteLocationProfile;
   final VoidCallback onExplorer;
   final VoidCallback onAllLocations;
   final VoidCallback onAddLocation;
@@ -4819,6 +4917,13 @@ class _Sidebar extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
               onTap: () => activate(() => onRecentPath(path)),
+              onLongPress: () => _showPathMenu(
+                context,
+                path,
+                open: () => activate(() => onRecentPath(path)),
+                remove: () => activate(() => onRemoveRecentPath(path)),
+                removeLabel: language.t('recent.remove'),
+              ),
             ),
           const SizedBox(height: 12),
         ],
@@ -4845,6 +4950,13 @@ class _Sidebar extends StatelessWidget {
                 overflow: TextOverflow.ellipsis,
               ),
               onTap: () => activate(() => onFavoritePath(path)),
+              onLongPress: () => _showPathMenu(
+                context,
+                path,
+                open: () => activate(() => onFavoritePath(path)),
+                remove: () => activate(() => onRemoveFavoritePath(path)),
+                removeLabel: language.t('favorites.remove'),
+              ),
             ),
           const SizedBox(height: 12),
         ],
@@ -4889,6 +5001,13 @@ class _Sidebar extends StatelessWidget {
             trailing:
                 location.enabled ? null : const Icon(Icons.extension, size: 18),
             onTap: () => activate(() => onLocation(location)),
+            onLongPress: () => _showLocationMenu(
+              context,
+              location,
+              open: () => activate(() => onLocation(location)),
+              edit: () => activate(() => onEditLocationProfile(location)),
+              delete: () => activate(() => onDeleteLocationProfile(location)),
+            ),
           ),
         if (hasMoreLocations)
           ListTile(
@@ -4900,6 +5019,91 @@ class _Sidebar extends StatelessWidget {
       ]),
     );
   }
+
+  Future<void> _showPathMenu(
+    BuildContext context,
+    String path, {
+    required VoidCallback open,
+    required VoidCallback remove,
+    required String removeLabel,
+  }) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.open_in_new),
+            title: Text(language.t('common.open')),
+            subtitle: Text(path, maxLines: 1, overflow: TextOverflow.ellipsis),
+            onTap: () {
+              Navigator.pop(context);
+              open();
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.remove_circle_outline),
+            title: Text(removeLabel),
+            onTap: () {
+              Navigator.pop(context);
+              remove();
+            },
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _showLocationMenu(
+    BuildContext context,
+    ExplorerLocation location, {
+    required VoidCallback open,
+    required VoidCallback edit,
+    required VoidCallback delete,
+  }) async {
+    final profile = _isProfileLocation(location);
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.open_in_new),
+            title: Text(language.t('common.open')),
+            subtitle: Text(
+              location.path ?? location.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () {
+              Navigator.pop(context);
+              open();
+            },
+          ),
+          if (profile)
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: Text(language.t('locations.profile.edit')),
+              onTap: () {
+                Navigator.pop(context);
+                edit();
+              },
+            ),
+          if (profile)
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: Text(language.t('locations.profile.delete')),
+              onTap: () {
+                Navigator.pop(context);
+                delete();
+              },
+            ),
+        ]),
+      ),
+    );
+  }
+
+  bool _isProfileLocation(ExplorerLocation location) =>
+      location.id.startsWith('profile-') ||
+      (location.pluginId?.startsWith('profile-') ?? false);
 
   Widget _nav(IconData icon, String text, bool selected, VoidCallback onTap) =>
       Padding(
@@ -8011,7 +8215,7 @@ class _FloatingMediaDock extends StatefulWidget {
   State<_FloatingMediaDock> createState() => _FloatingMediaDockState();
 }
 
-class _BackgroundJobsPanel extends StatelessWidget {
+class _BackgroundJobsPanel extends StatefulWidget {
   const _BackgroundJobsPanel({
     required this.jobs,
     required this.language,
@@ -8027,17 +8231,102 @@ class _BackgroundJobsPanel extends StatelessWidget {
   final ValueChanged<_BackgroundJob> onToggleCollapsed;
 
   @override
+  State<_BackgroundJobsPanel> createState() => _BackgroundJobsPanelState();
+}
+
+class _BackgroundJobsPanelState extends State<_BackgroundJobsPanel> {
+  Offset? _offset;
+  var _compact = false;
+
+  @override
   Widget build(BuildContext context) {
-    if (jobs.isEmpty) return const SizedBox.shrink();
-    final visibleJobs = jobs.where((job) => !job.collapsed).toList();
-    return Positioned(
-      left: 16,
-      right: 16,
-      bottom: 16,
-      child: Material(
-        elevation: 10,
-        borderRadius: BorderRadius.circular(18),
-        color: Theme.of(context).colorScheme.surface,
+    if (widget.jobs.isEmpty) return const SizedBox.shrink();
+    return LayoutBuilder(builder: (context, constraints) {
+      final visibleJobs = widget.jobs.where((job) => !job.collapsed).toList();
+      final panelHeight = _compact
+          ? 72.0
+          : math.min(
+              constraints.maxHeight - 24,
+              92.0 + math.max(1, visibleJobs.length) * 78.0,
+            );
+      final panelWidth = _compact
+          ? 72.0
+          : math.min(680.0, math.max(280.0, constraints.maxWidth - 32));
+      final initial = Offset(
+        16,
+        math.max(8, constraints.maxHeight - panelHeight - 16),
+      );
+      final rawOffset = _offset ?? initial;
+      final left = rawOffset.dx
+          .clamp(8.0, math.max(8.0, constraints.maxWidth - panelWidth - 8))
+          .toDouble();
+      final top = rawOffset.dy
+          .clamp(8.0, math.max(8.0, constraints.maxHeight - panelHeight - 8))
+          .toDouble();
+      return Positioned(
+        left: left,
+        top: top,
+        width: panelWidth,
+        child: GestureDetector(
+          onPanUpdate: (details) => setState(() {
+            _offset = Offset(left, top) + details.delta;
+          }),
+          child: _compact
+              ? _buildCompact(context)
+              : _buildExpanded(context, visibleJobs, panelHeight),
+        ),
+      );
+    });
+  }
+
+  Widget _buildCompact(BuildContext context) {
+    final aggregate = _aggregateProgress();
+    final failed = widget.jobs.any((job) => job.failed);
+    final done = widget.jobs.every((job) => job.done || job.failed);
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      elevation: 10,
+      color: colorScheme.surface,
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: () => setState(() => _compact = false),
+        child: SizedBox(
+          width: 72,
+          height: 72,
+          child: Stack(alignment: Alignment.center, children: [
+            SizedBox(
+              width: 56,
+              height: 56,
+              child: CircularProgressIndicator(
+                value: done ? 1 : aggregate,
+                color: failed ? colorScheme.error : colorScheme.primary,
+                strokeWidth: 5,
+              ),
+            ),
+            Text(
+              done ? '${widget.jobs.length}' : '${(aggregate * 100).round()}%',
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildExpanded(
+    BuildContext context,
+    List<_BackgroundJob> visibleJobs,
+    double maxHeight,
+  ) {
+    final language = widget.language;
+    return Material(
+      elevation: 10,
+      borderRadius: BorderRadius.circular(18),
+      color: Theme.of(context).colorScheme.surface,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -8045,57 +8334,80 @@ class _BackgroundJobsPanel extends StatelessWidget {
               const Icon(Icons.sync_outlined),
               const SizedBox(width: 8),
               Expanded(child: Text(language.t('jobs.title'))),
-              Text('${jobs.length}'),
+              Text('${widget.jobs.length}'),
+              IconButton(
+                onPressed: () => setState(() => _compact = true),
+                icon: const Icon(Icons.radio_button_unchecked),
+                tooltip: language.t('jobs.collapse'),
+              ),
             ]),
             if (visibleJobs.isEmpty)
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(language.t('jobs.collapsed')),
               ),
-            for (final job in visibleJobs)
-              ListTile(
-                dense: true,
-                title: Text(job.title, maxLines: 1),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    LinearProgressIndicator(
-                      value: job.done || job.failed ? 1 : job.progress,
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final job in visibleJobs)
+                    ListTile(
+                      dense: true,
+                      title: Text(job.title, maxLines: 1),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          LinearProgressIndicator(
+                            value: job.done || job.failed ? 1 : job.progress,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            job.status.isEmpty
+                                ? '${job.completed}/${job.total}'
+                                : job.status,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                      trailing: Wrap(spacing: 4, children: [
+                        IconButton(
+                          onPressed: () => widget.onToggleCollapsed(job),
+                          icon: const Icon(Icons.expand_more),
+                          tooltip: language.t('jobs.collapse'),
+                        ),
+                        if (!job.done && !job.failed)
+                          IconButton(
+                            onPressed: () => widget.onCancel(job),
+                            icon: const Icon(Icons.stop_circle_outlined),
+                            tooltip: language.t('jobs.cancel'),
+                          ),
+                        if (job.done || job.failed)
+                          IconButton(
+                            onPressed: () => widget.onRemove(job),
+                            icon: const Icon(Icons.close),
+                            tooltip: language.t('common.close'),
+                          ),
+                      ]),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      job.status.isEmpty
-                          ? '${job.completed}/${job.total}'
-                          : job.status,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-                trailing: Wrap(spacing: 4, children: [
-                  IconButton(
-                    onPressed: () => onToggleCollapsed(job),
-                    icon: const Icon(Icons.expand_more),
-                    tooltip: language.t('jobs.collapse'),
-                  ),
-                  if (!job.done && !job.failed)
-                    IconButton(
-                      onPressed: () => onCancel(job),
-                      icon: const Icon(Icons.stop_circle_outlined),
-                      tooltip: language.t('jobs.cancel'),
-                    ),
-                  if (job.done || job.failed)
-                    IconButton(
-                      onPressed: () => onRemove(job),
-                      icon: const Icon(Icons.close),
-                      tooltip: language.t('common.close'),
-                    ),
-                ]),
+                ],
               ),
+            ),
           ]),
         ),
       ),
     );
+  }
+
+  double _aggregateProgress() {
+    if (widget.jobs.isEmpty) return 0;
+    final total = widget.jobs.fold<int>(0, (sum, job) => sum + job.total);
+    if (total <= 0) return 0;
+    final completed = widget.jobs.fold<int>(
+      0,
+      (sum, job) => sum + (job.done || job.failed ? job.total : job.completed),
+    );
+    return (completed / total).clamp(0.0, 1.0).toDouble();
   }
 }
 
@@ -8894,11 +9206,26 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
   @override
   Widget build(BuildContext context) {
     final language = widget.language;
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return Dialog.fullscreen(
       child: Scaffold(
+        endDrawer: compact
+            ? Drawer(
+                width: math.min(360, MediaQuery.sizeOf(context).width * 0.88),
+                child: SafeArea(child: _sidePanel(language)),
+              )
+            : null,
         appBar: AppBar(
           title: Text(language.t('editor.text.title')),
           actions: [
+            if (compact)
+              Builder(
+                builder: (context) => IconButton(
+                  onPressed: () => Scaffold.of(context).openEndDrawer(),
+                  icon: const Icon(Icons.tune_outlined),
+                  tooltip: language.t('editor.text.convert'),
+                ),
+              ),
             IconButton(
               onPressed: _busy ? null : _save,
               icon: const Icon(Icons.save_outlined),
@@ -8906,136 +9233,134 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
             ),
           ],
         ),
-        body: Row(children: [
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(children: [
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    SegmentedButton<String>(
-                      segments: [
-                        ButtonSegment(
-                          value: 'text',
-                          label: Text(language.t('editor.text.mode.text')),
-                        ),
-                        ButtonSegment(
-                          value: 'hex',
-                          label: Text(language.t('editor.text.mode.hex')),
-                        ),
-                        ButtonSegment(
-                          value: 'binary',
-                          label: Text(language.t('editor.text.mode.binary')),
-                        ),
-                      ],
-                      selected: {_mode},
-                      onSelectionChanged: (value) {
-                        _syncBytesFromEditor();
-                        setState(() {
-                          _mode = value.first;
-                          _rebuildEditorText();
-                        });
-                      },
-                    ),
-                    DropdownButton<String>(
-                      value: _encoding,
-                      items: [
-                        const DropdownMenuItem(
-                            value: 'auto', child: Text('auto')),
-                        for (final encoding
-                            in FileViewerService.knownTextEncodings)
-                          DropdownMenuItem(
-                            value: encoding,
-                            child: Text(encoding),
-                          ),
-                      ],
-                      onChanged: _mode == 'text'
-                          ? (value) => setState(() {
-                                _encoding = value ?? 'auto';
-                                _rebuildEditorText();
-                              })
-                          : null,
-                    ),
-                    SizedBox(
-                      width: 240,
-                      child: TextField(
-                        controller: _searchController,
-                        decoration: InputDecoration(
-                          labelText: language.t('editor.text.search'),
-                          suffixIcon: IconButton(
-                            onPressed: _findNext,
-                            icon: const Icon(Icons.search),
-                          ),
-                        ),
-                        onSubmitted: (_) => _findNext(),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    expands: true,
-                    maxLines: null,
-                    minLines: null,
-                    style: const TextStyle(
-                      fontFamily: 'Consolas',
-                      fontSize: 13,
-                      height: 1.35,
-                    ),
-                    decoration: InputDecoration(
-                      alignLabelWithHint: true,
-                      labelText: widget.preview.title,
-                      border: const OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-                if (_status != null) ...[
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(_status!),
-                  ),
-                ],
+        body: compact
+            ? _editorPane(language)
+            : Row(children: [
+                Expanded(child: _editorPane(language)),
+                SizedBox(width: 340, child: _sidePanel(language)),
               ]),
-            ),
-          ),
-          SizedBox(
-            width: 340,
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                Text(
-                  language.t('editor.text.convert'),
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleMedium
-                      ?.copyWith(fontWeight: FontWeight.w800),
+      ),
+    );
+  }
+
+  Widget _editorPane(AppLanguage language) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            SegmentedButton<String>(
+              segments: [
+                ButtonSegment(
+                  value: 'text',
+                  label: Text(language.t('editor.text.mode.text')),
                 ),
-                const SizedBox(height: 8),
-                Text(language.t('editor.text.convert.note')),
-                const SizedBox(height: 16),
-                _PathTextField(
-                  controller: _outputController,
-                  label: language.t('editor.output.path'),
-                  pickDirectory: false,
-                  multiLine: false,
+                ButtonSegment(
+                  value: 'hex',
+                  label: Text(language.t('editor.text.mode.hex')),
                 ),
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: _busy ? null : _saveAs,
-                  icon: const Icon(Icons.save_as_outlined),
-                  label: Text(language.t('editor.save.as')),
+                ButtonSegment(
+                  value: 'binary',
+                  label: Text(language.t('editor.text.mode.binary')),
                 ),
               ],
+              selected: {_mode},
+              onSelectionChanged: (value) {
+                _syncBytesFromEditor();
+                setState(() {
+                  _mode = value.first;
+                  _rebuildEditorText();
+                });
+              },
+            ),
+            DropdownButton<String>(
+              value: _encoding,
+              items: [
+                const DropdownMenuItem(value: 'auto', child: Text('auto')),
+                for (final encoding in FileViewerService.knownTextEncodings)
+                  DropdownMenuItem(value: encoding, child: Text(encoding)),
+              ],
+              onChanged: _mode == 'text'
+                  ? (value) => setState(() {
+                        _encoding = value ?? 'auto';
+                        _rebuildEditorText();
+                      })
+                  : null,
+            ),
+            SizedBox(
+              width: math.min(
+                  280, math.max(180, MediaQuery.sizeOf(context).width - 48)),
+              child: TextField(
+                controller: _searchController,
+                decoration: InputDecoration(
+                  labelText: language.t('editor.text.search'),
+                  suffixIcon: IconButton(
+                    onPressed: _findNext,
+                    icon: const Icon(Icons.search),
+                  ),
+                ),
+                onSubmitted: (_) => _findNext(),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: TextField(
+            controller: _controller,
+            expands: true,
+            maxLines: null,
+            minLines: null,
+            style: const TextStyle(
+              fontFamily: 'Consolas',
+              fontSize: 13,
+              height: 1.35,
+            ),
+            decoration: InputDecoration(
+              alignLabelWithHint: true,
+              labelText: widget.preview.title,
+              border: const OutlineInputBorder(),
             ),
           ),
-        ]),
-      ),
+        ),
+        if (_status != null) ...[
+          const SizedBox(height: 8),
+          Align(alignment: Alignment.centerLeft, child: Text(_status!)),
+        ],
+      ]),
+    );
+  }
+
+  Widget _sidePanel(AppLanguage language) {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text(
+          language.t('editor.text.convert'),
+          style: Theme.of(context)
+              .textTheme
+              .titleMedium
+              ?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 8),
+        Text(language.t('editor.text.convert.note')),
+        const SizedBox(height: 16),
+        _PathTextField(
+          controller: _outputController,
+          label: language.t('editor.output.path'),
+          pickDirectory: false,
+          multiLine: false,
+        ),
+        const SizedBox(height: 12),
+        FilledButton.icon(
+          onPressed: _busy ? null : _saveAs,
+          icon: const Icon(Icons.save_as_outlined),
+          label: Text(language.t('editor.save.as')),
+        ),
+      ],
     );
   }
 
@@ -10123,107 +10448,143 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
   @override
   Widget build(BuildContext context) {
     final language = widget.language;
-    final variables = widget.plugin.variables ?? const <String, Object?>{};
-    return AlertDialog(
-      title: Text(widget.initialProfile == null
-          ? language.t('locations.profile.title')
-          : language.t('locations.profile.edit')),
-      content: SizedBox(
-        width: 680,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(widget.plugin.name,
-                  style: Theme.of(context).textTheme.titleMedium),
-              if (widget.plugin.description != null) ...[
-                const SizedBox(height: 4),
-                Text(widget.plugin.description!),
-              ],
-              const SizedBox(height: 16),
-              TextField(
-                controller: _nameController,
-                decoration: InputDecoration(
-                  labelText: language.t('locations.profile.name'),
-                ),
+    final compact = MediaQuery.sizeOf(context).width < 640;
+    final title = widget.initialProfile == null
+        ? language.t('locations.profile.title')
+        : language.t('locations.profile.edit');
+    final content = _profileForm(context);
+    final actions = [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: Text(language.t('common.cancel')),
+      ),
+      FilledButton(
+        onPressed: _save,
+        child: Text(widget.initialProfile == null
+            ? language.t('locations.profile.save')
+            : language.t('locations.profile.update')),
+      ),
+    ];
+    if (compact) {
+      return Dialog.fullscreen(
+        child: Scaffold(
+          appBar: AppBar(
+            title: Text(title),
+            actions: [
+              IconButton(
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.close),
+                tooltip: language.t('common.cancel'),
               ),
-              const SizedBox(height: 20),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      language.t('locations.profile.endpoint'),
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                  ),
-                  TextButton.icon(
-                    onPressed: _addEndpoint,
-                    icon: const Icon(Icons.add),
-                    label: Text(language.t('locations.profile.endpoint.add')),
-                  ),
-                ],
+              IconButton(
+                onPressed: _save,
+                icon: const Icon(Icons.check),
+                tooltip: widget.initialProfile == null
+                    ? language.t('locations.profile.save')
+                    : language.t('locations.profile.update'),
               ),
-              if (_endpoints.isEmpty)
-                Text(language.t('locations.profile.endpoint.optional'))
-              else
-                for (var i = 0; i < _endpoints.length; i++) ...[
-                  _EndpointEditorRow(
-                    language: language,
-                    index: i,
-                    total: _endpoints.length,
-                    controllers: _endpoints[i],
-                    onMoveUp: i == 0 ? null : () => _moveEndpoint(i, -1),
-                    onMoveDown: i == _endpoints.length - 1
-                        ? null
-                        : () => _moveEndpoint(i, 1),
-                    onRemove: () => _removeEndpoint(i),
-                  ),
-                  const SizedBox(height: 8),
-                ],
-              const SizedBox(height: 12),
-              Text(
-                language.t('locations.profile.parameters'),
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const SizedBox(height: 8),
-              if (_variableControllers.isEmpty)
-                Text(language.t('settings.plugin.no.global.settings'))
-              else
-                for (final entry in _variableControllers.entries) ...[
-                  TextField(
-                    controller: entry.value,
-                    obscureText: _isSecret(variables[entry.key]),
-                    decoration: InputDecoration(
-                      labelText:
-                          _pluginVariableLabel(entry.key, variables[entry.key]),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                ],
-              if (_error != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  _error!,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
-              ],
             ],
           ),
+          body: SafeArea(child: content),
         ),
+      );
+    }
+    return AlertDialog(
+      title: Text(title),
+      content: SizedBox(width: 680, child: content),
+      actions: actions,
+    );
+  }
+
+  Widget _profileForm(BuildContext context) {
+    final language = widget.language;
+    final variables = widget.plugin.variables ?? const <String, Object?>{};
+    return SingleChildScrollView(
+      padding: EdgeInsets.only(
+        left: 0,
+        right: 0,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + 16,
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: Text(language.t('common.cancel')),
-        ),
-        FilledButton(
-          onPressed: _save,
-          child: Text(widget.initialProfile == null
-              ? language.t('locations.profile.save')
-              : language.t('locations.profile.update')),
-        ),
-      ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(widget.plugin.name,
+              style: Theme.of(context).textTheme.titleMedium),
+          if (widget.plugin.description != null) ...[
+            const SizedBox(height: 4),
+            Text(widget.plugin.description!),
+          ],
+          const SizedBox(height: 16),
+          TextField(
+            controller: _nameController,
+            decoration: InputDecoration(
+              labelText: language.t('locations.profile.name'),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                language.t('locations.profile.endpoint'),
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              TextButton.icon(
+                onPressed: _addEndpoint,
+                icon: const Icon(Icons.add),
+                label: Text(language.t('locations.profile.endpoint.add')),
+              ),
+            ],
+          ),
+          if (_endpoints.isEmpty)
+            Text(language.t('locations.profile.endpoint.optional'))
+          else
+            for (var i = 0; i < _endpoints.length; i++) ...[
+              _EndpointEditorRow(
+                language: language,
+                index: i,
+                total: _endpoints.length,
+                controllers: _endpoints[i],
+                onMoveUp: i == 0 ? null : () => _moveEndpoint(i, -1),
+                onMoveDown: i == _endpoints.length - 1
+                    ? null
+                    : () => _moveEndpoint(i, 1),
+                onRemove: () => _removeEndpoint(i),
+              ),
+              const SizedBox(height: 8),
+            ],
+          const SizedBox(height: 12),
+          Text(
+            language.t('locations.profile.parameters'),
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          const SizedBox(height: 8),
+          if (_variableControllers.isEmpty)
+            Text(language.t('settings.plugin.no.global.settings'))
+          else
+            for (final entry in _variableControllers.entries) ...[
+              TextField(
+                controller: entry.value,
+                obscureText: _isSecret(variables[entry.key]),
+                decoration: InputDecoration(
+                  labelText:
+                      _pluginVariableLabel(entry.key, variables[entry.key]),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -10330,56 +10691,103 @@ class _EndpointEditorRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        SizedBox(width: 28, child: Text('${index + 1}.')),
-        Expanded(
-          flex: 2,
-          child: TextField(
-            controller: controllers.label,
-            decoration: InputDecoration(
-              labelText: language.t('locations.profile.endpoint.label'),
-            ),
+    final fields = [
+      Expanded(
+        flex: 2,
+        child: TextField(
+          controller: controllers.label,
+          decoration: InputDecoration(
+            labelText: language.t('locations.profile.endpoint.label'),
           ),
         ),
-        const SizedBox(width: 8),
-        Expanded(
-          flex: 3,
-          child: TextField(
-            controller: controllers.host,
-            decoration: InputDecoration(
-              labelText: language.t('locations.profile.endpoint.host'),
-            ),
+      ),
+      const SizedBox(width: 8, height: 8),
+      Expanded(
+        flex: 3,
+        child: TextField(
+          controller: controllers.host,
+          decoration: InputDecoration(
+            labelText: language.t('locations.profile.endpoint.host'),
           ),
         ),
-        const SizedBox(width: 8),
-        SizedBox(
-          width: 100,
-          child: TextField(
-            controller: controllers.port,
-            keyboardType: TextInputType.number,
-            decoration: InputDecoration(
-              labelText: language.t('locations.profile.endpoint.port'),
-            ),
+      ),
+      const SizedBox(width: 8, height: 8),
+      SizedBox(
+        width: 100,
+        child: TextField(
+          controller: controllers.port,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('locations.profile.endpoint.port'),
           ),
         ),
-        IconButton(
-          tooltip: language.t('common.up'),
-          onPressed: onMoveUp,
-          icon: const Icon(Icons.arrow_upward),
-        ),
-        IconButton(
-          tooltip: language.t('common.down'),
-          onPressed: onMoveDown,
-          icon: const Icon(Icons.arrow_downward),
-        ),
-        IconButton(
-          tooltip: language.t('common.delete'),
-          onPressed: total <= 1 ? null : onRemove,
-          icon: const Icon(Icons.close),
-        ),
-      ],
-    );
+      ),
+    ];
+    final actions = [
+      IconButton(
+        tooltip: language.t('common.up'),
+        onPressed: onMoveUp,
+        icon: const Icon(Icons.arrow_upward),
+      ),
+      IconButton(
+        tooltip: language.t('common.down'),
+        onPressed: onMoveDown,
+        icon: const Icon(Icons.arrow_downward),
+      ),
+      IconButton(
+        tooltip: language.t('common.delete'),
+        onPressed: total <= 1 ? null : onRemove,
+        icon: const Icon(Icons.close),
+      ),
+    ];
+    return LayoutBuilder(builder: (context, constraints) {
+      final compact = constraints.maxWidth < 520;
+      if (compact) {
+        return Card(
+          margin: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Expanded(child: Text('${index + 1}.')),
+                  ...actions,
+                ]),
+                TextField(
+                  controller: controllers.label,
+                  decoration: InputDecoration(
+                    labelText: language.t('locations.profile.endpoint.label'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: controllers.host,
+                  decoration: InputDecoration(
+                    labelText: language.t('locations.profile.endpoint.host'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: controllers.port,
+                  keyboardType: TextInputType.number,
+                  decoration: InputDecoration(
+                    labelText: language.t('locations.profile.endpoint.port'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+      return Row(
+        children: [
+          SizedBox(width: 28, child: Text('${index + 1}.')),
+          ...fields,
+          ...actions,
+        ],
+      );
+    });
   }
 }
 
