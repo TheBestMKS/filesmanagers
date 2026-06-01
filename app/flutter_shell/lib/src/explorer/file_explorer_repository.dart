@@ -476,11 +476,23 @@ class FileExplorerRepository {
     List<String> extraPaths = const <String>[],
   }) async {
     final entries = <ExplorerEntry>[];
+    final profileChecks = <String, Future<_RemoteConnectionCheck>>{
+      for (final location in locations)
+        if (location.enabled &&
+            location.path != null &&
+            _profileIdForLocation(location) != null &&
+            location.pluginId != null)
+          location.pluginId!: _checkRemoteProfile(location.pluginId!),
+    };
     for (final location in locations) {
       final path = location.path;
       if (!location.enabled || path == null) {
         continue;
       }
+      final profileId = _profileIdForLocation(location);
+      final connectionCheck = location.pluginId == null
+          ? null
+          : await profileChecks[location.pluginId!];
       final entry = await entryForPath(path);
       if (entry != null) {
         entries.add(
@@ -494,6 +506,10 @@ class FileExplorerRepository {
             modifiedAt: entry.modifiedAt,
             createdAt: entry.createdAt,
             exists: entry.exists,
+            connectionProfileId: profileId,
+            connectionStatus:
+                connectionCheck?.status ?? ExplorerConnectionStatus.none,
+            connectionMessage: connectionCheck?.message,
           ),
         );
       } else {
@@ -505,6 +521,10 @@ class FileExplorerRepository {
             sizeBytes: 0,
             modifiedAt: DateTime.fromMillisecondsSinceEpoch(0),
             exists: false,
+            connectionProfileId: profileId,
+            connectionStatus:
+                connectionCheck?.status ?? ExplorerConnectionStatus.none,
+            connectionMessage: connectionCheck?.message,
           ),
         );
       }
@@ -527,6 +547,44 @@ class FileExplorerRepository {
       }
     }
     return DirectorySnapshot(path: label, entries: entries);
+  }
+
+  String? _profileIdForLocation(ExplorerLocation location) {
+    final id = location.id;
+    if (id.startsWith('profile-')) {
+      return id.substring('profile-'.length);
+    }
+    final pluginId = location.pluginId;
+    if (pluginId != null && pluginId.startsWith('profile-')) {
+      return pluginId.substring('profile-'.length);
+    }
+    return null;
+  }
+
+  Future<_RemoteConnectionCheck> _checkRemoteProfile(
+    String runtimePluginId,
+  ) async {
+    if (!_remote.hasPlugin(runtimePluginId)) {
+      return const _RemoteConnectionCheck(
+        ExplorerConnectionStatus.unavailable,
+        'Profile executor is not loaded.',
+      );
+    }
+    try {
+      await _remote
+          .clientFor(runtimePluginId)
+          .list('/')
+          .timeout(const Duration(seconds: 6));
+      return const _RemoteConnectionCheck(
+        ExplorerConnectionStatus.available,
+        null,
+      );
+    } catch (error) {
+      return _RemoteConnectionCheck(
+        ExplorerConnectionStatus.unavailable,
+        error.toString(),
+      );
+    }
   }
 
   Future<DirectorySnapshot> mediaSnapshot({
@@ -1936,6 +1994,13 @@ class _CryptPayloadLayout {
   final Map<String, Object?> params;
   final int payloadOffset;
   final int encryptedHeaderLength;
+}
+
+class _RemoteConnectionCheck {
+  const _RemoteConnectionCheck(this.status, this.message);
+
+  final ExplorerConnectionStatus status;
+  final String? message;
 }
 
 class _ZipVirtualPath {

@@ -23,7 +23,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.1';
+const _appVersion = '0.12.2';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
@@ -732,6 +732,114 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     if (created != null && created.path != null) {
       unawaited(_openPathSafely(created.path!));
     }
+  }
+
+  PluginConnectionProfile? _connectionProfileForEntry(ExplorerEntry entry) {
+    final id = entry.connectionProfileId;
+    if (id == null) {
+      return null;
+    }
+    return _settings.connectionProfiles
+        .where((profile) => profile.id == id)
+        .firstOrNull;
+  }
+
+  CloudPluginDefinition? _pluginForProfile(PluginConnectionProfile profile) {
+    return _pluginDefs
+        .where((plugin) => plugin.id == profile.pluginId)
+        .firstOrNull;
+  }
+
+  Future<void> _editConnectionProfile(ExplorerEntry entry) async {
+    final profile = _connectionProfileForEntry(entry);
+    if (profile == null) {
+      _snack(_language.t('locations.profile.missing'));
+      return;
+    }
+    final plugin = _pluginForProfile(profile);
+    if (plugin == null) {
+      _snack(_language.t('locations.profile.plugin.missing'));
+      return;
+    }
+    final updated = await showDialog<PluginConnectionProfile>(
+      context: context,
+      builder: (context) => _ConnectionProfileDialog(
+        language: _language,
+        plugin: plugin,
+        initialProfile: profile,
+      ),
+    );
+    if (updated == null) {
+      return;
+    }
+    final profiles = _settings.connectionProfiles
+        .map((item) => item.id == updated.id ? updated : item)
+        .toList();
+    final nextSettings =
+        await _settingsRepo.setConnectionProfiles(_settings, profiles);
+    _explorer.configurePlugins(_pluginDefs, nextSettings.connectionProfiles);
+    final locations = await _explorer.loadLocations(
+      _pluginDefs,
+      nextSettings.connectionProfiles,
+    );
+    if (!mounted) return;
+    setState(() {
+      _settings = nextSettings;
+      _locations = locations;
+    });
+    _openLocationsHome();
+    _snack('${_language.t('locations.profile.updated')} ${updated.name}');
+  }
+
+  Future<void> _deleteConnectionProfile(ExplorerEntry entry) async {
+    final profile = _connectionProfileForEntry(entry);
+    if (profile == null) {
+      _snack(_language.t('locations.profile.missing'));
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('locations.profile.delete')),
+        content: Text(
+          '${_language.t('locations.profile.delete.confirm')}\n${profile.name}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(_language.t('common.delete')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    final profiles = _settings.connectionProfiles
+        .where((item) => item.id != profile.id)
+        .toList();
+    final nextSettings =
+        await _settingsRepo.setConnectionProfiles(_settings, profiles);
+    _explorer.configurePlugins(_pluginDefs, nextSettings.connectionProfiles);
+    final locations = await _explorer.loadLocations(
+      _pluginDefs,
+      nextSettings.connectionProfiles,
+    );
+    if (!mounted) return;
+    setState(() {
+      _settings = nextSettings;
+      _locations = locations;
+      if (_selected?.connectionProfileId == profile.id) {
+        _selected = null;
+        _preview = null;
+      }
+    });
+    _openLocationsHome();
+    _snack('${_language.t('locations.profile.deleted')} ${profile.name}');
   }
 
   void _openExplorerHome() {
@@ -2096,6 +2204,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       case _EntryAction.useAsMusic:
       case _EntryAction.useAsMultimedia:
         await _useFolderAs(entry, action);
+      case _EntryAction.editConnectionProfile:
+        await _editConnectionProfile(entry);
+      case _EntryAction.deleteConnectionProfile:
+        await _deleteConnectionProfile(entry);
     }
   }
 
@@ -4446,6 +4558,8 @@ enum _EntryAction {
   useAsVideo,
   useAsMusic,
   useAsMultimedia,
+  editConnectionProfile,
+  deleteConnectionProfile,
 }
 
 enum _PreviewAction {
@@ -6044,6 +6158,8 @@ class _EntryList extends StatelessWidget {
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
                 minVerticalPadding: 0,
                 selected: selected?.path == entry.path,
+                textColor: _connectionTextColor(entry),
+                iconColor: _connectionTextColor(entry),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
@@ -6074,9 +6190,17 @@ class _EntryList extends StatelessWidget {
                   style: TextStyle(fontSize: 14 * fileTextScale),
                 ),
                 subtitle: Text(entry.exists
-                    ? '${_size(entry)} - ${_date(entry.modifiedAt)}'
+                    ? _subtitle(entry)
                     : language.t('recent.missing.file')),
                 trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (entry.connectionStatus != ExplorerConnectionStatus.none)
+                    Icon(
+                      entry.connectionStatus ==
+                              ExplorerConnectionStatus.available
+                          ? Icons.check_circle_outline
+                          : Icons.error_outline,
+                      color: _connectionTextColor(entry),
+                    ),
                   if (entry.containerInfo?.isOk == true)
                     const Icon(Icons.verified_outlined,
                         color: Color(0xFF2B7A4B)),
@@ -6168,6 +6292,7 @@ class _EntryList extends StatelessWidget {
     final isFavorite = favoritePaths.contains(entry.path);
     final isRecent = recentPaths.contains(entry.path);
     final isVirtual = entry.path.startsWith('zip://');
+    final isProfileLocation = entry.connectionProfileId != null;
     if (entry.isNavigationEntry) {
       return [
         PopupMenuItem(
@@ -6184,43 +6309,64 @@ class _EntryList extends StatelessWidget {
       const PopupMenuDivider(),
       PopupMenuItem(
         value: _EntryAction.createFolder,
-        enabled: entry.exists && entry.isDirectory && !isVirtual,
+        enabled: entry.exists &&
+            entry.isDirectory &&
+            !isVirtual &&
+            !isProfileLocation,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.folder')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createPlain,
-        enabled: entry.exists && entry.isDirectory && !isVirtual,
+        enabled: entry.exists &&
+            entry.isDirectory &&
+            !isVirtual &&
+            !isProfileLocation,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.plain')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createEncryptedPlain,
-        enabled: entry.exists && entry.isDirectory && !isVirtual,
+        enabled: entry.exists &&
+            entry.isDirectory &&
+            !isVirtual &&
+            !isProfileLocation,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.encrypted.plain')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createCsv,
-        enabled: entry.exists && entry.isDirectory && !isVirtual,
+        enabled: entry.exists &&
+            entry.isDirectory &&
+            !isVirtual &&
+            !isProfileLocation,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.csv')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createEncryptedCsv,
-        enabled: entry.exists && entry.isDirectory && !isVirtual,
+        enabled: entry.exists &&
+            entry.isDirectory &&
+            !isVirtual &&
+            !isProfileLocation,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.encrypted.csv')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createImage,
-        enabled: entry.exists && entry.isDirectory && !isVirtual,
+        enabled: entry.exists &&
+            entry.isDirectory &&
+            !isVirtual &&
+            !isProfileLocation,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.image')}'),
       ),
       PopupMenuItem(
         value: _EntryAction.createEncryptedImage,
-        enabled: entry.exists && entry.isDirectory && !isVirtual,
+        enabled: entry.exists &&
+            entry.isDirectory &&
+            !isVirtual &&
+            !isProfileLocation,
         child: Text(
             '${language.t('explorer.create')} > ${language.t('create.encrypted.image')}'),
       ),
@@ -6241,36 +6387,51 @@ class _EntryList extends StatelessWidget {
       const PopupMenuDivider(),
       PopupMenuItem(
         value: _EntryAction.copy,
-        enabled: entry.exists && !isVirtual,
+        enabled: entry.exists && !isVirtual && !isProfileLocation,
         child: Text(language.t('explorer.copy')),
       ),
       PopupMenuItem(
         value: _EntryAction.cut,
-        enabled: entry.exists && !isVirtual,
+        enabled: entry.exists && !isVirtual && !isProfileLocation,
         child: Text(language.t('explorer.cut')),
       ),
       PopupMenuItem(
         value: _EntryAction.paste,
-        enabled: canPaste && entry.isDirectory && entry.exists && !isVirtual,
+        enabled: canPaste &&
+            entry.isDirectory &&
+            entry.exists &&
+            !isVirtual &&
+            !isProfileLocation,
         child: Text(language.t('explorer.paste')),
       ),
       PopupMenuItem(
         value: _EntryAction.rename,
-        enabled: entry.exists && !isVirtual,
+        enabled: entry.exists && !isVirtual && !isProfileLocation,
         child: Text(language.t('explorer.rename')),
       ),
       PopupMenuItem(
         value: _EntryAction.delete,
-        enabled: entry.exists && !isVirtual,
+        enabled: entry.exists && !isVirtual && !isProfileLocation,
         child: Text(language.t('explorer.delete')),
       ),
       PopupMenuItem(
         value: _EntryAction.properties,
         child: Text(language.t('explorer.properties')),
       ),
+      if (entry.connectionProfileId != null) const PopupMenuDivider(),
+      if (entry.connectionProfileId != null)
+        PopupMenuItem(
+          value: _EntryAction.editConnectionProfile,
+          child: Text(language.t('locations.profile.edit')),
+        ),
+      if (entry.connectionProfileId != null)
+        PopupMenuItem(
+          value: _EntryAction.deleteConnectionProfile,
+          child: Text(language.t('locations.profile.delete')),
+        ),
       PopupMenuItem(
         value: _EntryAction.send,
-        enabled: entry.exists && !isVirtual,
+        enabled: entry.exists && !isVirtual && !isProfileLocation,
         child: Text(language.t('explorer.send')),
       ),
       if (!entry.isDirectory) const PopupMenuDivider(),
@@ -6278,50 +6439,50 @@ class _EntryList extends StatelessWidget {
           FileViewerService.extensionForName(entry.path) == '.zip')
         PopupMenuItem(
           value: _EntryAction.unzip,
-          enabled: entry.exists && !isVirtual,
+          enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('explorer.unzip')),
         ),
       if (!entry.isDirectory && !entry.isEncrypted)
         PopupMenuItem(
           value: _EntryAction.encrypt,
-          enabled: entry.exists && !isVirtual,
+          enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('explorer.encrypt')),
         ),
       if (!entry.isDirectory && entry.isEncrypted)
         PopupMenuItem(
           value: _EntryAction.decrypt,
-          enabled: entry.exists && !isVirtual,
+          enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('decrypt.action')),
         ),
       if (entry.isDirectory) const PopupMenuDivider(),
       if (entry.isDirectory)
         PopupMenuItem(
           value: _EntryAction.folderContainer,
-          enabled: entry.exists && !isVirtual,
+          enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('explorer.folder.container')),
         ),
       if (entry.isDirectory)
         PopupMenuItem(
           value: _EntryAction.folderEncryptName,
-          enabled: entry.exists && !isVirtual,
+          enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('explorer.folder.encrypt.name')),
         ),
       if (entry.isDirectory)
         PopupMenuItem(
           value: _EntryAction.folderDecryptName,
-          enabled: entry.exists && !isVirtual,
+          enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('explorer.folder.decrypt.name')),
         ),
       if (entry.isDirectory)
         PopupMenuItem(
           value: _EntryAction.folderEncrypt,
-          enabled: entry.exists && !isVirtual,
+          enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('explorer.folder.encrypt')),
         ),
       if (entry.isDirectory)
         PopupMenuItem(
           value: _EntryAction.folderDecrypt,
-          enabled: entry.exists,
+          enabled: entry.exists && !isProfileLocation,
           child: Text(language.t('explorer.folder.decrypt')),
         ),
       if (entry.isDirectory) const PopupMenuDivider(),
@@ -6386,6 +6547,8 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.useAsVideo:
       case _EntryAction.useAsMusic:
       case _EntryAction.useAsMultimedia:
+      case _EntryAction.editConnectionProfile:
+      case _EntryAction.deleteConnectionProfile:
         onEntryAction(entry, action);
       case _EntryAction.addFavorite:
       case _EntryAction.removeFavorite:
@@ -6410,11 +6573,34 @@ class _EntryList extends StatelessWidget {
         };
 
   Color? _color(ExplorerEntry entry) => switch (entry.kind) {
+        _ when entry.connectionStatus == ExplorerConnectionStatus.available =>
+          const Color(0xFF2B7A4B),
+        _ when entry.connectionStatus == ExplorerConnectionStatus.unavailable =>
+          const Color(0xFFB42318),
         ExplorerEntryKind.directory => const Color(0xFFD29522),
         ExplorerEntryKind.encryptedFile => const Color(0xFF0F4C81),
         ExplorerEntryKind.folderMeta => const Color(0xFF42617D),
         _ => null,
       };
+
+  Color? _connectionTextColor(ExplorerEntry entry) =>
+      switch (entry.connectionStatus) {
+        ExplorerConnectionStatus.available => const Color(0xFF2B7A4B),
+        ExplorerConnectionStatus.unavailable => const Color(0xFFB42318),
+        ExplorerConnectionStatus.none => null,
+      };
+
+  String _subtitle(ExplorerEntry entry) {
+    final connection = switch (entry.connectionStatus) {
+      ExplorerConnectionStatus.available =>
+        language.t('locations.connection.available'),
+      ExplorerConnectionStatus.unavailable =>
+        '${language.t('locations.connection.unavailable')}${entry.connectionMessage == null ? '' : ': ${entry.connectionMessage}'}',
+      ExplorerConnectionStatus.none => null,
+    };
+    final details = '${_size(entry)} - ${_date(entry.modifiedAt)}';
+    return connection == null ? details : '$connection - $details';
+  }
 
   String _size(ExplorerEntry entry) {
     if (entry.isDirectory) return language.t('explorer.folder');
@@ -9849,10 +10035,12 @@ class _ConnectionProfileDialog extends StatefulWidget {
   const _ConnectionProfileDialog({
     required this.language,
     required this.plugin,
+    this.initialProfile,
   });
 
   final AppLanguage language;
   final CloudPluginDefinition plugin;
+  final PluginConnectionProfile? initialProfile;
 
   @override
   State<_ConnectionProfileDialog> createState() =>
@@ -9877,15 +10065,30 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
   @override
   void initState() {
     super.initState();
-    _nameController = TextEditingController(text: widget.plugin.name);
+    final initialProfile = widget.initialProfile;
+    _nameController =
+        TextEditingController(text: initialProfile?.name ?? widget.plugin.name);
     final variables = widget.plugin.variables ?? const <String, Object?>{};
     for (final entry in variables.entries) {
       if (_endpointVariableKeys.contains(entry.key)) {
         continue;
       }
       _variableControllers[entry.key] = TextEditingController(
-        text: _variableDefault(entry.value),
+        text: initialProfile?.variables[entry.key] ??
+            _variableDefault(entry.value),
       );
+    }
+    if (initialProfile != null && initialProfile.endpoints.isNotEmpty) {
+      _endpoints.addAll(
+        initialProfile.endpoints.map(
+          (endpoint) => _EndpointFieldControllers(
+            label: endpoint.label,
+            host: endpoint.host,
+            port: endpoint.port?.toString() ?? '',
+          ),
+        ),
+      );
+      return;
     }
     final endpointHost = _variableDefault(variables['host']).isNotEmpty
         ? _variableDefault(variables['host'])
@@ -9922,7 +10125,9 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
     final language = widget.language;
     final variables = widget.plugin.variables ?? const <String, Object?>{};
     return AlertDialog(
-      title: Text(language.t('locations.profile.title')),
+      title: Text(widget.initialProfile == null
+          ? language.t('locations.profile.title')
+          : language.t('locations.profile.edit')),
       content: SizedBox(
         width: 680,
         child: SingleChildScrollView(
@@ -10014,7 +10219,9 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
         ),
         FilledButton(
           onPressed: _save,
-          child: Text(language.t('locations.profile.save')),
+          child: Text(widget.initialProfile == null
+              ? language.t('locations.profile.save')
+              : language.t('locations.profile.update')),
         ),
       ],
     );
@@ -10066,14 +10273,22 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
         variables[entry.key] = value;
       }
     }
+    final initialProfile = widget.initialProfile;
+    final profile = initialProfile == null
+        ? PluginConnectionProfile.create(
+            pluginId: widget.plugin.id,
+            name: name,
+            variables: variables,
+            endpoints: endpoints,
+          )
+        : initialProfile.copyWith(
+            name: name,
+            variables: variables,
+            endpoints: endpoints,
+          );
     Navigator.pop(
       context,
-      PluginConnectionProfile.create(
-        pluginId: widget.plugin.id,
-        name: name,
-        variables: variables,
-        endpoints: endpoints,
-      ),
+      profile,
     );
   }
 

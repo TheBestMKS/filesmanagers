@@ -51,6 +51,12 @@ enum FileContentKind {
   unknown,
 }
 
+enum ExplorerConnectionStatus {
+  none,
+  available,
+  unavailable,
+}
+
 enum MediaSection {
   gallery,
   music,
@@ -104,6 +110,9 @@ class ExplorerEntry {
     this.containerInfo,
     this.exists = true,
     this.isNavigationEntry = false,
+    this.connectionProfileId,
+    this.connectionStatus = ExplorerConnectionStatus.none,
+    this.connectionMessage,
   });
 
   final String name;
@@ -115,6 +124,9 @@ class ExplorerEntry {
   final VaultContainerInfo? containerInfo;
   final bool exists;
   final bool isNavigationEntry;
+  final String? connectionProfileId;
+  final ExplorerConnectionStatus connectionStatus;
+  final String? connectionMessage;
 
   bool get isDirectory => kind == ExplorerEntryKind.directory;
   bool get isEncrypted =>

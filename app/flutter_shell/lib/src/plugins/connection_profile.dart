@@ -67,6 +67,20 @@ class PluginConnectionProfile {
     return endpoints.map((endpoint) => endpoint.displayLabel).join(' -> ');
   }
 
+  PluginConnectionProfile copyWith({
+    String? name,
+    Map<String, String>? variables,
+    List<PluginConnectionEndpoint>? endpoints,
+  }) {
+    return PluginConnectionProfile(
+      id: id,
+      pluginId: pluginId,
+      name: name ?? this.name,
+      variables: variables ?? this.variables,
+      endpoints: endpoints ?? this.endpoints,
+    );
+  }
+
   factory PluginConnectionProfile.create({
     required String pluginId,
     required String name,

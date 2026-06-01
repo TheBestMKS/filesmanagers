@@ -1,7 +1,7 @@
 name: secure_vault_shell
 description: Flutter shell for the secure vault explorer.
 publish_to: "none"
-version: 0.12.1
+version: 0.12.2
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
