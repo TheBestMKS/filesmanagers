@@ -18,13 +18,14 @@ import 'src/logging/app_log.dart';
 import 'src/platform_services.dart';
 import 'src/plugins/cloud_plugin_registry.dart' hide basename;
 import 'src/plugins/connection_profile.dart';
+import 'src/plugins/media_plugin_runtime.dart';
 import 'src/security/security_settings.dart';
 import 'src/security/vault_crypto.dart';
 import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.5';
+const _appVersion = '0.12.6';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
@@ -227,6 +228,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   late final CryptBindings _bindings;
   late final FileExplorerRepository _explorer;
   late final CloudPluginRegistry _plugins;
+  late final WebMusicPluginService _webMusicPlugins;
   late final SecuritySettingsRepository _settingsRepo;
 
   var _loading = true;
@@ -234,6 +236,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   var _page = ShellPage.explorer;
   var _locations = <ExplorerLocation>[];
   var _pluginDefs = <CloudPluginDefinition>[];
+  var _pluginMediaSections = <PluginMediaSection>[];
+  PluginMediaSection? _activePluginMediaSection;
   var _settings = const SecuritySettings();
   var _language = AppLanguage.builtIn('ru');
   var _runtime = CryptRuntimeInfo.unavailable;
@@ -271,6 +275,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _bindings = CryptBindings();
     _explorer = FileExplorerRepository(_bindings);
     _plugins = CloudPluginRegistry();
+    _webMusicPlugins = const WebMusicPluginService();
     _settingsRepo = SecuritySettingsRepository();
     _boot();
   }
@@ -321,6 +326,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _explorer.configurePlugins(pluginDefs, settings.connectionProfiles);
     final locations =
         await _explorer.loadLocations(pluginDefs, settings.connectionProfiles);
+    final pluginMediaSections =
+        PluginRuntime(pluginDefs, settings.pluginSettingsById).mediaSections();
     final first =
         locations.where((e) => e.enabled && e.path != null).firstOrNull;
 
@@ -361,6 +368,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _commonEncryptionPassword = commonPassword;
       _runtime = runtime;
       _pluginDefs = pluginDefs;
+      _pluginMediaSections = pluginMediaSections;
       _locations = locations;
       _currentPath = currentPath;
       _selected = selected;
@@ -478,6 +486,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _forwardStack.clear();
       }
       _page = ShellPage.explorer;
+      _activePluginMediaSection = null;
       _showingRecent = false;
       _currentPath = path;
       _selected = null;
@@ -563,6 +572,15 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         decryptNames: _settings.decryptNamesInExplorer,
       );
 
+  PluginRuntime _pluginRuntime([
+    List<CloudPluginDefinition>? plugins,
+    SecuritySettings? settings,
+  ]) =>
+      PluginRuntime(
+        plugins ?? _pluginDefs,
+        settings?.pluginSettingsById ?? _settings.pluginSettingsById,
+      );
+
   Future<void> _toggleHiddenFiles() async {
     final next =
         _settings.copyWith(showHiddenFiles: !_settings.showHiddenFiles);
@@ -597,6 +615,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   Future<void> _refresh() async {
+    final pluginSection = _activePluginMediaSection;
+    if (pluginSection != null) {
+      _openPluginMediaSection(pluginSection);
+      return;
+    }
     final mediaSection = switch (_page) {
       ShellPage.gallery => MediaSection.gallery,
       ShellPage.music => MediaSection.music,
@@ -883,6 +906,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     ];
     setState(() {
       _page = ShellPage.explorer;
+      _activePluginMediaSection = null;
       _showingRecent = false;
       _selected = null;
       _preview = null;
@@ -902,7 +926,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   Future<void> _openMediaSectionAsync(MediaSection section) async {
-    if (section == MediaSection.torrent && !_settings.torrentEnabled) {
+    _activePluginMediaSection = null;
+    if (section == MediaSection.torrent &&
+        (!_settings.torrentEnabled || !_pluginRuntime().hasTorrentPlugin)) {
       _snack(_language.t('settings.torrent.disabled'));
       return;
     }
@@ -964,6 +990,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
           );
     setState(() {
       _page = page;
+      _activePluginMediaSection = null;
       _showingRecent = false;
       _currentPath = label;
       _selected = null;
@@ -1116,6 +1143,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   void _openRecentFiles() {
     setState(() {
       _page = ShellPage.explorer;
+      _activePluginMediaSection = null;
       _showingRecent = true;
       _selected = null;
       _preview = null;
@@ -1132,6 +1160,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   void _openFavoriteFiles() {
     setState(() {
       _page = ShellPage.explorer;
+      _activePluginMediaSection = null;
       _showingRecent = false;
       _selected = null;
       _preview = null;
@@ -1228,9 +1257,48 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       return;
     }
     if (FileViewerService.extensionForName(entry.path) == '.torrent' &&
-        !_explorer.isVirtualPath(entry.path)) {
+        !_explorer.isVirtualPath(entry.path) &&
+        _settings.torrentEnabled &&
+        _pluginRuntime().handlesFileExtension('.torrent')) {
       final imported = await _explorer.importTorrentToVault(entry.path);
       await _openPathSafely(_explorer.torrentRootPath(imported.path));
+      return;
+    }
+    if (_isHttpMedia(entry.path)) {
+      final kind = FileViewerService.kindForName(entry.name);
+      final preview = FilePreview(
+        title: entry.name,
+        subtitle: entry.path,
+        sourcePath: entry.path,
+        contentKind:
+            kind == FileContentKind.unknown ? FileContentKind.audio : kind,
+      );
+      final previewFuture = Future<FilePreview>.value(preview);
+      final playlist = _mediaPlaylist.isEmpty
+          ? [
+              MediaPreviewItem(
+                title: entry.name,
+                kind: preview.contentKind,
+                path: entry.path,
+                resumeKey: entry.path,
+              ),
+            ]
+          : _mediaPlaylist;
+      setState(() {
+        _selected = entry;
+        _preview = previewFuture;
+        _mediaPlaylist = playlist;
+        _imagePlaylist = const [];
+      });
+      if (forceFullScreen ||
+          (!_previewVisible && _settings.openFullscreenOnHiddenPreviewTap)) {
+        _showPreviewWindow(preview);
+      }
+      if (_settings.rememberRecentFiles) {
+        final next =
+            await _settingsRepo.recordRecentFile(_settings, entry.path);
+        if (mounted) setState(() => _settings = next);
+      }
       return;
     }
     final previewFuture = _explorer.previewFile(
@@ -3671,8 +3739,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _explorer.configurePlugins(pluginDefs, _settings.connectionProfiles);
     final locations =
         await _explorer.loadLocations(pluginDefs, _settings.connectionProfiles);
+    final pluginMediaSections =
+        _pluginRuntime(pluginDefs, _settings).mediaSections();
     setState(() {
       _pluginDefs = pluginDefs;
+      _pluginMediaSections = pluginMediaSections;
       _locations = locations;
     });
     return '${_language.t('settings.plugin.installed')} ${dir.path}';
@@ -3701,17 +3772,222 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       settings =
           await _settingsRepo.setConnectionProfiles(settings, filteredProfiles);
     }
+    if (settings.pluginSettingsById.containsKey(pluginId)) {
+      settings = await _settingsRepo.setPluginSettings(
+        settings,
+        pluginId,
+        const <String, String>{},
+      );
+    }
     _explorer.configurePlugins(pluginDefs, settings.connectionProfiles);
     final locations =
         await _explorer.loadLocations(pluginDefs, settings.connectionProfiles);
+    final pluginMediaSections =
+        _pluginRuntime(pluginDefs, settings).mediaSections();
     if (mounted) {
       setState(() {
         _settings = settings;
         _pluginDefs = pluginDefs;
+        _pluginMediaSections = pluginMediaSections;
+        if (_activePluginMediaSection != null &&
+            !pluginMediaSections.any((section) =>
+                section.runtimeId == _activePluginMediaSection!.runtimeId)) {
+          _activePluginMediaSection = null;
+          _page = ShellPage.explorer;
+        }
         _locations = locations;
       });
     }
     return _language.t('settings.plugin.deleted');
+  }
+
+  void _openPluginMediaSection(PluginMediaSection section) {
+    unawaited(_openPluginMediaSectionAsync(section));
+  }
+
+  Future<void> _openPluginMediaSectionAsync(PluginMediaSection section) async {
+    final snapshotFuture = _pluginMediaSnapshot(section);
+    setState(() {
+      _page = section.kind == FileContentKind.video
+          ? ShellPage.video
+          : ShellPage.music;
+      _activePluginMediaSection = section;
+      _showingRecent = false;
+      _currentPath = section.title;
+      _selected = null;
+      _preview = null;
+      _mediaPlaylist = const [];
+      _imagePlaylist = const [];
+      _selectedPaths = const <String>{};
+      _snapshot = snapshotFuture;
+    });
+    final snapshot = await snapshotFuture;
+    if (!mounted || _activePluginMediaSection?.runtimeId != section.runtimeId) {
+      return;
+    }
+    final playlist = _mediaItemsFromEntries(snapshot.entries, section.kind);
+    setState(() => _mediaPlaylist = playlist);
+  }
+
+  Future<DirectorySnapshot> _pluginMediaSnapshot(
+    PluginMediaSection section,
+  ) =>
+      _webMusicPlugins.snapshot(section, query: _searchQuery);
+
+  Future<String> _savePluginSettings(
+    String pluginId,
+    Map<String, String> settings,
+  ) async {
+    final next = await _settingsRepo.setPluginSettings(
+      _settings,
+      pluginId,
+      settings,
+    );
+    final pluginMediaSections =
+        _pluginRuntime(_pluginDefs, next).mediaSections();
+    if (!mounted) return _language.t('settings.saved');
+    setState(() {
+      _settings = next;
+      _pluginMediaSections = pluginMediaSections;
+      if (_activePluginMediaSection != null) {
+        _activePluginMediaSection = pluginMediaSections
+            .where((section) =>
+                section.runtimeId == _activePluginMediaSection!.runtimeId)
+            .firstOrNull;
+      }
+    });
+    return _language.t('settings.saved');
+  }
+
+  Future<void> _showAddMusicSourceDialog() async {
+    final plugin = _pluginDefs
+        .where((item) => item.id == 'universal-web-music')
+        .firstOrNull;
+    if (plugin == null) {
+      _snack(_language.t('plugin.music.unavailable'));
+      return;
+    }
+    final titleController = TextEditingController();
+    final siteController = TextEditingController(text: 'https://');
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('plugin.music.add.site')),
+        content: SizedBox(
+          width: 520,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: titleController,
+              autofocus: true,
+              decoration:
+                  InputDecoration(labelText: _language.t('common.name')),
+            ),
+            TextField(
+              controller: siteController,
+              decoration:
+                  InputDecoration(labelText: _language.t('plugin.music.site')),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, {
+              'title': titleController.text.trim(),
+              'baseUrl': siteController.text.trim(),
+            }),
+            child: Text(_language.t('common.add')),
+          ),
+        ],
+      ),
+    );
+    titleController.dispose();
+    siteController.dispose();
+    if (result == null) return;
+    final title = result['title'] ?? '';
+    var baseUrl = result['baseUrl'] ?? '';
+    if (baseUrl.isNotEmpty && Uri.tryParse(baseUrl)?.hasScheme != true) {
+      baseUrl = 'https://$baseUrl';
+    }
+    if (title.isEmpty || Uri.tryParse(baseUrl)?.hasScheme != true) {
+      _snack(_language.t('plugin.music.invalid.site'));
+      return;
+    }
+    final current =
+        _settings.pluginSettingsById[plugin.id] ?? const <String, String>{};
+    final sites = <Map<String, Object?>>[];
+    final existing = current['sitesJson'];
+    if (existing != null && existing.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(existing);
+        if (decoded is List) {
+          for (final item in decoded.whereType<Map>()) {
+            sites.add(
+              item.map((key, value) => MapEntry(key.toString(), value)),
+            );
+          }
+        }
+      } catch (_) {}
+    }
+    sites.add({
+      'id': '${DateTime.now().millisecondsSinceEpoch}',
+      'title': title,
+      'baseUrl': baseUrl,
+      'searchPath': '/search?q={query}',
+    });
+    final message = await _savePluginSettings(plugin.id, {
+      ...current,
+      'sitesJson': jsonEncode(sites),
+    });
+    _snack(message);
+  }
+
+  Future<void> _downloadPluginMediaEntry(ExplorerEntry entry) async {
+    if (!_isHttpMedia(entry.path)) return;
+    final targetController = TextEditingController(
+      text: _standardMediaRoots(MediaSection.music).firstOrNull ??
+          (Platform.environment['USERPROFILE'] ??
+              Platform.environment['HOME'] ??
+              ''),
+    );
+    final targetPath = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('plugin.media.download')),
+        content: SizedBox(
+          width: 520,
+          child: _PathTextField(
+            controller: targetController,
+            label: _language.t('common.target.folder'),
+            pickDirectory: true,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(_language.t('common.cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, targetController.text),
+            child: Text(_language.t('common.download')),
+          ),
+        ],
+      ),
+    );
+    targetController.dispose();
+    if (targetPath == null || targetPath.trim().isEmpty) return;
+    try {
+      final file = await _webMusicPlugins.download(
+        entry,
+        Directory(_expandPathVariables(targetPath.trim())),
+      );
+      _snack('${_language.t('transfer.done')} ${file.path}');
+    } catch (error) {
+      _snack('$error');
+    }
   }
 
   Future<String> _exportConfigurationArchive() async {
@@ -3736,11 +4012,15 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _explorer.configurePlugins(pluginDefs, next.connectionProfiles);
     final locations =
         await _explorer.loadLocations(pluginDefs, next.connectionProfiles);
+    final pluginMediaSections =
+        _pluginRuntime(pluginDefs, next).mediaSections();
     if (mounted) {
       setState(() {
         _settings = next;
         _language = language;
         _pluginDefs = pluginDefs;
+        _pluginMediaSections = pluginMediaSections;
+        _activePluginMediaSection = null;
         _locations = locations;
         _searchMode = next.searchMode;
         _searchUseRegex = next.searchUseRegex;
@@ -3971,6 +4251,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                         : const <String>[],
                     currentPath: _currentPath,
                     page: _page,
+                    pluginMediaSections: _pluginMediaSections,
+                    activePluginSectionId: _activePluginMediaSection?.runtimeId,
+                    showTorrentSection: _settings.torrentEnabled &&
+                        _pluginRuntime().hasTorrentPlugin,
+                    showMusicSourceAdd:
+                        _pluginRuntime().hasUniversalMusicPlugin,
                     onLocation: _selectLocation,
                     onFavoritePath: _openFavoritePath,
                     onRemoveFavoritePath: _removeFavoritePath,
@@ -3991,6 +4277,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                     onAllLocations: _openLocationsHome,
                     onAddLocation: _showAddLocationDialog,
                     onMediaSection: _openMediaSection,
+                    onPluginMediaSection: _openPluginMediaSection,
+                    onAddMusicSource: _showAddMusicSourceDialog,
                     onSettings: () =>
                         setState(() => _page = ShellPage.settings),
                     onAbout: _showAbout,
@@ -4010,6 +4298,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                           onInstallPluginZip: _installPluginZip,
                           onExportPluginZip: _exportPluginZip,
                           onDeletePlugin: _deletePlugin,
+                          onSavePluginSettings: _savePluginSettings,
                           onExportConfigurationArchive:
                               _exportConfigurationArchive,
                           onExportLanguageSample: _exportLanguageSample,
@@ -4032,6 +4321,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                   _page == ShellPage.video)
                               ? _MediaOnlyView(
                                   language: _language,
+                                  title: _activePluginMediaSection?.title,
+                                  searchQuery: _searchQuery,
                                   entry: _selected,
                                   preview: _preview,
                                   mediaPlaylist: _mediaPlaylist,
@@ -4050,6 +4341,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                   onRememberMediaPosition:
                                       _rememberMediaPosition,
                                   onEntry: _openEntry,
+                                  onDownloadEntry: _downloadPluginMediaEntry,
                                 )
                               : _ExplorerView(
                                   language: _language,
@@ -4774,6 +5066,10 @@ class _Sidebar extends StatelessWidget {
     required this.recentPaths,
     required this.currentPath,
     required this.page,
+    required this.pluginMediaSections,
+    required this.activePluginSectionId,
+    required this.showTorrentSection,
+    required this.showMusicSourceAdd,
     required this.onLocation,
     required this.onFavoritePath,
     required this.onRemoveFavoritePath,
@@ -4787,6 +5083,8 @@ class _Sidebar extends StatelessWidget {
     required this.onAllLocations,
     required this.onAddLocation,
     required this.onMediaSection,
+    required this.onPluginMediaSection,
+    required this.onAddMusicSource,
     required this.onSettings,
     required this.onAbout,
   });
@@ -4798,6 +5096,10 @@ class _Sidebar extends StatelessWidget {
   final List<String> recentPaths;
   final String? currentPath;
   final ShellPage page;
+  final List<PluginMediaSection> pluginMediaSections;
+  final String? activePluginSectionId;
+  final bool showTorrentSection;
+  final bool showMusicSourceAdd;
   final ValueChanged<ExplorerLocation> onLocation;
   final ValueChanged<String> onFavoritePath;
   final ValueChanged<String> onRemoveFavoritePath;
@@ -4811,6 +5113,8 @@ class _Sidebar extends StatelessWidget {
   final VoidCallback onAllLocations;
   final VoidCallback onAddLocation;
   final ValueChanged<MediaSection> onMediaSection;
+  final ValueChanged<PluginMediaSection> onPluginMediaSection;
+  final VoidCallback onAddMusicSource;
   final VoidCallback onSettings;
   final VoidCallback onAbout;
 
@@ -4863,11 +5167,9 @@ class _Sidebar extends StatelessWidget {
           page == ShellPage.gallery,
           () => activate(() => onMediaSection(MediaSection.gallery)),
         ),
-        _nav(
-          Icons.music_note_outlined,
-          language.t('nav.music'),
-          page == ShellPage.music,
-          () => activate(() => onMediaSection(MediaSection.music)),
+        _musicNav(
+          selected: page == ShellPage.music && activePluginSectionId == null,
+          activate: activate,
         ),
         _nav(
           Icons.movie_outlined,
@@ -4881,12 +5183,20 @@ class _Sidebar extends StatelessWidget {
           page == ShellPage.documents,
           () => activate(() => onMediaSection(MediaSection.documents)),
         ),
-        _nav(
-          Icons.hub_outlined,
-          language.t('nav.torrent'),
-          page == ShellPage.torrent,
-          () => activate(() => onMediaSection(MediaSection.torrent)),
-        ),
+        if (showTorrentSection)
+          _nav(
+            Icons.hub_outlined,
+            language.t('nav.torrent'),
+            page == ShellPage.torrent,
+            () => activate(() => onMediaSection(MediaSection.torrent)),
+          ),
+        for (final section in pluginMediaSections)
+          _nav(
+            Icons.library_music_outlined,
+            section.title,
+            activePluginSectionId == section.runtimeId,
+            () => activate(() => onPluginMediaSection(section)),
+          ),
         _nav(
           Icons.tune,
           language.t('nav.settings'),
@@ -5115,6 +5425,29 @@ class _Sidebar extends StatelessWidget {
           leading: Icon(icon),
           title: Text(text),
           onTap: onTap,
+        ),
+      );
+
+  Widget _musicNav({
+    required bool selected,
+    required void Function(VoidCallback callback) activate,
+  }) =>
+      Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: ListTile(
+          selected: selected,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          leading: const Icon(Icons.music_note_outlined),
+          title: Text(language.t('nav.music')),
+          trailing: showMusicSourceAdd
+              ? IconButton(
+                  tooltip: language.t('plugin.music.add.site'),
+                  icon: const Icon(Icons.add_circle_outline),
+                  onPressed: () => activate(onAddMusicSource),
+                )
+              : null,
+          onTap: () => activate(() => onMediaSection(MediaSection.music)),
         ),
       );
 
@@ -5442,6 +5775,8 @@ class _GalleryTile extends StatelessWidget {
 class _MediaOnlyView extends StatelessWidget {
   const _MediaOnlyView({
     required this.language,
+    required this.title,
+    required this.searchQuery,
     required this.entry,
     required this.preview,
     required this.mediaPlaylist,
@@ -5458,9 +5793,12 @@ class _MediaOnlyView extends StatelessWidget {
     required this.onPreviewEntryAction,
     required this.onRememberMediaPosition,
     required this.onEntry,
+    required this.onDownloadEntry,
   });
 
   final AppLanguage language;
+  final String? title;
+  final String searchQuery;
   final ExplorerEntry? entry;
   final Future<FilePreview>? preview;
   final List<MediaPreviewItem> mediaPlaylist;
@@ -5478,17 +5816,18 @@ class _MediaOnlyView extends StatelessWidget {
   final Future<void> Function(String key, Duration position)
       onRememberMediaPosition;
   final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry) onDownloadEntry;
 
   @override
   Widget build(BuildContext context) {
     return Column(children: [
       _MediaHeader(
-        title: language.t(isVideo ? 'nav.video' : 'nav.music'),
+        title: title ?? language.t(isVideo ? 'nav.video' : 'nav.music'),
         language: language,
         onRefresh: onRefresh,
         onSearch: onSearch,
         onSearchFilters: onSearchFilters,
-        searchQuery: '',
+        searchQuery: searchQuery,
       ),
       Expanded(
         child: FutureBuilder<DirectorySnapshot>(
@@ -5516,6 +5855,7 @@ class _MediaOnlyView extends StatelessWidget {
                 mediaPlaylist: mediaPlaylist,
                 mediaResumePositions: mediaResumePositions,
                 onEntry: onEntry,
+                onDownloadEntry: onDownloadEntry,
               );
             }
             return Padding(
@@ -5554,6 +5894,7 @@ class _MediaLibraryBrowser extends StatelessWidget {
     required this.mediaPlaylist,
     required this.mediaResumePositions,
     required this.onEntry,
+    required this.onDownloadEntry,
   });
 
   final AppLanguage language;
@@ -5562,6 +5903,7 @@ class _MediaLibraryBrowser extends StatelessWidget {
   final List<MediaPreviewItem> mediaPlaylist;
   final Map<String, int> mediaResumePositions;
   final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry) onDownloadEntry;
 
   @override
   Widget build(BuildContext context) {
@@ -5604,41 +5946,49 @@ class _MediaLibraryBrowser extends StatelessWidget {
               entries: mediaEntries,
               emptyText: language.t('media.choose.to.play'),
               onEntry: onEntry,
+              onDownloadEntry: onDownloadEntry,
             ),
             _MediaEntryList(
               language: language,
               entries: mediaEntries,
               onEntry: onEntry,
+              onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByNameHeuristic(mediaEntries, 'playlist'),
               onEntry: onEntry,
+              onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByNameHeuristic(mediaEntries, 'album'),
               onEntry: onEntry,
+              onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByNameHeuristic(mediaEntries, 'artist'),
               onEntry: onEntry,
+              onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByNameHeuristic(mediaEntries, 'genre'),
               onEntry: onEntry,
+              onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByFolder(mediaEntries),
               onEntry: onEntry,
+              onDownloadEntry: onDownloadEntry,
             ),
             _MediaEntryList(
               language: language,
               entries: recent,
               onEntry: onEntry,
+              onDownloadEntry: onDownloadEntry,
             ),
           ]),
         ),
@@ -5693,6 +6043,7 @@ class _MediaEntryList extends StatelessWidget {
     required this.language,
     required this.entries,
     required this.onEntry,
+    required this.onDownloadEntry,
     this.emptyText,
   });
 
@@ -5700,6 +6051,7 @@ class _MediaEntryList extends StatelessWidget {
   final List<ExplorerEntry> entries;
   final String? emptyText;
   final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry) onDownloadEntry;
 
   @override
   Widget build(BuildContext context) {
@@ -5719,6 +6071,13 @@ class _MediaEntryList extends StatelessWidget {
               : Icons.audiotrack_outlined),
           title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
           subtitle: Text('${_size(entry)} - ${_date(entry.modifiedAt)}'),
+          trailing: _isHttpMedia(entry.path)
+              ? IconButton(
+                  tooltip: language.t('plugin.media.download'),
+                  icon: const Icon(Icons.download_outlined),
+                  onPressed: () => unawaited(onDownloadEntry(entry)),
+                )
+              : null,
           onTap: () => unawaited(onEntry(entry)),
         );
       },
@@ -5737,16 +6096,21 @@ class _MediaEntryList extends StatelessWidget {
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} ${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
 }
 
+bool _isHttpMedia(String path) =>
+    path.startsWith('http://') || path.startsWith('https://');
+
 class _MediaGroupList extends StatelessWidget {
   const _MediaGroupList({
     required this.language,
     required this.groups,
     required this.onEntry,
+    required this.onDownloadEntry,
   });
 
   final AppLanguage language;
   final Map<String, List<ExplorerEntry>> groups;
   final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry) onDownloadEntry;
 
   @override
   Widget build(BuildContext context) {
@@ -5771,6 +6135,13 @@ class _MediaGroupList extends StatelessWidget {
                 dense: true,
                 leading: const Icon(Icons.play_arrow_outlined),
                 title: Text(entry.name, maxLines: 1),
+                trailing: _isHttpMedia(entry.path)
+                    ? IconButton(
+                        tooltip: language.t('plugin.media.download'),
+                        icon: const Icon(Icons.download_outlined),
+                        onPressed: () => unawaited(onDownloadEntry(entry)),
+                      )
+                    : null,
                 onTap: () => unawaited(onEntry(entry)),
               ),
           ],
@@ -10839,16 +11210,21 @@ class _PluginSettingsDialog extends StatefulWidget {
   const _PluginSettingsDialog({
     required this.language,
     required this.plugins,
+    required this.pluginSettingsById,
     required this.onInstallPluginZip,
     required this.onExportPluginZip,
     required this.onDeletePlugin,
+    required this.onSavePluginSettings,
   });
 
   final AppLanguage language;
   final List<CloudPluginDefinition> plugins;
+  final Map<String, Map<String, String>> pluginSettingsById;
   final Future<String> Function(String path) onInstallPluginZip;
   final Future<String> Function(String pluginId) onExportPluginZip;
   final Future<String> Function(String pluginId) onDeletePlugin;
+  final Future<String> Function(String pluginId, Map<String, String> settings)
+      onSavePluginSettings;
 
   @override
   State<_PluginSettingsDialog> createState() => _PluginSettingsDialogState();
@@ -11053,39 +11429,76 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
 
   Future<void> _showPluginSettings(CloudPluginDefinition plugin) {
     final settings = _globalSettings(plugin);
+    final saved =
+        widget.pluginSettingsById[plugin.id] ?? const <String, String>{};
+    final controllers = <String, TextEditingController>{
+      for (final entry in settings.entries)
+        entry.key: TextEditingController(
+          text: saved[entry.key] ?? _pluginSettingDefault(entry.value),
+        ),
+    };
     return showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(widget.language.t('settings.plugin.global.settings')),
-        content: SizedBox(
-          width: 520,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (settings.isEmpty)
-                  Text(widget.language.t('settings.plugin.no.global.settings'))
-                else
-                  for (final entry in settings.entries)
-                    TextField(
-                      decoration: InputDecoration(
-                        labelText: _pluginVariableLabel(entry.key, entry.value),
+      builder: (context) => StatefulBuilder(
+        builder: (context, _) => AlertDialog(
+          title: Text(widget.language.t('settings.plugin.global.settings')),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (settings.isEmpty)
+                    Text(
+                        widget.language.t('settings.plugin.no.global.settings'))
+                  else
+                    for (final entry in settings.entries)
+                      TextField(
+                        controller: controllers[entry.key],
+                        decoration: InputDecoration(
+                          labelText:
+                              _pluginVariableLabel(entry.key, entry.value),
+                        ),
+                        minLines:
+                            entry.key.toLowerCase().contains('json') ? 3 : 1,
+                        maxLines:
+                            entry.key.toLowerCase().contains('json') ? 8 : 1,
+                        obscureText: entry.value is Map &&
+                            ((entry.value as Map)['secret'] == true),
                       ),
-                      obscureText: entry.value is Map &&
-                          ((entry.value as Map)['secret'] == true),
-                    ),
-              ],
+                ],
+              ),
             ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(widget.language.t('common.cancel')),
+            ),
+            FilledButton(
+              onPressed: settings.isEmpty
+                  ? null
+                  : () async {
+                      final next = <String, String>{
+                        for (final entry in controllers.entries)
+                          entry.key: entry.value.text.trim(),
+                      };
+                      final message =
+                          await widget.onSavePluginSettings(plugin.id, next);
+                      if (!context.mounted) return;
+                      Navigator.pop(context);
+                      setState(() => _message = message);
+                    },
+              child: Text(widget.language.t('common.save')),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(widget.language.t('common.close')),
-          ),
-        ],
       ),
-    );
+    ).whenComplete(() {
+      for (final controller in controllers.values) {
+        controller.dispose();
+      }
+    });
   }
 
   Map<String, Object?> _globalSettings(CloudPluginDefinition plugin) {
@@ -11101,6 +11514,13 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
       return value['label'].toString();
     }
     return key;
+  }
+
+  String _pluginSettingDefault(Object? value) {
+    if (value is Map && value['default'] != null) {
+      return value['default'].toString();
+    }
+    return '';
   }
 }
 
@@ -11118,6 +11538,7 @@ class _SettingsView extends StatefulWidget {
     required this.onInstallPluginZip,
     required this.onExportPluginZip,
     required this.onDeletePlugin,
+    required this.onSavePluginSettings,
     required this.onExportConfigurationArchive,
     required this.onExportLanguageSample,
     required this.onResetDefaults,
@@ -11200,6 +11621,8 @@ class _SettingsView extends StatefulWidget {
   final Future<String> Function(String path) onInstallPluginZip;
   final Future<String> Function(String pluginId) onExportPluginZip;
   final Future<String> Function(String pluginId) onDeletePlugin;
+  final Future<String> Function(String pluginId, Map<String, String> settings)
+      onSavePluginSettings;
   final Future<String> Function() onExportConfigurationArchive;
   final Future<String> Function() onExportLanguageSample;
   final Future<String> Function() onResetDefaults;
@@ -12219,9 +12642,11 @@ class _SettingsViewState extends State<_SettingsView> {
       builder: (context) => _PluginSettingsDialog(
         language: widget.language,
         plugins: widget.plugins,
+        pluginSettingsById: widget.settings.pluginSettingsById,
         onInstallPluginZip: widget.onInstallPluginZip,
         onExportPluginZip: widget.onExportPluginZip,
         onDeletePlugin: widget.onDeletePlugin,
+        onSavePluginSettings: widget.onSavePluginSettings,
       ),
     );
   }

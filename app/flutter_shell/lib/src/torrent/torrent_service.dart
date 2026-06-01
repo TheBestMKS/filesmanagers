@@ -278,6 +278,24 @@ class TorrentService {
         ),
       ]);
     }
+    final pluginsDir = await AppPaths.pluginsDirectory();
+    bundledCandidates.addAll([
+      File(
+        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
+        '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
+        '${Platform.pathSeparator}windows-x64${Platform.pathSeparator}aria2c.exe',
+      ),
+      File(
+        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
+        '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
+        '${Platform.pathSeparator}linux-x64${Platform.pathSeparator}aria2c',
+      ),
+      File(
+        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
+        '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
+        '${Platform.pathSeparator}android-arm64${Platform.pathSeparator}aria2c',
+      ),
+    ]);
     for (final candidate in bundledCandidates) {
       if (await candidate.exists()) {
         return candidate.path;

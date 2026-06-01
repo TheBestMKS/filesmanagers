@@ -148,6 +148,7 @@ class CloudPluginRegistry {
     final deleted = await _deletedPluginIds(pluginsDir);
     await _removeObsoleteSamplePlugin(pluginsDir);
     await _ensureWebDavTemplates(pluginsDir, deleted);
+    await _ensureExperiencePlugins(pluginsDir, deleted);
     final plugins = <CloudPluginDefinition>[];
     await for (final entity in pluginsDir.list(followLinks: false)) {
       if (entity is! Directory) {
@@ -614,20 +615,238 @@ class CloudPluginRegistry {
     );
   }
 
-  Future<void> _writeTemplate(
+  Future<void> _ensureExperiencePlugins(
+    Directory pluginsDir,
+    Set<String> deleted,
+  ) async {
+    final torrentDir = await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'securevault_torrent',
+      manifest: <String, Object?>{
+        'id': 'securevault-torrent',
+        'name': 'SecureVault Torrent',
+        'version': '1.1.0',
+        'pluginType': 'media-extension',
+        'description':
+            'Adds the Torrent section, .torrent file handling, folder-like torrent browsing and audio/video streaming.',
+        'authType': 'none',
+        'capabilities': [
+          'section',
+          'fileHandler',
+          'torrentBrowse',
+          'torrentStreaming',
+          'mediaPlayback'
+        ],
+        'settings': <String, Object?>{
+          'createTorrentSection': <String, Object?>{
+            'label': 'Create Torrent section',
+            'default': 'true',
+          },
+          'handleTorrentFiles': <String, Object?>{
+            'label': 'Open .torrent files as folders',
+            'default': 'true',
+          },
+        },
+        'components': <String, Object?>{
+          'executor': 'torrent',
+          'engine': 'aria2c',
+        },
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{
+            'executor': 'torrent',
+            'engine': 'components/aria2/windows-x64/aria2c.exe',
+          },
+          'linux-x64': <String, Object?>{
+            'executor': 'torrent',
+            'engine': 'components/aria2/linux-x64/aria2c',
+          },
+          'android-arm64': <String, Object?>{
+            'executor': 'torrent',
+            'engine': 'components/aria2/android-arm64/aria2c',
+          },
+          'fallback': <String, Object?>{'executor': 'torrent'},
+        },
+        'sections': [
+          <String, Object?>{
+            'id': 'torrent',
+            'title': 'Torrent',
+            'titleKey': 'nav.torrent',
+            'kind': 'torrent',
+            'icon': 'hub',
+            'executor': 'torrent',
+          }
+        ],
+        'fileHandlers': [
+          <String, Object?>{
+            'extensions': ['.torrent'],
+            'mode': 'torrent-folder',
+            'sectionId': 'torrent',
+          }
+        ],
+      },
+    );
+    if (torrentDir != null) {
+      await _ensureTorrentPluginPayload(torrentDir);
+    }
+
+    await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'hitmoz_music',
+      manifest: <String, Object?>{
+        'id': 'hitmoz-music',
+        'name': 'Hitmoz',
+        'version': '1.0.0',
+        'pluginType': 'media-source',
+        'description':
+            'Parses a configured Hitmoz-compatible music site, adds the Hitmoz music section, supports search, streaming and user-requested download of direct audio links.',
+        'authType': 'none',
+        'capabilities': [
+          'section',
+          'musicSearch',
+          'musicGenres',
+          'musicPlaylists',
+          'mediaStreaming',
+          'mediaDownload'
+        ],
+        'settings': <String, Object?>{
+          'baseUrl': <String, Object?>{
+            'label': 'Hitmoz base URL',
+            'default': 'https://eu.hitmoz.com/',
+          },
+        },
+        'components': <String, Object?>{'executor': 'web-music-parser'},
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{'executor': 'web-music-parser'},
+          'linux-x64': <String, Object?>{'executor': 'web-music-parser'},
+          'android-arm64': <String, Object?>{'executor': 'web-music-parser'},
+          'fallback': <String, Object?>{'executor': 'web-music-parser'},
+        },
+        'sections': [
+          <String, Object?>{
+            'id': 'hitmoz',
+            'title': 'Hitmoz',
+            'kind': 'music',
+            'icon': 'music_note',
+            'executor': 'web-music-parser',
+          }
+        ],
+        'mediaCatalog': <String, Object?>{
+          'executor': 'web-music-parser',
+          'sites': [
+            <String, Object?>{
+              'id': 'hitmoz',
+              'title': 'Hitmoz',
+              'baseUrl': 'https://eu.hitmoz.com/',
+              'searchPath': '/search?q={query}',
+              'parser': 'generic-audio-html',
+            }
+          ],
+        },
+      },
+    );
+
+    await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'universal_web_music',
+      manifest: <String, Object?>{
+        'id': 'universal-web-music',
+        'name': 'Universal Web Music Parser',
+        'version': '1.0.0',
+        'pluginType': 'media-source-manager',
+        'description':
+            'Adds a + button near Music. Users can register multiple music sites; each site becomes a removable streaming music section.',
+        'authType': 'none',
+        'capabilities': [
+          'musicSourceProfiles',
+          'sectionFactory',
+          'musicSearch',
+          'mediaStreaming',
+          'mediaDownload'
+        ],
+        'settings': <String, Object?>{
+          'sitesJson': <String, Object?>{
+            'label': 'Registered music sites JSON',
+            'default': '[]',
+          },
+        },
+        'components': <String, Object?>{'executor': 'web-music-parser'},
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{'executor': 'web-music-parser'},
+          'linux-x64': <String, Object?>{'executor': 'web-music-parser'},
+          'android-arm64': <String, Object?>{'executor': 'web-music-parser'},
+          'fallback': <String, Object?>{'executor': 'web-music-parser'},
+        },
+        'mediaCatalog': <String, Object?>{
+          'executor': 'web-music-parser',
+          'userSites': true,
+          'defaultSearchPath': '/search?q={query}',
+        },
+      },
+    );
+  }
+
+  Future<Directory?> _writeTemplate(
     Directory pluginsDir, {
     required String folder,
     required Map<String, Object?> manifest,
     Set<String> deleted = const <String>{},
   }) async {
     final id = manifest['id']?.toString();
-    if (id != null && deleted.contains(id)) return;
+    if (id != null && deleted.contains(id)) return null;
     final dir = Directory('${pluginsDir.path}${Platform.pathSeparator}$folder');
     final file = File('${dir.path}${Platform.pathSeparator}plugin.json');
-    if (await file.exists()) return;
+    if (await file.exists()) return dir;
     await dir.create(recursive: true);
     await file
         .writeAsString(const JsonEncoder.withIndent('  ').convert(manifest));
+    return dir;
+  }
+
+  Future<void> _ensureTorrentPluginPayload(Directory pluginDir) async {
+    final target = File(
+      '${pluginDir.path}${Platform.pathSeparator}components'
+      '${Platform.pathSeparator}aria2${Platform.pathSeparator}windows-x64'
+      '${Platform.pathSeparator}aria2c.exe',
+    );
+    if (await target.exists()) return;
+    final executableName = Platform.isWindows ? 'aria2c.exe' : 'aria2c';
+    final appDir = File(Platform.resolvedExecutable).parent;
+    final candidates = <File>[
+      File('${appDir.path}${Platform.pathSeparator}$executableName'),
+      File('${appDir.path}${Platform.pathSeparator}bin'
+          '${Platform.pathSeparator}$executableName'),
+      File('${appDir.path}${Platform.pathSeparator}tools'
+          '${Platform.pathSeparator}$executableName'),
+      File('windows${Platform.pathSeparator}runner'
+          '${Platform.pathSeparator}resources${Platform.pathSeparator}aria2c.exe'),
+      File('app${Platform.pathSeparator}flutter_shell'
+          '${Platform.pathSeparator}windows${Platform.pathSeparator}runner'
+          '${Platform.pathSeparator}resources${Platform.pathSeparator}aria2c.exe'),
+    ];
+    for (final source in candidates) {
+      if (await source.exists()) {
+        await target.parent.create(recursive: true);
+        await source.copy(target.path);
+        final sourceDir = source.parent;
+        for (final license in [
+          'aria2_COPYING.txt',
+          'aria2_LICENSE.OpenSSL.txt'
+        ]) {
+          final licenseFile = File(
+            '${sourceDir.path}${Platform.pathSeparator}$license',
+          );
+          if (await licenseFile.exists()) {
+            await licenseFile.copy(
+              '${target.parent.path}${Platform.pathSeparator}$license',
+            );
+          }
+        }
+        return;
+      }
+    }
   }
 }
 

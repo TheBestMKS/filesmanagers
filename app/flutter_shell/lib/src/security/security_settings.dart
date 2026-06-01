@@ -62,6 +62,7 @@ class SecuritySettings {
     this.programProxy,
     this.globalPluginProxy,
     this.pluginProxyById = const <String, String>{},
+    this.pluginSettingsById = const <String, Map<String, String>>{},
     this.enableBackgroundVideo = true,
     this.enableMiniVideo = true,
     this.enableMiniAudio = true,
@@ -145,6 +146,7 @@ class SecuritySettings {
   final String? programProxy;
   final String? globalPluginProxy;
   final Map<String, String> pluginProxyById;
+  final Map<String, Map<String, String>> pluginSettingsById;
   final bool enableBackgroundVideo;
   final bool enableMiniVideo;
   final bool enableMiniAudio;
@@ -244,6 +246,7 @@ class SecuritySettings {
     String? globalPluginProxy,
     bool clearGlobalPluginProxy = false,
     Map<String, String>? pluginProxyById,
+    Map<String, Map<String, String>>? pluginSettingsById,
     bool? enableBackgroundVideo,
     bool? enableMiniVideo,
     bool? enableMiniAudio,
@@ -361,6 +364,7 @@ class SecuritySettings {
           ? null
           : globalPluginProxy ?? this.globalPluginProxy,
       pluginProxyById: pluginProxyById ?? this.pluginProxyById,
+      pluginSettingsById: pluginSettingsById ?? this.pluginSettingsById,
       enableBackgroundVideo:
           enableBackgroundVideo ?? this.enableBackgroundVideo,
       enableMiniVideo: enableMiniVideo ?? this.enableMiniVideo,
@@ -416,6 +420,7 @@ class SecuritySettings {
     final favorites = json['favoritePaths'];
     final recent = json['recentFilePaths'];
     final pluginProxy = json['pluginProxyById'];
+    final pluginSettings = json['pluginSettingsById'];
     final mediaResume = json['mediaResumePositions'];
     final folderSortModes = json['folderSortModes'];
     final perFileEqualizer = json['perFileEqualizerPresets'];
@@ -503,6 +508,16 @@ class SecuritySettings {
           ? pluginProxy
               .map((key, value) => MapEntry(key.toString(), value.toString()))
           : const <String, String>{},
+      pluginSettingsById: pluginSettings is Map
+          ? pluginSettings.map((key, value) {
+              final settings = value is Map
+                  ? value.map(
+                      (k, v) => MapEntry(k.toString(), v.toString()),
+                    )
+                  : const <String, String>{};
+              return MapEntry(key.toString(), settings);
+            })
+          : const <String, Map<String, String>>{},
       enableBackgroundVideo: json['enableBackgroundVideo'] as bool? ?? true,
       enableMiniVideo: json['enableMiniVideo'] as bool? ?? true,
       enableMiniAudio: json['enableMiniAudio'] as bool? ?? true,
@@ -619,6 +634,7 @@ class SecuritySettings {
       'programProxy': programProxy,
       'globalPluginProxy': globalPluginProxy,
       'pluginProxyById': pluginProxyById,
+      'pluginSettingsById': pluginSettingsById,
       'enableBackgroundVideo': enableBackgroundVideo,
       'enableMiniVideo': enableMiniVideo,
       'enableMiniAudio': enableMiniAudio,
@@ -839,6 +855,30 @@ class SecuritySettingsRepository {
     List<PluginConnectionProfile> profiles,
   ) async {
     final next = current.copyWith(connectionProfiles: profiles);
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> setPluginSettings(
+    SecuritySettings current,
+    String pluginId,
+    Map<String, String> settings,
+  ) async {
+    final normalized = pluginId.trim();
+    if (normalized.isEmpty) return current;
+    final nextSettings = <String, Map<String, String>>{
+      for (final entry in current.pluginSettingsById.entries)
+        entry.key: Map<String, String>.of(entry.value),
+    };
+    final cleaned = Map<String, String>.fromEntries(
+      settings.entries.where((entry) => entry.value.trim().isNotEmpty),
+    );
+    if (cleaned.isEmpty) {
+      nextSettings.remove(normalized);
+    } else {
+      nextSettings[normalized] = cleaned;
+    }
+    final next = current.copyWith(pluginSettingsById: nextSettings);
     await save(next);
     return next;
   }

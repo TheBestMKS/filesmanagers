@@ -480,7 +480,16 @@
     "media.equalizer.loudness": "Loudness",
     "about.features.media.session": "Audio and video share one media session across preview, full-window mode and mini-player, with resume positions and media-key control.",
     "about.features.plugins": "Built-in real plugin executors cover WebDAV, FTP, embedded SFTP/SSH and embedded SMB2/3; plugin manager supports info, settings, export and delete.",
-    "about.features.background.jobs": "Encryption and recursive folder processing show cancellable background progress at the bottom of the app."
+    "about.features.background.jobs": "Encryption and recursive folder processing show cancellable background progress at the bottom of the app.",
+    "common.name": "Name",
+    "common.add": "Add",
+    "common.download": "Download",
+    "plugin.music.add.site": "Add music site",
+    "plugin.music.site": "Music site URL",
+    "plugin.music.invalid.site": "Enter a section name and a valid site URL.",
+    "plugin.music.unavailable": "Universal Web Music Parser plugin is not installed.",
+    "plugin.media.download": "Download track",
+    "transfer.done": "Done:"
   },
   "about.open.log": "Open program log",
   "settings.interface.text.scale": "Overall interface scale"
