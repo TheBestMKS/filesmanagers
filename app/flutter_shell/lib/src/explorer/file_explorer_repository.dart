@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
 import 'package:cryptography/cryptography.dart';
+import 'package:rar/rar.dart' as rar_plugin;
 
 import '../ffi/crypt_bindings.dart';
 import '../plugins/cloud_plugin_registry.dart' hide basename;
@@ -29,6 +30,7 @@ class FileExplorerRepository {
   static const int _chunkedEncryptionThreshold = 32 * 1024 * 1024;
   static const int _chunkedEncryptionChunkSize = 2 * 1024 * 1024;
   static const String _zipScheme = 'zip://';
+  static const String _rarScheme = 'rar://';
   static const String _remoteScheme = 'remote://';
   static const String _torrentScheme = 'torrent://';
   static const String _folderMetaFileName = '.folder.cryptmeta';
@@ -45,10 +47,13 @@ class FileExplorerRepository {
 
   bool isVirtualPath(String path) =>
       _ZipVirtualPath.tryParse(path) != null ||
+      _RarVirtualPath.tryParse(path) != null ||
       _RemoteVirtualPath.tryParse(path) != null ||
       _TorrentVirtualPath.tryParse(path) != null;
 
   String zipRootPath(String archivePath) => _ZipVirtualPath.build(archivePath);
+
+  String rarRootPath(String archivePath) => _RarVirtualPath.build(archivePath);
 
   String remoteRootPath(String pluginId) => _RemoteVirtualPath.build(pluginId);
 
@@ -66,6 +71,14 @@ class FileExplorerRepository {
       }
       final parts = zip.innerPath.split('/')..removeLast();
       return _ZipVirtualPath.build(zip.archivePath, parts.join('/'));
+    }
+    final rar = _RarVirtualPath.tryParse(path);
+    if (rar != null) {
+      if (rar.innerPath.isEmpty) {
+        return File(rar.archivePath).parent.path;
+      }
+      final parts = rar.innerPath.split('/')..removeLast();
+      return _RarVirtualPath.build(rar.archivePath, parts.join('/'));
     }
     final remote = _RemoteVirtualPath.tryParse(path);
     if (remote != null) {
@@ -215,6 +228,10 @@ class FileExplorerRepository {
     final zipPath = _ZipVirtualPath.tryParse(path);
     if (zipPath != null) {
       return _listZipDirectory(zipPath);
+    }
+    final rarPath = _RarVirtualPath.tryParse(path);
+    if (rarPath != null) {
+      return _listRarDirectory(rarPath);
     }
     final remotePath = _RemoteVirtualPath.tryParse(path);
     if (remotePath != null) {
@@ -634,6 +651,10 @@ class FileExplorerRepository {
     if (zipPath != null) {
       return _previewZipFile(zipPath);
     }
+    final rarPath = _RarVirtualPath.tryParse(path);
+    if (rarPath != null) {
+      return _previewRarFile(rarPath);
+    }
     final remotePath = _RemoteVirtualPath.tryParse(path);
     if (remotePath != null) {
       return _previewRemoteFile(remotePath);
@@ -1033,6 +1054,37 @@ class FileExplorerRepository {
         await Directory(outPath).create(recursive: true);
       }
     }
+    return outDir;
+  }
+
+  Future<Directory> extractRarToDirectory(
+    File source,
+    Directory targetDir,
+  ) async {
+    await targetDir.create(recursive: true);
+    final outDir = await _availableDirectory(
+      targetDir,
+      basename(source.path)
+          .replaceFirst(RegExp(r'\.rar$', caseSensitive: false), ''),
+    );
+    await outDir.create(recursive: true);
+    if (Platform.isAndroid) {
+      final result = await rar_plugin.Rar.extractRarFile(
+        rarFilePath: source.path,
+        destinationPath: outDir.path,
+      );
+      if (result['success'] != true) {
+        throw FileSystemException(
+          result['message']?.toString() ?? 'RAR extraction failed.',
+          source.path,
+        );
+      }
+      return outDir;
+    }
+    await _runRarCliExtract(
+      archivePath: source.path,
+      outputDirectory: outDir.path,
+    );
     return outDir;
   }
 
@@ -1680,6 +1732,339 @@ class FileExplorerRepository {
       bytes: bytes,
       sourcePath: zip.fullPath,
     );
+  }
+
+  Future<DirectorySnapshot> _listRarDirectory(_RarVirtualPath rar) async {
+    final archiveFile = File(rar.archivePath);
+    if (!await archiveFile.exists()) {
+      return DirectorySnapshot(
+        path: rar.fullPath,
+        entries: const [],
+        error: 'RAR archive not found.',
+      );
+    }
+    try {
+      final archiveEntries = await _rarEntries(rar.archivePath);
+      final prefix = rar.innerPath.isEmpty ? '' : '${rar.innerPath}/';
+      final directories = <String, DateTime>{};
+      final files = <String, _RarArchiveEntry>{};
+      for (final item in archiveEntries) {
+        final name = _normalizeZipEntryName(item.name);
+        if (name.isEmpty || !name.startsWith(prefix)) continue;
+        final rest = name.substring(prefix.length);
+        if (rest.isEmpty) continue;
+        final slash = rest.indexOf('/');
+        if (slash >= 0) {
+          final dir = rest.substring(0, slash);
+          if (dir.isNotEmpty) directories[dir] = item.modifiedAt;
+          continue;
+        }
+        if (item.isDirectory) {
+          directories[rest] = item.modifiedAt;
+        } else {
+          files[rest] = item;
+        }
+      }
+
+      final entries = <ExplorerEntry>[
+        ExplorerEntry(
+          name: '...',
+          path: rar.innerPath.isEmpty
+              ? archiveFile.parent.path
+              : _RarVirtualPath.build(
+                  rar.archivePath,
+                  rar.innerPath.split('/')..removeLast(),
+                ),
+          kind: ExplorerEntryKind.directory,
+          sizeBytes: 0,
+          modifiedAt: DateTime.now(),
+          isNavigationEntry: true,
+        ),
+      ];
+      for (final item in directories.entries) {
+        entries.add(
+          ExplorerEntry(
+            name: item.key,
+            path: _RarVirtualPath.build(
+              rar.archivePath,
+              _joinZipPath(rar.innerPath, item.key),
+            ),
+            kind: ExplorerEntryKind.directory,
+            sizeBytes: 0,
+            modifiedAt: item.value,
+          ),
+        );
+      }
+      for (final item in files.entries) {
+        entries.add(
+          ExplorerEntry(
+            name: item.key,
+            path: _RarVirtualPath.build(
+              rar.archivePath,
+              _joinZipPath(rar.innerPath, item.key),
+            ),
+            kind: _kindForFile(item.key),
+            sizeBytes: item.value.sizeBytes,
+            modifiedAt: item.value.modifiedAt,
+          ),
+        );
+      }
+      entries.sort((a, b) {
+        if (a.isNavigationEntry != b.isNavigationEntry) {
+          return a.isNavigationEntry ? -1 : 1;
+        }
+        if (a.isDirectory != b.isDirectory) {
+          return a.isDirectory ? -1 : 1;
+        }
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+      return DirectorySnapshot(path: rar.fullPath, entries: entries);
+    } catch (error) {
+      return DirectorySnapshot(
+        path: rar.fullPath,
+        entries: const [],
+        error: 'RAR archive could not be opened: $error',
+      );
+    }
+  }
+
+  Future<FilePreview> _previewRarFile(_RarVirtualPath rar) async {
+    try {
+      final bytes = await _rarEntryBytes(rar.archivePath, rar.innerPath);
+      return FileViewerService.previewBytes(
+        name: _zipBasename(rar.innerPath),
+        subtitle: 'RAR entry, ${bytes.length} bytes',
+        bytes: bytes,
+        sourcePath: rar.fullPath,
+      );
+    } catch (error) {
+      return FilePreview(
+        title: _zipBasename(rar.innerPath),
+        subtitle: 'RAR entry could not be read: $error',
+        sourcePath: rar.fullPath,
+      );
+    }
+  }
+
+  Future<List<_RarArchiveEntry>> _rarEntries(String archivePath) async {
+    if (Platform.isAndroid) {
+      final result = await rar_plugin.Rar.listRarContents(
+        rarFilePath: archivePath,
+      );
+      if (result['success'] != true) {
+        throw FileSystemException(
+          result['message']?.toString() ?? 'RAR listing failed.',
+          archivePath,
+        );
+      }
+      final files = result['files'];
+      return files is List
+          ? files
+              .map((item) => _RarArchiveEntry(
+                    name: item.toString(),
+                    sizeBytes: 0,
+                    modifiedAt: DateTime.now(),
+                    isDirectory: item.toString().endsWith('/') ||
+                        item.toString().endsWith('\\'),
+                  ))
+              .toList()
+          : const <_RarArchiveEntry>[];
+    }
+    return _rarCliEntries(archivePath);
+  }
+
+  Future<Uint8List> _rarEntryBytes(String archivePath, String innerPath) async {
+    final normalized = _normalizeZipEntryName(innerPath);
+    if (Platform.isAndroid) {
+      final temp = await Directory.systemTemp.createTemp('securevault_rar_');
+      try {
+        final result = await rar_plugin.Rar.extractRarFile(
+          rarFilePath: archivePath,
+          destinationPath: temp.path,
+        );
+        if (result['success'] != true) {
+          throw FileSystemException(
+            result['message']?.toString() ?? 'RAR extraction failed.',
+            archivePath,
+          );
+        }
+        final file = File(
+          '${temp.path}${Platform.pathSeparator}'
+          '${normalized.split('/').join(Platform.pathSeparator)}',
+        );
+        return await file.readAsBytes();
+      } finally {
+        if (await temp.exists()) {
+          await temp.delete(recursive: true);
+        }
+      }
+    }
+    final temp = await Directory.systemTemp.createTemp('securevault_rar_');
+    try {
+      await _runRarCliExtract(
+        archivePath: archivePath,
+        outputDirectory: temp.path,
+        innerPath: normalized,
+      );
+      final file = File(
+        '${temp.path}${Platform.pathSeparator}'
+        '${normalized.split('/').join(Platform.pathSeparator)}',
+      );
+      return await file.readAsBytes();
+    } finally {
+      if (await temp.exists()) {
+        await temp.delete(recursive: true);
+      }
+    }
+  }
+
+  Future<List<_RarArchiveEntry>> _rarCliEntries(String archivePath) async {
+    final tool = await _rarCliTool();
+    if (tool.kind == _RarCliKind.sevenZip) {
+      final result = await Process.run(
+        tool.path,
+        ['l', '-slt', archivePath],
+        runInShell: false,
+      );
+      if (result.exitCode != 0) {
+        throw StateError('${result.stdout}\n${result.stderr}'.trim());
+      }
+      return _parseSevenZipList(result.stdout.toString());
+    }
+    final result = await Process.run(
+      tool.path,
+      ['lb', archivePath],
+      runInShell: false,
+    );
+    if (result.exitCode != 0) {
+      throw StateError('${result.stdout}\n${result.stderr}'.trim());
+    }
+    return result.stdout
+        .toString()
+        .split(RegExp(r'\r?\n'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .map((name) => _RarArchiveEntry(
+              name: name,
+              sizeBytes: 0,
+              modifiedAt: DateTime.now(),
+              isDirectory: name.endsWith('/') || name.endsWith('\\'),
+            ))
+        .toList();
+  }
+
+  Future<void> _runRarCliExtract({
+    required String archivePath,
+    required String outputDirectory,
+    String? innerPath,
+  }) async {
+    final tool = await _rarCliTool();
+    final args = tool.kind == _RarCliKind.sevenZip
+        ? [
+            'x',
+            '-y',
+            '-o$outputDirectory',
+            archivePath,
+            if (innerPath != null) innerPath,
+          ]
+        : [
+            'x',
+            '-y',
+            archivePath,
+            if (innerPath != null) innerPath,
+            outputDirectory,
+          ];
+    final result = await Process.run(tool.path, args, runInShell: false);
+    if (result.exitCode != 0) {
+      throw StateError('${result.stdout}\n${result.stderr}'.trim());
+    }
+  }
+
+  List<_RarArchiveEntry> _parseSevenZipList(String output) {
+    final entries = <_RarArchiveEntry>[];
+    final blocks = output.split(RegExp(r'\r?\n\r?\n'));
+    for (final block in blocks) {
+      final values = <String, String>{};
+      for (final line in block.split(RegExp(r'\r?\n'))) {
+        final index = line.indexOf(' = ');
+        if (index <= 0) continue;
+        values[line.substring(0, index).trim()] = line.substring(index + 3);
+      }
+      final path = values['Path']?.trim();
+      if (path == null ||
+          path.isEmpty ||
+          path == values['Physical Size'] ||
+          path.toLowerCase().endsWith('.rar')) {
+        continue;
+      }
+      final attributes = values['Attributes'] ?? '';
+      final modified = DateTime.tryParse(
+            (values['Modified'] ?? '').replaceFirst(' ', 'T'),
+          ) ??
+          DateTime.now();
+      entries.add(_RarArchiveEntry(
+        name: path.replaceAll('\\', '/'),
+        sizeBytes: int.tryParse(values['Size'] ?? '') ?? 0,
+        modifiedAt: modified,
+        isDirectory: attributes.contains('D') ||
+            path.endsWith('/') ||
+            path.endsWith('\\'),
+      ));
+    }
+    return entries;
+  }
+
+  Future<_RarCliTool> _rarCliTool() async {
+    final pluginsDir = await AppPaths.pluginsDirectory();
+    final exeNames = Platform.isWindows
+        ? ['7z.exe', '7za.exe', 'unrar.exe', 'rar.exe']
+        : ['7z', '7za', 'unrar', 'rar'];
+    final componentDirs = <Directory>[
+      Directory(
+        '${pluginsDir.path}${Platform.pathSeparator}rar_archive_support'
+        '${Platform.pathSeparator}components${Platform.pathSeparator}7zip'
+        '${Platform.pathSeparator}${Platform.isWindows ? 'windows-x64' : Platform.operatingSystem}',
+      ),
+      Directory(
+        '${pluginsDir.path}${Platform.pathSeparator}rar_archive_support'
+        '${Platform.pathSeparator}components${Platform.pathSeparator}unrar'
+        '${Platform.pathSeparator}${Platform.isWindows ? 'windows-x64' : Platform.operatingSystem}',
+      ),
+    ];
+    for (final dir in componentDirs) {
+      for (final name in exeNames) {
+        final file = File('${dir.path}${Platform.pathSeparator}$name');
+        if (await file.exists()) {
+          return _RarCliTool(file.path, _rarCliKindForName(name));
+        }
+      }
+    }
+    for (final name in exeNames) {
+      if (await _commandAvailable(name)) {
+        return _RarCliTool(name, _rarCliKindForName(name));
+      }
+    }
+    throw StateError(
+      'RAR CLI not found. Put 7z/7za/unrar into plugins/rar_archive_support/components or add it to PATH.',
+    );
+  }
+
+  _RarCliKind _rarCliKindForName(String name) =>
+      name.toLowerCase().startsWith('7z')
+          ? _RarCliKind.sevenZip
+          : _RarCliKind.unrar;
+
+  Future<bool> _commandAvailable(String command) async {
+    try {
+      final result = await Process.run(
+        Platform.isWindows ? 'where' : 'which',
+        [command],
+        runInShell: true,
+      ).timeout(const Duration(seconds: 2));
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<String> _folderDisplayName(
@@ -2378,6 +2763,83 @@ class _ZipVirtualPath {
         ? '${FileExplorerRepository._zipScheme}$encoded'
         : '${FileExplorerRepository._zipScheme}$encoded/${Uri.encodeComponent(inner)}';
   }
+}
+
+class _RarVirtualPath {
+  const _RarVirtualPath({
+    required this.archivePath,
+    required this.innerPath,
+    required this.fullPath,
+  });
+
+  final String archivePath;
+  final String innerPath;
+  final String fullPath;
+
+  static _RarVirtualPath? tryParse(String path) {
+    if (!path.startsWith(FileExplorerRepository._rarScheme)) return null;
+    final rest = path.substring(FileExplorerRepository._rarScheme.length);
+    final slash = rest.indexOf('/');
+    final encodedArchive = slash < 0 ? rest : rest.substring(0, slash);
+    if (encodedArchive.isEmpty) return null;
+    try {
+      final archivePath = utf8.decode(base64Url.decode(encodedArchive));
+      final inner =
+          slash < 0 ? '' : Uri.decodeComponent(rest.substring(slash + 1));
+      return _RarVirtualPath(
+        archivePath: archivePath,
+        innerPath: inner
+            .replaceAll('\\', '/')
+            .split('/')
+            .where((part) => part.isNotEmpty && part != '..')
+            .join('/'),
+        fullPath: path,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String build(String archivePath, [Object? innerPath]) {
+    final encoded = base64Url.encode(utf8.encode(archivePath));
+    final inner = switch (innerPath) {
+      null => '',
+      List<String> parts => parts
+          .where((part) => part.trim().isNotEmpty && part.trim() != '..')
+          .join('/'),
+      _ => innerPath.toString(),
+    }
+        .replaceAll('\\', '/')
+        .split('/')
+        .where((part) => part.isNotEmpty && part != '..')
+        .join('/');
+    return inner.isEmpty
+        ? '${FileExplorerRepository._rarScheme}$encoded'
+        : '${FileExplorerRepository._rarScheme}$encoded/${Uri.encodeComponent(inner)}';
+  }
+}
+
+class _RarArchiveEntry {
+  const _RarArchiveEntry({
+    required this.name,
+    required this.sizeBytes,
+    required this.modifiedAt,
+    required this.isDirectory,
+  });
+
+  final String name;
+  final int sizeBytes;
+  final DateTime modifiedAt;
+  final bool isDirectory;
+}
+
+enum _RarCliKind { sevenZip, unrar }
+
+class _RarCliTool {
+  const _RarCliTool(this.path, this.kind);
+
+  final String path;
+  final _RarCliKind kind;
 }
 
 class _RemoteVirtualPath {

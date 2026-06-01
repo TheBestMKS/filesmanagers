@@ -148,6 +148,7 @@ class CloudPluginRegistry {
     final deleted = await _deletedPluginIds(pluginsDir);
     await _removeObsoleteSamplePlugin(pluginsDir);
     await _ensureWebDavTemplates(pluginsDir, deleted);
+    await _ensureRaidTemplates(pluginsDir, deleted);
     await _ensureExperiencePlugins(pluginsDir, deleted);
     final plugins = <CloudPluginDefinition>[];
     await for (final entity in pluginsDir.list(followLinks: false)) {
@@ -615,6 +616,73 @@ class CloudPluginRegistry {
     );
   }
 
+  Future<void> _ensureRaidTemplates(
+    Directory pluginsDir,
+    Set<String> deleted,
+  ) async {
+    Future<void> write({
+      required String folder,
+      required String id,
+      required String name,
+      required String executor,
+      required String description,
+    }) {
+      return _writeTemplate(
+        pluginsDir,
+        deleted: deleted,
+        folder: folder,
+        manifest: <String, Object?>{
+          'id': id,
+          'name': name,
+          'version': '1.0.0',
+          'pluginType': 'virtual-storage',
+          'description': description,
+          'authType': 'none',
+          'capabilities': [
+            'listFiles',
+            'fileInfo',
+            'fileStream',
+            'upload',
+            'mkdir',
+            'delete',
+            'compositeLocation'
+          ],
+          'variables': <String, Object?>{
+            'members': <String, Object?>{
+              'label':
+                  'Member location runtime plugin ids, selected by SecureVault profile dialog',
+              'default': '',
+            },
+          },
+          'components': <String, Object?>{'executor': executor},
+          'platformComponents': <String, Object?>{
+            'windows-x64': <String, Object?>{'executor': executor},
+            'linux-x64': <String, Object?>{'executor': executor},
+            'android-arm64': <String, Object?>{'executor': executor},
+            'fallback': <String, Object?>{'executor': executor},
+          },
+        },
+      );
+    }
+
+    await write(
+      folder: 'raid0_combined_location',
+      id: 'raid0-combined-location',
+      name: 'RAID0 combined location',
+      executor: 'raid0',
+      description:
+          'Combines several configured SecureVault locations into one expandable virtual location. Files are placed on one member by free-space hint or stable path distribution.',
+    );
+    await write(
+      folder: 'raid1_mirror_location',
+      id: 'raid1-mirror-location',
+      name: 'RAID1 mirror location',
+      executor: 'raid1',
+      description:
+          'Mirrors writes and folder creation to all selected SecureVault locations and reads from the first available copy.',
+    );
+  }
+
   Future<void> _ensureExperiencePlugins(
     Directory pluginsDir,
     Set<String> deleted,
@@ -744,6 +812,52 @@ class CloudPluginRegistry {
             }
           ],
         },
+      },
+    );
+
+    await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'rar_archive_support',
+      manifest: <String, Object?>{
+        'id': 'rar-archive-support',
+        'name': 'RAR Archive Support',
+        'version': '1.0.0',
+        'pluginType': 'archive-extension',
+        'description':
+            'Adds RAR/CBR/REV archive browsing and extraction on Windows and Android using bundled Flutter/Dart archive engines.',
+        'authType': 'none',
+        'capabilities': [
+          'fileHandler',
+          'archiveBrowse',
+          'archiveExtract',
+          'previewProvider'
+        ],
+        'components': <String, Object?>{
+          'executor': 'rar-archive',
+          'windowsEngine': 'unrar-ffi',
+          'androidEngine': 'rar-libarchive-ffi',
+        },
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{
+            'executor': 'rar-archive',
+            'engine': 'unrar-ffi',
+          },
+          'android-arm64': <String, Object?>{
+            'executor': 'rar-archive',
+            'engine': 'rar-libarchive-ffi',
+          },
+          'fallback': <String, Object?>{
+            'executor': 'rar-archive',
+            'engine': 'best-available',
+          },
+        },
+        'fileHandlers': [
+          <String, Object?>{
+            'extensions': ['.rar', '.cbr', '.rev'],
+            'mode': 'archive-folder',
+          }
+        ],
       },
     );
 

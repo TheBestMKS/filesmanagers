@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -25,7 +25,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.7';
+const _appVersion = '0.12.8';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
@@ -254,6 +254,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   double _previewWidth = 420;
   bool _previewVisible = false;
   List<String> _clipboardPaths = const [];
+  Map<String, String> _clipboardNames = const <String, String>{};
   bool _clipboardCut = false;
   bool _showingRecent = false;
   String _searchQuery = '';
@@ -323,11 +324,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     await PlatformServices.setScreenProtection(settings.blockScreenCapture);
     final runtime = await _bindings.getRuntimeInfo();
     final pluginDefs = await _plugins.loadPlugins();
-    _explorer.configurePlugins(pluginDefs, settings.connectionProfiles);
-    final locations =
-        await _explorer.loadLocations(pluginDefs, settings.connectionProfiles);
+    final enabledPluginDefs = _enabledPluginDefs(pluginDefs, settings);
+    _explorer.configurePlugins(enabledPluginDefs, settings.connectionProfiles);
+    final locations = await _explorer.loadLocations(
+        enabledPluginDefs, settings.connectionProfiles);
     final pluginMediaSections =
-        PluginRuntime(pluginDefs, settings.pluginSettingsById).mediaSections();
+        PluginRuntime(enabledPluginDefs, settings.pluginSettingsById)
+            .mediaSections();
     final first =
         locations.where((e) => e.enabled && e.path != null).firstOrNull;
 
@@ -572,12 +575,23 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         decryptNames: _settings.decryptNamesInExplorer,
       );
 
+  List<CloudPluginDefinition> _enabledPluginDefs([
+    List<CloudPluginDefinition>? plugins,
+    SecuritySettings? settings,
+  ]) {
+    final disabled = (settings ?? _settings).disabledPluginIds.toSet();
+    return [
+      for (final plugin in plugins ?? _pluginDefs)
+        if (!disabled.contains(plugin.id)) plugin,
+    ];
+  }
+
   PluginRuntime _pluginRuntime([
     List<CloudPluginDefinition>? plugins,
     SecuritySettings? settings,
   ]) =>
       PluginRuntime(
-        plugins ?? _pluginDefs,
+        _enabledPluginDefs(plugins ?? _pluginDefs, settings ?? _settings),
         settings?.pluginSettingsById ?? _settings.pluginSettingsById,
       );
 
@@ -729,6 +743,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       builder: (context) => _ConnectionProfileDialog(
         language: _language,
         plugin: plugin,
+        availableProfiles: _settings.connectionProfiles,
       ),
     );
     if (profile == null) {
@@ -740,9 +755,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     ];
     final nextSettings =
         await _settingsRepo.setConnectionProfiles(_settings, nextProfiles);
-    _explorer.configurePlugins(_pluginDefs, nextSettings.connectionProfiles);
+    final enabledPluginDefs = _enabledPluginDefs(_pluginDefs, nextSettings);
+    _explorer.configurePlugins(
+        enabledPluginDefs, nextSettings.connectionProfiles);
     final locations = await _explorer.loadLocations(
-      _pluginDefs,
+      enabledPluginDefs,
       nextSettings.connectionProfiles,
     );
     if (!mounted) return;
@@ -792,6 +809,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         language: _language,
         plugin: plugin,
         initialProfile: profile,
+        availableProfiles: _settings.connectionProfiles,
       ),
     );
     if (updated == null) {
@@ -802,9 +820,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         .toList();
     final nextSettings =
         await _settingsRepo.setConnectionProfiles(_settings, profiles);
-    _explorer.configurePlugins(_pluginDefs, nextSettings.connectionProfiles);
+    final enabledPluginDefs = _enabledPluginDefs(_pluginDefs, nextSettings);
+    _explorer.configurePlugins(
+        enabledPluginDefs, nextSettings.connectionProfiles);
     final locations = await _explorer.loadLocations(
-      _pluginDefs,
+      enabledPluginDefs,
       nextSettings.connectionProfiles,
     );
     if (!mounted) return;
@@ -849,9 +869,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         .toList();
     final nextSettings =
         await _settingsRepo.setConnectionProfiles(_settings, profiles);
-    _explorer.configurePlugins(_pluginDefs, nextSettings.connectionProfiles);
+    final enabledPluginDefs = _enabledPluginDefs(_pluginDefs, nextSettings);
+    _explorer.configurePlugins(
+        enabledPluginDefs, nextSettings.connectionProfiles);
     final locations = await _explorer.loadLocations(
-      _pluginDefs,
+      enabledPluginDefs,
       nextSettings.connectionProfiles,
     );
     if (!mounted) return;
@@ -980,7 +1002,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     final roots = section == MediaSection.torrent
         ? const <String>[]
         : _mediaRootsFor(configuredRoots, section);
-    final snapshotFuture = section == MediaSection.torrent
+    final baseSnapshotFuture = section == MediaSection.torrent
         ? _torrentSectionSnapshot()
         : _explorer.mediaSnapshot(
             label: label,
@@ -988,6 +1010,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
             extensions: extensions,
             exclusions: exclusions,
           );
+    final snapshotFuture = _searchQuery.trim().isEmpty
+        ? baseSnapshotFuture
+        : baseSnapshotFuture.then(_filterSnapshotBySearch);
     setState(() {
       _page = page;
       _activePluginMediaSection = null;
@@ -1237,6 +1262,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Future<void> _openEntry(
     ExplorerEntry entry, {
     bool forceFullScreen = false,
+    List<MediaPreviewItem>? mediaPlaylistOverride,
   }) async {
     if (entry.isNavigationEntry &&
         await _navigationEntryReturnsToLocations(_currentPath)) {
@@ -1253,7 +1279,17 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     }
     if (FileViewerService.kindForName(entry.path) == FileContentKind.archive &&
         !_explorer.isVirtualPath(entry.path)) {
-      await _openPathSafely(_explorer.zipRootPath(entry.path));
+      final extension = FileViewerService.extensionForName(entry.path);
+      if (extension == '.zip') {
+        await _openPathSafely(_explorer.zipRootPath(entry.path));
+        return;
+      }
+      if (extension == '.rar' || extension == '.cbr' || extension == '.rev') {
+        if (_pluginRuntime().handlesFileExtension(extension)) {
+          await _openPathSafely(_explorer.rarRootPath(entry.path));
+          return;
+        }
+      }
       return;
     }
     if (FileViewerService.extensionForName(entry.path) == '.torrent' &&
@@ -1274,16 +1310,18 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
             kind == FileContentKind.unknown ? FileContentKind.audio : kind,
       );
       final previewFuture = Future<FilePreview>.value(preview);
-      final playlist = _mediaPlaylist.isEmpty
-          ? [
-              MediaPreviewItem(
-                title: entry.name,
-                kind: preview.contentKind,
-                path: entry.path,
-                resumeKey: entry.path,
-              ),
-            ]
-          : _mediaPlaylist;
+      final playlist = mediaPlaylistOverride?.isNotEmpty == true
+          ? mediaPlaylistOverride!
+          : _mediaPlaylist.isEmpty
+              ? [
+                  MediaPreviewItem(
+                    title: entry.name,
+                    kind: preview.contentKind,
+                    path: entry.path,
+                    resumeKey: entry.path,
+                  ),
+                ]
+              : _mediaPlaylist;
       setState(() {
         _selected = entry;
         _preview = previewFuture;
@@ -1291,8 +1329,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _imagePlaylist = const [];
       });
       if (forceFullScreen ||
-          (!_previewVisible && _settings.openFullscreenOnHiddenPreviewTap)) {
+          _shouldOpenMediaFullscreen(preview, forceFullScreen)) {
         _showPreviewWindow(preview);
+      } else if (_isMediaLibraryPage && _isPlayablePreview(preview)) {
+        await _playMediaPreviewInSession(preview, playlist);
       }
       if (_settings.rememberRecentFiles) {
         final next =
@@ -1316,7 +1356,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     try {
       final preview = await previewFuture;
       openedPreview = preview;
-      final playlist = await _buildMediaPlaylist(entry, preview);
+      final playlist = mediaPlaylistOverride?.isNotEmpty == true
+          ? _playlistWithSelectedPreview(
+              preview,
+              mediaPlaylistOverride!,
+              selectedPath: entry.path,
+            )
+          : await _buildMediaPlaylist(entry, preview);
       final imagePlaylist = await _buildImagePlaylist(entry, preview);
       if (mounted && _selected?.path == entry.path) {
         setState(() {
@@ -1358,9 +1404,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     }
     if (mounted &&
         openedPreview != null &&
-        (forceFullScreen ||
-            (!_previewVisible && _settings.openFullscreenOnHiddenPreviewTap))) {
+        _shouldOpenMediaFullscreen(openedPreview, forceFullScreen)) {
       _showPreviewWindow(openedPreview);
+    } else if (mounted &&
+        openedPreview != null &&
+        _isMediaLibraryPage &&
+        _isPlayablePreview(openedPreview)) {
+      await _playMediaPreviewInSession(openedPreview, _mediaPlaylist);
     }
     if (_settings.rememberRecentFiles) {
       final next = await _settingsRepo.recordRecentFile(_settings, entry.path);
@@ -1766,6 +1816,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     var mode = _searchMode;
     var useRegex = _searchUseRegex;
     var recursive = _searchRecursive;
+    final allowFilters = _activePluginMediaSection == null;
     final result = await showDialog<_SearchDialogResult>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -1822,17 +1873,18 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                   onChanged: (value) => setDialogState(() => recursive = value),
                   title: Text(_language.t('search.recursive')),
                 ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: OutlinedButton.icon(
-                    onPressed: () {
-                      Navigator.pop(context);
-                      unawaited(_searchFiltersDialog());
-                    },
-                    icon: const Icon(Icons.tune_outlined),
-                    label: Text(_language.t('search.filters')),
+                if (allowFilters)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        unawaited(_searchFiltersDialog());
+                      },
+                      icon: const Icon(Icons.tune_outlined),
+                      label: Text(_language.t('search.filters')),
+                    ),
                   ),
-                ),
               ]),
             ),
           ),
@@ -1880,6 +1932,23 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _searchUseRegex = result.useRegex;
       _searchRecursive = result.recursive;
     });
+    final pluginSection = _activePluginMediaSection;
+    if (pluginSection != null) {
+      _openPluginMediaSection(pluginSection);
+      return;
+    }
+    final mediaSection = switch (_page) {
+      ShellPage.gallery => MediaSection.gallery,
+      ShellPage.music => MediaSection.music,
+      ShellPage.video => MediaSection.video,
+      ShellPage.documents => MediaSection.documents,
+      ShellPage.torrent => MediaSection.torrent,
+      _ => null,
+    };
+    if (mediaSection != null) {
+      _openMediaSection(mediaSection);
+      return;
+    }
     final path = _currentPath;
     if (path == null || _showingRecent) return;
     if (query.isEmpty) {
@@ -2208,6 +2277,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     switch (action) {
       case _EntryAction.open:
         await _openEntry(entry);
+      case _EntryAction.edit:
+        await _editEntry(entry);
       case _EntryAction.createFolder:
         await _createFolder(entry);
       case _EntryAction.createPlain:
@@ -2229,12 +2300,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       case _EntryAction.copy:
         setState(() {
           _clipboardPaths = [entry.path];
+          _clipboardNames = {entry.path: entry.name};
           _clipboardCut = false;
         });
         _snack(_language.t('snack.copied'));
       case _EntryAction.cut:
         setState(() {
           _clipboardPaths = [entry.path];
+          _clipboardNames = {entry.path: entry.name};
           _clipboardCut = true;
         });
         _snack(_language.t('snack.cut'));
@@ -2363,12 +2436,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       case _EntryAction.copy:
         setState(() {
           _clipboardPaths = paths;
+          _clipboardNames = const <String, String>{};
           _clipboardCut = false;
         });
         _snack(_language.t('snack.copied'));
       case _EntryAction.cut:
         setState(() {
           _clipboardPaths = paths;
+          _clipboardNames = const <String, String>{};
           _clipboardCut = true;
         });
         _snack(_language.t('snack.cut'));
@@ -2459,6 +2534,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     try {
       final results = <FileSystemEntity>[];
       for (final source in sources) {
+        if (_isHttpMedia(source)) {
+          results.add(await _pasteHttpMedia(source, targetDirectory));
+          continue;
+        }
         results.add(_clipboardCut
             ? await _explorer.moveEntityToDirectory(source, targetDirectory)
             : await _explorer.copyEntityToDirectory(source, targetDirectory));
@@ -2466,6 +2545,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       if (_clipboardCut) {
         setState(() {
           _clipboardPaths = const [];
+          _clipboardNames = const <String, String>{};
           _clipboardCut = false;
         });
       }
@@ -2473,6 +2553,42 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       await _refresh();
     } catch (error) {
       _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<FileSystemEntity> _pasteHttpMedia(
+    String source,
+    String targetDirectory,
+  ) async {
+    final name = _clipboardNames[source] ??
+        Uri.tryParse(source)?.pathSegments.lastOrNull ??
+        'track.mp3';
+    final entry = ExplorerEntry(
+      name: name.trim().isEmpty ? 'track.mp3' : name,
+      path: source,
+      kind: ExplorerEntryKind.file,
+      sizeBytes: 0,
+      modifiedAt: DateTime.now(),
+    );
+    final isVirtualTarget = _explorer.isVirtualPath(targetDirectory);
+    final targetDir = isVirtualTarget
+        ? await Directory.systemTemp.createTemp('securevault_http_paste_')
+        : Directory(targetDirectory);
+    final downloaded = await _webMusicPlugins.download(entry, targetDir);
+    if (!isVirtualTarget) {
+      return downloaded;
+    }
+    try {
+      final createdPath = await _explorer.createFile(
+        targetDirectory,
+        basename(downloaded.path),
+        await downloaded.readAsBytes(),
+      );
+      return File(createdPath);
+    } finally {
+      try {
+        await targetDir.delete(recursive: true);
+      } catch (_) {}
     }
   }
 
@@ -2942,10 +3058,17 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       return;
     }
     try {
-      final target = await _explorer.extractZipToDirectory(
-        File(entry.path),
-        Directory(File(entry.path).parent.path),
-      );
+      final file = File(entry.path);
+      final extension = FileViewerService.extensionForName(entry.path);
+      final target = extension == '.zip'
+          ? await _explorer.extractZipToDirectory(
+              file,
+              Directory(file.parent.path),
+            )
+          : await _explorer.extractRarToDirectory(
+              file,
+              Directory(file.parent.path),
+            );
       _snack('${_language.t('snack.unzipped')} ${target.path}');
       await _refresh();
     } catch (error) {
@@ -3319,7 +3442,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         builder: (context, setDialogState) => Dialog.fullscreen(
           child: Scaffold(
             appBar: AppBar(
-              title: Text(currentPreview.title),
+              title: AnimatedBuilder(
+                animation: _sharedMediaSession,
+                builder: (context, _) {
+                  final title = _sharedMediaSession.currentTitle;
+                  return Text(title.isEmpty ? currentPreview.title : title);
+                },
+              ),
               actions: [
                 PopupMenuButton<_PreviewAction>(
                   icon: const Icon(Icons.more_vert),
@@ -3483,8 +3612,32 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _snack(_language.t('editor.unsupported'));
   }
 
+  Future<void> _editEntry(ExplorerEntry entry) async {
+    if (entry.isDirectory || !entry.exists) {
+      _snack(_language.t('editor.unsupported'));
+      return;
+    }
+    try {
+      final preview = await _explorer.previewFile(
+        entry.path,
+        password: _activeFilePassword(),
+        commonPassword: _commonEncryptionPassword,
+      );
+      await _openEditor(preview);
+    } catch (error) {
+      _snack('${_language.t('editor.error')} $error');
+    }
+  }
+
   Future<void> _rememberMediaPosition(String key, Duration position) async {
     if (key.trim().isEmpty) return;
+    final kind = FileViewerService.kindForName(key);
+    if (kind == FileContentKind.video && !_settings.rememberVideoPositions) {
+      return;
+    }
+    if (kind == FileContentKind.audio && !_settings.rememberAudioPositions) {
+      return;
+    }
     final next = await _settingsRepo
         .recordMediaResumePosition(_settings, key, position.inMilliseconds)
         .catchError((_) => _settings);
@@ -3598,6 +3751,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     required bool externalFloatingPlayer,
     required bool encryptThumbnailCache,
     required bool encryptResumePositions,
+    required bool rememberVideoPositions,
+    required bool rememberAudioPositions,
   }) async {
     if (languageCode == 'custom' &&
         (customLanguagePath == null || customLanguagePath.trim().isEmpty)) {
@@ -3678,6 +3833,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       externalFloatingPlayer: externalFloatingPlayer,
       encryptThumbnailCache: encryptThumbnailCache,
       encryptResumePositions: encryptResumePositions,
+      rememberVideoPositions: rememberVideoPositions,
+      rememberAudioPositions: rememberAudioPositions,
     );
     MediaArtworkService.configure(
       cacheEnabled: next.cacheThumbnailsInMemory,
@@ -3736,9 +3893,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Future<String> _installPluginZip(String path) async {
     final dir = await _plugins.installPluginZip(path);
     final pluginDefs = await _plugins.loadPlugins();
-    _explorer.configurePlugins(pluginDefs, _settings.connectionProfiles);
-    final locations =
-        await _explorer.loadLocations(pluginDefs, _settings.connectionProfiles);
+    final enabledPluginDefs = _enabledPluginDefs(pluginDefs, _settings);
+    _explorer.configurePlugins(enabledPluginDefs, _settings.connectionProfiles);
+    final locations = await _explorer.loadLocations(
+        enabledPluginDefs, _settings.connectionProfiles);
     final pluginMediaSections =
         _pluginRuntime(pluginDefs, _settings).mediaSections();
     setState(() {
@@ -3779,9 +3937,19 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         const <String, String>{},
       );
     }
-    _explorer.configurePlugins(pluginDefs, settings.connectionProfiles);
-    final locations =
-        await _explorer.loadLocations(pluginDefs, settings.connectionProfiles);
+    if (settings.disabledPluginIds.contains(pluginId)) {
+      settings = settings.copyWith(
+        disabledPluginIds: [
+          for (final id in settings.disabledPluginIds)
+            if (id != pluginId) id,
+        ],
+      );
+      await _settingsRepo.save(settings);
+    }
+    final enabledPluginDefs = _enabledPluginDefs(pluginDefs, settings);
+    _explorer.configurePlugins(enabledPluginDefs, settings.connectionProfiles);
+    final locations = await _explorer.loadLocations(
+        enabledPluginDefs, settings.connectionProfiles);
     final pluginMediaSections =
         _pluginRuntime(pluginDefs, settings).mediaSections();
     if (mounted) {
@@ -3799,6 +3967,167 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       });
     }
     return _language.t('settings.plugin.deleted');
+  }
+
+  DirectorySnapshot _filterSnapshotBySearch(DirectorySnapshot snapshot) {
+    final query = _searchQuery.trim();
+    if (query.isEmpty) return snapshot;
+    bool matches(String value) {
+      if (_searchUseRegex) {
+        try {
+          return RegExp(query, caseSensitive: false).hasMatch(value);
+        } catch (_) {
+          return value.toLowerCase().contains(query.toLowerCase());
+        }
+      }
+      return value.toLowerCase().contains(query.toLowerCase());
+    }
+
+    return DirectorySnapshot(
+      path: snapshot.path,
+      error: snapshot.error,
+      entries: [
+        for (final entry in snapshot.entries)
+          if (matches(entry.name) || matches(entry.path)) entry,
+      ],
+    );
+  }
+
+  bool get _isMediaLibraryPage =>
+      _page == ShellPage.music || _page == ShellPage.video;
+
+  bool _isPlayablePreview(FilePreview preview) =>
+      preview.contentKind == FileContentKind.audio ||
+      preview.contentKind == FileContentKind.video;
+
+  bool _shouldOpenMediaFullscreen(FilePreview preview, bool forceFullScreen) {
+    if (forceFullScreen) return true;
+    if (_isMediaLibraryPage && _isPlayablePreview(preview)) {
+      return !_sharedMediaSession.active;
+    }
+    return !_previewVisible && _settings.openFullscreenOnHiddenPreviewTap;
+  }
+
+  List<MediaPreviewItem> _playlistWithSelectedPreview(
+    FilePreview preview,
+    List<MediaPreviewItem> playlist, {
+    required String selectedPath,
+  }) {
+    if (!_isPlayablePreview(preview)) return playlist;
+    if (playlist.any((item) =>
+        item.path == preview.sourcePath ||
+        item.resumeKey == selectedPath ||
+        item.title == preview.title)) {
+      return playlist;
+    }
+    return [
+      MediaPreviewItem(
+        title: preview.title,
+        kind: preview.contentKind,
+        path: preview.decrypted ? null : preview.sourcePath,
+        resumeKey: selectedPath,
+        bytes: preview.decrypted && preview.bytes != null
+            ? Uint8List.fromList(preview.bytes!)
+            : null,
+        encrypted: preview.decrypted,
+      ),
+      ...playlist,
+    ];
+  }
+
+  Future<void> _openMediaEntryFromList(
+    ExplorerEntry entry,
+    List<ExplorerEntry> playlistEntries,
+  ) async {
+    final kind = FileViewerService.kindForName(entry.name);
+    final playlist = _mediaItemsFromEntries(
+      playlistEntries,
+      kind == FileContentKind.video
+          ? FileContentKind.video
+          : FileContentKind.audio,
+    );
+    await _openEntry(entry, mediaPlaylistOverride: playlist);
+  }
+
+  Future<void> _playMediaPreviewInSession(
+    FilePreview preview,
+    List<MediaPreviewItem> playlist,
+  ) async {
+    if (!_isPlayablePreview(preview)) return;
+    final effectivePlaylist = playlist.isEmpty
+        ? [
+            MediaPreviewItem(
+              title: preview.title,
+              kind: preview.contentKind,
+              path: preview.decrypted ? null : preview.sourcePath,
+              resumeKey: preview.sourcePath,
+              bytes: preview.decrypted && preview.bytes != null
+                  ? Uint8List.fromList(preview.bytes!)
+                  : null,
+              encrypted: preview.decrypted,
+            ),
+          ]
+        : playlist;
+    var initialIndex = effectivePlaylist.indexWhere((item) =>
+        item.title == preview.title ||
+        item.path == preview.sourcePath ||
+        item.resumeKey == preview.sourcePath);
+    if (initialIndex < 0) initialIndex = 0;
+    final wasAlreadyOpen =
+        _sharedMediaSession.isSame(preview, effectivePlaylist);
+    await _sharedMediaSession.open(
+      preview: preview,
+      playlist: effectivePlaylist,
+      language: _language,
+      initialIndex: initialIndex,
+      repeatOne: false,
+      shuffle: false,
+      allowMiniDock: true,
+    );
+    final item = effectivePlaylist[initialIndex];
+    final resumeMs = _settings.mediaResumePositions[item.resumeKey ?? ''] ?? 0;
+    if (!wasAlreadyOpen && resumeMs > 1500) {
+      await _sharedMediaSession.player.seek(Duration(milliseconds: resumeMs));
+    }
+  }
+
+  Future<String> _setPluginEnabled(String pluginId, bool enabled) async {
+    final disabled = _settings.disabledPluginIds.toSet();
+    if (enabled) {
+      disabled.remove(pluginId);
+    } else {
+      disabled.add(pluginId);
+    }
+    final next = _settings.copyWith(
+      disabledPluginIds: disabled.toList()..sort(),
+    );
+    await _settingsRepo.save(next);
+    final enabledPluginDefs = _enabledPluginDefs(_pluginDefs, next);
+    _explorer.configurePlugins(enabledPluginDefs, next.connectionProfiles);
+    final locations = await _explorer.loadLocations(
+      enabledPluginDefs,
+      next.connectionProfiles,
+    );
+    final pluginMediaSections =
+        _pluginRuntime(_pluginDefs, next).mediaSections();
+    if (mounted) {
+      setState(() {
+        _settings = next;
+        _locations = locations;
+        _pluginMediaSections = pluginMediaSections;
+        if (_activePluginMediaSection != null &&
+            !pluginMediaSections.any((section) =>
+                section.runtimeId == _activePluginMediaSection!.runtimeId)) {
+          _activePluginMediaSection = null;
+          _page = ShellPage.explorer;
+          _preview = null;
+          _selected = null;
+        }
+      });
+    }
+    return enabled
+        ? _language.t('settings.plugin.enabled')
+        : _language.t('settings.plugin.disabled');
   }
 
   void _openPluginMediaSection(PluginMediaSection section) {
@@ -4009,9 +4338,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       encryptPersistentCache: next.encryptThumbnailCache,
     );
     final pluginDefs = await _plugins.loadPlugins();
-    _explorer.configurePlugins(pluginDefs, next.connectionProfiles);
-    final locations =
-        await _explorer.loadLocations(pluginDefs, next.connectionProfiles);
+    final enabledPluginDefs = _enabledPluginDefs(pluginDefs, next);
+    _explorer.configurePlugins(enabledPluginDefs, next.connectionProfiles);
+    final locations = await _explorer.loadLocations(
+        enabledPluginDefs, next.connectionProfiles);
     final pluginMediaSections =
         _pluginRuntime(pluginDefs, next).mediaSections();
     if (mounted) {
@@ -4298,6 +4628,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                           onInstallPluginZip: _installPluginZip,
                           onExportPluginZip: _exportPluginZip,
                           onDeletePlugin: _deletePlugin,
+                          onSetPluginEnabled: _setPluginEnabled,
                           onSavePluginSettings: _savePluginSettings,
                           onExportConfigurationArchive:
                               _exportConfigurationArchive,
@@ -4341,7 +4672,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                   onRememberMediaPosition:
                                       _rememberMediaPosition,
                                   onEntry: _openEntry,
+                                  onEntryPlaylist: _openMediaEntryFromList,
                                   onDownloadEntry: _downloadPluginMediaEntry,
+                                  showFilters:
+                                      _activePluginMediaSection == null,
                                 )
                               : _ExplorerView(
                                   language: _language,
@@ -4908,6 +5242,7 @@ enum _CommonSetupDecision { cancel, unique, settings }
 
 enum _EntryAction {
   open,
+  edit,
   createFolder,
   createPlain,
   createEncryptedPlain,
@@ -5793,7 +6128,9 @@ class _MediaOnlyView extends StatelessWidget {
     required this.onPreviewEntryAction,
     required this.onRememberMediaPosition,
     required this.onEntry,
+    required this.onEntryPlaylist,
     required this.onDownloadEntry,
+    this.showFilters = true,
   });
 
   final AppLanguage language;
@@ -5816,7 +6153,10 @@ class _MediaOnlyView extends StatelessWidget {
   final Future<void> Function(String key, Duration position)
       onRememberMediaPosition;
   final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry, List<ExplorerEntry>)
+      onEntryPlaylist;
   final Future<void> Function(ExplorerEntry) onDownloadEntry;
+  final bool showFilters;
 
   @override
   Widget build(BuildContext context) {
@@ -5826,7 +6166,7 @@ class _MediaOnlyView extends StatelessWidget {
         language: language,
         onRefresh: onRefresh,
         onSearch: onSearch,
-        onSearchFilters: onSearchFilters,
+        onSearchFilters: showFilters ? onSearchFilters : null,
         searchQuery: searchQuery,
       ),
       Expanded(
@@ -5847,37 +6187,15 @@ class _MediaOnlyView extends StatelessWidget {
             if (snap.data!.entries.isEmpty) {
               return Center(child: Text(language.t('explorer.empty')));
             }
-            if (preview == null) {
-              return _MediaLibraryBrowser(
-                language: language,
-                entries: snap.data!.entries,
-                isVideo: isVideo,
-                mediaPlaylist: mediaPlaylist,
-                mediaResumePositions: mediaResumePositions,
-                onEntry: onEntry,
-                onDownloadEntry: onDownloadEntry,
-              );
-            }
-            return Padding(
-              padding: const EdgeInsets.all(14),
-              child: _PreviewPane(
-                language: language,
-                entry: entry,
-                preview: preview,
-                mediaPlaylist: mediaPlaylist,
-                imagePlaylist: const [],
-                mediaResumePositions: mediaResumePositions,
-                onRememberMediaPosition: onRememberMediaPosition,
-                visible: true,
-                onTogglePreview: () {},
-                onOpenPassword: onOpenPassword,
-                onOpenExternal: onOpenExternal,
-                onPreviewWindow: onPreviewWindow,
-                onEditPreview: onEditPreview,
-                onEntryAction: onPreviewEntryAction,
-                onImageNavigate: (_) async => null,
-                allowMiniDock: false,
-              ),
+            return _MediaLibraryBrowser(
+              language: language,
+              entries: snap.data!.entries,
+              isVideo: isVideo,
+              mediaPlaylist: mediaPlaylist,
+              mediaResumePositions: mediaResumePositions,
+              onEntry: onEntry,
+              onEntryPlaylist: onEntryPlaylist,
+              onDownloadEntry: onDownloadEntry,
             );
           },
         ),
@@ -5894,6 +6212,7 @@ class _MediaLibraryBrowser extends StatelessWidget {
     required this.mediaPlaylist,
     required this.mediaResumePositions,
     required this.onEntry,
+    required this.onEntryPlaylist,
     required this.onDownloadEntry,
   });
 
@@ -5903,6 +6222,8 @@ class _MediaLibraryBrowser extends StatelessWidget {
   final List<MediaPreviewItem> mediaPlaylist;
   final Map<String, int> mediaResumePositions;
   final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry, List<ExplorerEntry>)
+      onEntryPlaylist;
   final Future<void> Function(ExplorerEntry) onDownloadEntry;
 
   @override
@@ -5919,6 +6240,7 @@ class _MediaLibraryBrowser extends StatelessWidget {
         .toList()
       ..sort((a, b) => (mediaResumePositions[b.path] ?? 0)
           .compareTo(mediaResumePositions[a.path] ?? 0));
+    final currentEntries = _currentEntries(mediaEntries);
 
     return DefaultTabController(
       length: 8,
@@ -5943,9 +6265,9 @@ class _MediaLibraryBrowser extends StatelessWidget {
           child: TabBarView(children: [
             _MediaEntryList(
               language: language,
-              entries: mediaEntries,
+              entries: currentEntries,
               emptyText: language.t('media.choose.to.play'),
-              onEntry: onEntry,
+              onEntry: (entry) => onEntryPlaylist(entry, currentEntries),
               onDownloadEntry: onDownloadEntry,
             ),
             _MediaEntryList(
@@ -5957,31 +6279,31 @@ class _MediaLibraryBrowser extends StatelessWidget {
             _MediaGroupList(
               language: language,
               groups: _groupByNameHeuristic(mediaEntries, 'playlist'),
-              onEntry: onEntry,
+              onEntry: onEntryPlaylist,
               onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByNameHeuristic(mediaEntries, 'album'),
-              onEntry: onEntry,
+              onEntry: onEntryPlaylist,
               onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByNameHeuristic(mediaEntries, 'artist'),
-              onEntry: onEntry,
+              onEntry: onEntryPlaylist,
               onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByNameHeuristic(mediaEntries, 'genre'),
-              onEntry: onEntry,
+              onEntry: onEntryPlaylist,
               onDownloadEntry: onDownloadEntry,
             ),
             _MediaGroupList(
               language: language,
               groups: _groupByFolder(mediaEntries),
-              onEntry: onEntry,
+              onEntry: onEntryPlaylist,
               onDownloadEntry: onDownloadEntry,
             ),
             _MediaEntryList(
@@ -6035,6 +6357,25 @@ class _MediaLibraryBrowser extends StatelessWidget {
       final parts = path.split(RegExp(r'[\\/]')).where((p) => p.isNotEmpty);
       return parts.length > 1 ? parts.elementAt(parts.length - 2) : path;
     }
+  }
+
+  List<ExplorerEntry> _currentEntries(List<ExplorerEntry> mediaEntries) {
+    if (mediaPlaylist.isEmpty) return const <ExplorerEntry>[];
+    final byPath = <String, ExplorerEntry>{
+      for (final entry in mediaEntries) entry.path: entry,
+    };
+    final byName = <String, ExplorerEntry>{
+      for (final entry in mediaEntries) entry.name: entry,
+    };
+    final result = <ExplorerEntry>[];
+    for (final item in mediaPlaylist) {
+      final entry =
+          byPath[item.path] ?? byPath[item.resumeKey] ?? byName[item.title];
+      if (entry != null && !result.any((e) => e.path == entry.path)) {
+        result.add(entry);
+      }
+    }
+    return result;
   }
 }
 
@@ -6109,7 +6450,7 @@ class _MediaGroupList extends StatelessWidget {
 
   final AppLanguage language;
   final Map<String, List<ExplorerEntry>> groups;
-  final Future<void> Function(ExplorerEntry) onEntry;
+  final Future<void> Function(ExplorerEntry, List<ExplorerEntry>) onEntry;
   final Future<void> Function(ExplorerEntry) onDownloadEntry;
 
   @override
@@ -6142,7 +6483,7 @@ class _MediaGroupList extends StatelessWidget {
                         onPressed: () => unawaited(onDownloadEntry(entry)),
                       )
                     : null,
-                onTap: () => unawaited(onEntry(entry)),
+                onTap: () => unawaited(onEntry(entry, items)),
               ),
           ],
         );
@@ -6165,7 +6506,7 @@ class _MediaHeader extends StatelessWidget {
   final AppLanguage language;
   final Future<void> Function() onRefresh;
   final VoidCallback onSearch;
-  final VoidCallback onSearchFilters;
+  final VoidCallback? onSearchFilters;
   final String searchQuery;
 
   @override
@@ -6196,11 +6537,12 @@ class _MediaHeader extends StatelessWidget {
           icon: Icon(searchQuery.isEmpty ? Icons.search : Icons.search_off),
           tooltip: language.t('search.title'),
         ),
-        IconButton(
-          onPressed: onSearchFilters,
-          icon: const Icon(Icons.tune_outlined),
-          tooltip: language.t('search.filters'),
-        ),
+        if (onSearchFilters != null)
+          IconButton(
+            onPressed: onSearchFilters,
+            icon: const Icon(Icons.tune_outlined),
+            tooltip: language.t('search.filters'),
+          ),
       ]),
     );
   }
@@ -6398,74 +6740,78 @@ class _ExplorerView extends StatelessWidget {
             color: Colors.white,
             border: Border(bottom: BorderSide(color: Color(0xFFDDE6F0))),
           ),
-          child: Row(children: [
-            IconButton(
-              onPressed: onUp,
-              icon: Icon(Icons.arrow_back, size: 24 * toolbarIconScale),
-              tooltip: language.t('explorer.up'),
-            ),
-            IconButton(
-              onPressed: onRefresh,
-              icon: Icon(Icons.refresh, size: 24 * toolbarIconScale),
-              tooltip: language.t('explorer.refresh'),
-            ),
-            IconButton(
-              onPressed: canGoForward ? onForward : null,
-              icon: Icon(Icons.arrow_forward, size: 24 * toolbarIconScale),
-              tooltip: language.t('explorer.forward'),
-            ),
-            Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: onPathPick,
-                onLongPress: onPathEdit,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(14),
-                    color: const Color(0xFFF3F7FB),
-                    border: Border.all(color: const Color(0xFFDDE6F0)),
-                  ),
-                  child: Text(
-                    currentPath ?? language.t('explorer.choose.location'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ),
-            ),
-            if (showToolbarActions) ...[
-              const SizedBox(width: 8),
+          child: Column(children: [
+            Row(children: [
               IconButton(
-                onPressed: onSearch,
-                icon: Icon(
-                  searchQuery.isEmpty ? Icons.search : Icons.search_off,
-                  size: 24 * toolbarIconScale,
-                ),
-                tooltip: language.t('search.title'),
+                onPressed: onUp,
+                icon: Icon(Icons.arrow_back, size: 24 * toolbarIconScale),
+                tooltip: language.t('explorer.up'),
               ),
               IconButton(
-                onPressed: onTogglePreview,
-                icon: Icon(
-                  previewVisible
-                      ? Icons.visibility_off_outlined
-                      : Icons.visibility_outlined,
-                  size: 24 * toolbarIconScale,
+                onPressed: onRefresh,
+                icon: Icon(Icons.refresh, size: 24 * toolbarIconScale),
+                tooltip: language.t('explorer.refresh'),
+              ),
+              IconButton(
+                onPressed: canGoForward ? onForward : null,
+                icon: Icon(Icons.arrow_forward, size: 24 * toolbarIconScale),
+                tooltip: language.t('explorer.forward'),
+              ),
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onPathPick,
+                  onLongPress: onPathEdit,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      color: const Color(0xFFF3F7FB),
+                      border: Border.all(color: const Color(0xFFDDE6F0)),
+                    ),
+                    child: Text(
+                      currentPath ?? language.t('explorer.choose.location'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                 ),
-                tooltip: previewVisible
-                    ? language.t('preview.hide')
-                    : language.t('preview.show'),
               ),
-              _ExplorerOverflowMenu(
-                language: language,
-                sortLabel: sortMode.label(language),
-                showHiddenFiles: showHiddenFiles,
-                showSystemFiles: showSystemFiles,
-                iconScale: toolbarIconScale,
-                onSelected: onExplorerMenuAction,
-              ),
-            ],
+              if (showToolbarActions) ...[
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: onSearch,
+                  icon: Icon(
+                    searchQuery.isEmpty ? Icons.search : Icons.search_off,
+                    size: 24 * toolbarIconScale,
+                  ),
+                  tooltip: language.t('search.title'),
+                ),
+                IconButton(
+                  onPressed: onTogglePreview,
+                  icon: Icon(
+                    previewVisible
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined,
+                    size: 24 * toolbarIconScale,
+                  ),
+                  tooltip: previewVisible
+                      ? language.t('preview.hide')
+                      : language.t('preview.show'),
+                ),
+                _ExplorerOverflowMenu(
+                  language: language,
+                  sortLabel: sortMode.label(language),
+                  showHiddenFiles: showHiddenFiles,
+                  showSystemFiles: showSystemFiles,
+                  iconScale: toolbarIconScale,
+                  onSelected: onExplorerMenuAction,
+                ),
+              ],
+            ]),
+            const SizedBox(height: 5),
+            _StorageUsageStrip(path: currentPath, language: language),
           ]),
         ),
       Expanded(
@@ -6588,6 +6934,171 @@ class _ExplorerOverflowMenu extends StatelessWidget {
           child: Text(language.t('explorer.show.system')),
         ),
       ],
+    );
+  }
+}
+
+class _StorageUsageStrip extends StatelessWidget {
+  const _StorageUsageStrip({
+    required this.path,
+    required this.language,
+  });
+
+  final String? path;
+  final AppLanguage language;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = path;
+    if (current == null || current.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return FutureBuilder<_StorageUsageInfo>(
+      future: _StorageUsageInfo.load(current),
+      builder: (context, snapshot) {
+        final info = snapshot.data;
+        final text = info == null
+            ? language.t('storage.checking')
+            : info.available
+                ? '${language.t('storage.total')}: ${_formatBytes(info.total)}  '
+                    '${language.t('storage.used')}: ${_formatBytes(info.used)}  '
+                    '${language.t('storage.free')}: ${_formatBytes(info.free)}'
+                : info.message ?? language.t('storage.unavailable');
+        final value = info == null || !info.available || info.total <= 0
+            ? null
+            : (info.used / info.total).clamp(0.0, 1.0).toDouble();
+        return Row(children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(99),
+              child: LinearProgressIndicator(
+                minHeight: 4,
+                value: value,
+                backgroundColor: const Color(0xFFE8EEF5),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            flex: 2,
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
+          ),
+        ]);
+      },
+    );
+  }
+
+  static String _formatBytes(int value) {
+    if (value < 1024) return '$value B';
+    final units = ['KB', 'MB', 'GB', 'TB'];
+    var size = value / 1024.0;
+    var unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+      size /= 1024;
+      unit++;
+    }
+    return '${size.toStringAsFixed(size >= 100 ? 0 : 1)} ${units[unit]}';
+  }
+}
+
+class _StorageUsageInfo {
+  const _StorageUsageInfo({
+    required this.available,
+    this.total = 0,
+    this.free = 0,
+    this.message,
+  });
+
+  final bool available;
+  final int total;
+  final int free;
+  final String? message;
+
+  int get used => math.max(0, total - free);
+
+  static Future<_StorageUsageInfo> load(String path) async {
+    if (path.startsWith('remote://') ||
+        path.startsWith('zip://') ||
+        path.startsWith('rar://') ||
+        path.startsWith('torrent://')) {
+      return const _StorageUsageInfo(
+        available: false,
+        message: 'Plugin/virtual storage',
+      );
+    }
+    try {
+      if (Platform.isWindows) {
+        return await _loadWindows(path);
+      }
+      return await _loadDf(path);
+    } catch (error) {
+      return _StorageUsageInfo(available: false, message: '$error');
+    }
+  }
+
+  static Future<_StorageUsageInfo> _loadWindows(String path) async {
+    final drive = RegExp(r'^[a-zA-Z]:').firstMatch(path)?.group(0);
+    if (drive == null) {
+      return const _StorageUsageInfo(available: false);
+    }
+    final wmic = await Process.run(
+      'wmic',
+      [
+        'logicaldisk',
+        'where',
+        "DeviceID='$drive'",
+        'get',
+        'Size,FreeSpace',
+        '/value',
+      ],
+    ).timeout(const Duration(seconds: 4));
+    return _parseWmic('${wmic.stdout}') ??
+        const _StorageUsageInfo(available: false);
+  }
+
+  static _StorageUsageInfo? _parseWmic(String value) {
+    int? total;
+    int? free;
+    for (final line in value.split(RegExp(r'\r?\n'))) {
+      final parts = line.split('=');
+      if (parts.length != 2) continue;
+      if (parts[0].trim().toLowerCase() == 'size') {
+        total = int.tryParse(parts[1].trim());
+      } else if (parts[0].trim().toLowerCase() == 'freespace') {
+        free = int.tryParse(parts[1].trim());
+      }
+    }
+    if (total == null || free == null || total <= 0) return null;
+    return _StorageUsageInfo(available: true, total: total, free: free);
+  }
+
+  static Future<_StorageUsageInfo> _loadDf(String path) async {
+    final result = await Process.run('df', ['-k', path])
+        .timeout(const Duration(seconds: 4));
+    if (result.exitCode != 0) {
+      return _StorageUsageInfo(available: false, message: '${result.stderr}');
+    }
+    final lines = '${result.stdout}'
+        .split(RegExp(r'\r?\n'))
+        .where((line) => line.trim().isNotEmpty)
+        .toList();
+    if (lines.length < 2) return const _StorageUsageInfo(available: false);
+    final parts = lines.last.trim().split(RegExp(r'\s+'));
+    if (parts.length < 4) return const _StorageUsageInfo(available: false);
+    final totalKb = int.tryParse(parts[1]);
+    final freeKb = int.tryParse(parts[3]);
+    if (totalKb == null || freeKb == null || totalKb <= 0) {
+      return const _StorageUsageInfo(available: false);
+    }
+    return _StorageUsageInfo(
+      available: true,
+      total: totalKb * 1024,
+      free: freeKb * 1024,
     );
   }
 }
@@ -6866,7 +7377,8 @@ class _EntryList extends StatelessWidget {
   List<PopupMenuEntry<_EntryAction>> _entryMenuItems(ExplorerEntry entry) {
     final isFavorite = favoritePaths.contains(entry.path);
     final isRecent = recentPaths.contains(entry.path);
-    final isVirtual = entry.path.startsWith('zip://');
+    final isVirtual =
+        entry.path.startsWith('zip://') || entry.path.startsWith('rar://');
     final isProfileLocation = entry.connectionProfileId != null;
     if (entry.isNavigationEntry) {
       return [
@@ -6881,6 +7393,12 @@ class _EntryList extends StatelessWidget {
         value: _EntryAction.open,
         child: Text(language.t('common.open')),
       ),
+      if (!entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.edit,
+          enabled: entry.exists,
+          child: Text(language.t('editor.open')),
+        ),
       const PopupMenuDivider(),
       PopupMenuItem(
         value: _EntryAction.createFolder,
@@ -7011,7 +7529,8 @@ class _EntryList extends StatelessWidget {
       ),
       if (!entry.isDirectory) const PopupMenuDivider(),
       if (!entry.isDirectory &&
-          FileViewerService.extensionForName(entry.path) == '.zip')
+          {'.zip', '.rar', '.cbr', '.rev'}
+              .contains(FileViewerService.extensionForName(entry.path)))
         PopupMenuItem(
           value: _EntryAction.unzip,
           enabled: entry.exists && !isVirtual && !isProfileLocation,
@@ -7096,6 +7615,8 @@ class _EntryList extends StatelessWidget {
     switch (action) {
       case _EntryAction.open:
         onEntry(entry);
+      case _EntryAction.edit:
+        onEntryAction(entry, action);
       case _EntryAction.createFolder:
       case _EntryAction.createPlain:
       case _EntryAction.createEncryptedPlain:
@@ -7222,7 +7743,9 @@ class _EntryLeadingThumbnail extends StatelessWidget {
     final boxSize = math.max(30.0, size + 8);
 
     if (kind == FileContentKind.image) {
-      if (!entry.isEncrypted && !entry.path.startsWith('zip://')) {
+      if (!entry.isEncrypted &&
+          !entry.path.startsWith('zip://') &&
+          !entry.path.startsWith('rar://')) {
         return _ThumbBox(
           size: boxSize,
           child: Image.file(
@@ -7242,7 +7765,9 @@ class _EntryLeadingThumbnail extends StatelessWidget {
 
     if (kind == FileContentKind.audio && showAudioArtwork) {
       return FutureBuilder<FilePreview>(
-        future: entry.isEncrypted || entry.path.startsWith('zip://')
+        future: entry.isEncrypted ||
+                entry.path.startsWith('zip://') ||
+                entry.path.startsWith('rar://')
             ? previewLoader(entry)
             : null,
         builder: (context, snapshot) {
@@ -7272,7 +7797,9 @@ class _EntryLeadingThumbnail extends StatelessWidget {
 
     if (kind == FileContentKind.video && showVideoThumbnails) {
       return FutureBuilder<Uint8List?>(
-        future: entry.isEncrypted || entry.path.startsWith('zip://')
+        future: entry.isEncrypted ||
+                entry.path.startsWith('zip://') ||
+                entry.path.startsWith('rar://')
             ? Future<Uint8List?>.value(null)
             : MediaArtworkService.videoThumbnail(entry.path),
         builder: (context, snapshot) {
@@ -7525,7 +8052,6 @@ class _PreviewPane extends StatelessWidget {
     required this.onEntryAction,
     required this.onImageNavigate,
     required this.onRememberMediaPosition,
-    this.allowMiniDock = true,
   });
 
   final AppLanguage language;
@@ -7544,7 +8070,6 @@ class _PreviewPane extends StatelessWidget {
   final Future<FilePreview?> Function(int delta) onImageNavigate;
   final Future<void> Function(String key, Duration position)
       onRememberMediaPosition;
-  final bool allowMiniDock;
 
   @override
   Widget build(BuildContext context) {
@@ -7571,7 +8096,7 @@ class _PreviewPane extends StatelessWidget {
                 mediaPlaylist: mediaPlaylist,
                 imagePlaylist: imagePlaylist,
                 mediaResumePositions: mediaResumePositions,
-                allowMiniDock: allowMiniDock,
+                allowMiniDock: true,
                 onRememberMediaPosition: onRememberMediaPosition,
                 onImageNavigate: (delta) async {
                   await onImageNavigate(delta);
@@ -7740,6 +8265,7 @@ class _PreviewContent extends StatelessWidget {
         );
       }
       return Container(
+        width: double.infinity,
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: const Color(0xFF101923),
@@ -7917,6 +8443,7 @@ class _CodePreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: const Color(0xFF101923),
@@ -8227,7 +8754,7 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     final duration = _player.state.duration;
     final position = _player.state.position;
     final value = duration > Duration.zero &&
-            duration - position < const Duration(seconds: 3)
+            duration - position < const Duration(seconds: 10)
         ? Duration.zero
         : position;
     await callback(key, value);
@@ -8270,10 +8797,17 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
                       items: widget.playlist,
                     ),
                     const SizedBox(height: 8),
-                    Text(
-                      widget.preview.title,
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.titleMedium,
+                    StreamBuilder<Playlist>(
+                      stream: _player.stream.playlist,
+                      initialData: _player.state.playlist,
+                      builder: (context, snapshot) {
+                        final item = _currentItem();
+                        return Text(
+                          item?.title ?? widget.preview.title,
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        );
+                      },
                     ),
                     _AudioLyricsForCurrent(
                       player: _player,
@@ -8340,17 +8874,29 @@ class _AdaptiveVideoSurface extends StatelessWidget {
 }
 
 class _SharedMediaSession extends ChangeNotifier {
-  _SharedMediaSession();
+  _SharedMediaSession() {
+    _playlistSubscription = player.stream.playlist.listen((_) {
+      notifyListeners();
+    });
+  }
 
   late final Player player = Player();
   late final VideoController controller = VideoController(player);
   _InMemoryMediaServer? _memoryMediaServer;
+  late final StreamSubscription<Playlist> _playlistSubscription;
   FilePreview? preview;
   List<MediaPreviewItem> playlist = const [];
   String _sessionKey = '';
   var active = false;
   var collapsed = false;
   var dockSuppressed = false;
+
+  @override
+  void dispose() {
+    unawaited(_playlistSubscription.cancel());
+    unawaited(player.dispose());
+    super.dispose();
+  }
 
   static String keyFor(FilePreview preview, List<MediaPreviewItem> playlist) {
     final itemsKey = playlist
@@ -8369,6 +8915,8 @@ class _SharedMediaSession extends ChangeNotifier {
     return playlist[index.toInt()];
   }
 
+  String get currentTitle => currentItem?.title ?? preview?.title ?? '';
+
   Future<void> open({
     required FilePreview preview,
     required List<MediaPreviewItem> playlist,
@@ -8382,7 +8930,6 @@ class _SharedMediaSession extends ChangeNotifier {
     if (active && _sessionKey == nextKey) {
       this.preview = preview;
       this.playlist = playlist;
-      collapsed = false;
       dockSuppressed = !allowMiniDock;
       await player.setPlaylistMode(
         repeatOne ? PlaylistMode.single : PlaylistMode.loop,
@@ -8391,6 +8938,7 @@ class _SharedMediaSession extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    final preserveCollapsed = active ? collapsed : false;
     await _clearMemoryMedia();
     final medias = <Media>[];
     for (var i = 0; i < playlist.length; i++) {
@@ -8411,7 +8959,8 @@ class _SharedMediaSession extends ChangeNotifier {
         }
         if (path.startsWith('remote://') ||
             path.startsWith('torrent://') ||
-            path.startsWith('zip://')) {
+            path.startsWith('zip://') ||
+            path.startsWith('rar://')) {
           continue;
         }
         medias.add(Media(Uri.file(path).toString()));
@@ -8424,7 +8973,7 @@ class _SharedMediaSession extends ChangeNotifier {
     this.playlist = playlist;
     _sessionKey = nextKey;
     active = true;
-    collapsed = false;
+    collapsed = preserveCollapsed;
     dockSuppressed = !allowMiniDock;
     notifyListeners();
     await player.open(Playlist(medias, index: initialIndex), play: true);
@@ -8881,10 +9430,8 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   child: Row(children: [
                     Expanded(
-                      child: Text(
+                      child: _MarqueeText(
                         item.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     ),
@@ -8912,15 +9459,6 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
                       onPressed: () => unawaited(widget.session.player.next()),
                       icon: const Icon(Icons.skip_next),
                       tooltip: widget.language.t('media.next'),
-                    ),
-                    IconButton(
-                      onPressed: () => widget.session.setCollapsed(
-                        !widget.session.collapsed,
-                      ),
-                      icon: Icon(widget.session.collapsed
-                          ? Icons.open_in_full
-                          : Icons.minimize),
-                      tooltip: widget.language.t('preview.window'),
                     ),
                     IconButton(
                       onPressed: () => widget.onOpenFullScreen(preview),
@@ -8970,8 +9508,8 @@ class _MiniAudioHeader extends StatelessWidget {
               const Icon(Icons.graphic_eq, size: 28),
             const SizedBox(width: 10),
             Expanded(
-              child: Text(
-                'SecureVault media',
+              child: _MarqueeText(
+                item.title,
                 style: Theme.of(context).textTheme.labelMedium,
               ),
             ),
@@ -8979,6 +9517,92 @@ class _MiniAudioHeader extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+class _MarqueeText extends StatefulWidget {
+  const _MarqueeText(
+    this.text, {
+    this.style,
+  });
+
+  final String text;
+  final TextStyle? style;
+
+  @override
+  State<_MarqueeText> createState() => _MarqueeTextState();
+}
+
+class _MarqueeTextState extends State<_MarqueeText>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this);
+  }
+
+  @override
+  void didUpdateWidget(covariant _MarqueeText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text || oldWidget.style != widget.style) {
+      _controller
+        ..stop()
+        ..reset();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, constraints) {
+      final style = widget.style ?? DefaultTextStyle.of(context).style;
+      final painter = TextPainter(
+        text: TextSpan(text: widget.text, style: style),
+        textDirection: Directionality.of(context),
+        maxLines: 1,
+      )..layout();
+      final width = painter.width;
+      if (width <= constraints.maxWidth || constraints.maxWidth.isInfinite) {
+        _controller.stop();
+        return Text(
+          widget.text,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        );
+      }
+      final distance = width + 42;
+      final durationMs = math.max(4500, distance * 38).round();
+      if (_controller.duration?.inMilliseconds != durationMs) {
+        _controller.duration = Duration(milliseconds: durationMs);
+      }
+      if (!_controller.isAnimating) {
+        _controller.repeat();
+      }
+      return ClipRect(
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, _) {
+            final offset = -_controller.value * distance;
+            return Transform.translate(
+              offset: Offset(offset, 0),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Text(widget.text, maxLines: 1, style: style),
+                const SizedBox(width: 42),
+                Text(widget.text, maxLines: 1, style: style),
+              ]),
+            );
+          },
+        ),
+      );
+    });
   }
 }
 
@@ -9008,127 +9632,19 @@ class _MediaTransportControls extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(children: [
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            IconButton(
-              onPressed: () => unawaited(() async {
-                await onBeforeTrackChange();
-                await player.previous();
-              }()),
-              icon: const Icon(Icons.skip_previous),
-              tooltip: language.t('media.previous'),
-            ),
-            StreamBuilder<bool>(
-              stream: player.stream.playing,
-              initialData: player.state.playing,
-              builder: (context, snapshot) {
-                final playing = snapshot.data ?? false;
-                return IconButton.filled(
-                  onPressed: player.playOrPause,
-                  icon: Icon(playing ? Icons.pause : Icons.play_arrow),
-                  tooltip: playing
-                      ? language.t('media.pause')
-                      : language.t('media.play'),
-                );
-              },
-            ),
-            IconButton(
-              onPressed: () => unawaited(() async {
-                await onBeforeTrackChange();
-                await player.next();
-              }()),
-              icon: const Icon(Icons.skip_next),
-              tooltip: language.t('media.next'),
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              onPressed: onShuffle,
-              icon: Icon(shuffle ? Icons.shuffle_on : Icons.shuffle),
-              tooltip: language.t('media.shuffle'),
-            ),
-            IconButton(
-              onPressed: onRepeatOne,
-              icon: Icon(repeatOne ? Icons.repeat_one_on : Icons.repeat),
-              tooltip: language.t('media.repeat.one'),
-            ),
-            StreamBuilder<double>(
-              stream: player.stream.rate,
-              initialData: player.state.rate,
-              builder: (context, snapshot) {
-                final rate = snapshot.data ?? 1.0;
-                return PopupMenuButton<double>(
-                  tooltip: language.t('media.speed'),
-                  icon: const Icon(Icons.speed_outlined),
-                  onSelected: (value) => unawaited(player.setRate(value)),
-                  itemBuilder: (_) => [
-                    for (final value in const [.5, .75, 1.0, 1.25, 1.5, 2.0])
-                      CheckedPopupMenuItem(
-                        value: value,
-                        checked: (rate - value).abs() < .01,
-                        child: Text('${value.toStringAsFixed(2)}x'),
-                      ),
-                  ],
-                );
-              },
-            ),
-            StreamBuilder<Tracks>(
-              stream: player.stream.tracks,
-              initialData: player.state.tracks,
-              builder: (context, snapshot) {
-                final tracks = snapshot.data ?? const Tracks();
-                return PopupMenuButton<Object>(
-                  tooltip: language.t('media.tracks'),
-                  icon: const Icon(Icons.subtitles_outlined),
-                  onSelected: (track) {
-                    if (track is AudioTrack) {
-                      unawaited(player.setAudioTrack(track));
-                    } else if (track is SubtitleTrack) {
-                      unawaited(player.setSubtitleTrack(track));
-                    }
-                  },
-                  itemBuilder: (_) => [
-                    PopupMenuItem<Object>(
-                      enabled: false,
-                      child: Text(language.t('media.audio.track')),
-                    ),
-                    for (final track in tracks.audio)
-                      PopupMenuItem<Object>(
-                        value: track,
-                        child: Text(_trackTitle(track)),
-                      ),
-                    const PopupMenuDivider(),
-                    PopupMenuItem<Object>(
-                      enabled: false,
-                      child: Text(language.t('media.subtitle.track')),
-                    ),
-                    for (final track in tracks.subtitle)
-                      PopupMenuItem<Object>(
-                        value: track,
-                        child: Text(_trackTitle(track)),
-                      ),
-                  ],
-                );
-              },
-            ),
-            PopupMenuButton<String>(
-              tooltip: language.t('media.equalizer'),
-              icon: const Icon(Icons.equalizer_outlined),
-              onSelected: (preset) =>
-                  unawaited(_applyEqualizerPreset(player, preset)),
-              itemBuilder: (_) => [
-                for (final preset in const [
-                  'flat',
-                  'bass',
-                  'voice',
-                  'treble',
-                  'loudness'
-                ])
-                  PopupMenuItem(
-                    value: preset,
-                    child: Text(language.t('media.equalizer.$preset')),
-                  ),
-              ],
-            ),
-          ]),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 560;
+              return Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ..._primaryControls(),
+                  const SizedBox(width: 8),
+                  if (compact) _combinedControls() else ..._expandedControls(),
+                ],
+              );
+            },
+          ),
           StreamBuilder<Duration>(
             stream: player.stream.duration,
             initialData: player.state.duration,
@@ -9163,6 +9679,210 @@ class _MediaTransportControls extends StatelessWidget {
         ]),
       ),
     );
+  }
+
+  List<Widget> _primaryControls() => [
+        IconButton(
+          onPressed: () => unawaited(() async {
+            await onBeforeTrackChange();
+            await player.previous();
+          }()),
+          icon: const Icon(Icons.skip_previous),
+          tooltip: language.t('media.previous'),
+        ),
+        StreamBuilder<bool>(
+          stream: player.stream.playing,
+          initialData: player.state.playing,
+          builder: (context, snapshot) {
+            final playing = snapshot.data ?? false;
+            return IconButton.filled(
+              onPressed: player.playOrPause,
+              icon: Icon(playing ? Icons.pause : Icons.play_arrow),
+              tooltip: playing
+                  ? language.t('media.pause')
+                  : language.t('media.play'),
+            );
+          },
+        ),
+        IconButton(
+          onPressed: () => unawaited(() async {
+            await onBeforeTrackChange();
+            await player.next();
+          }()),
+          icon: const Icon(Icons.skip_next),
+          tooltip: language.t('media.next'),
+        ),
+      ];
+
+  List<Widget> _expandedControls() => [
+        IconButton(
+          onPressed: onShuffle,
+          icon: Icon(shuffle ? Icons.shuffle_on : Icons.shuffle),
+          tooltip: language.t('media.shuffle'),
+        ),
+        IconButton(
+          onPressed: onRepeatOne,
+          icon: Icon(repeatOne ? Icons.repeat_one_on : Icons.repeat),
+          tooltip: language.t('media.repeat.one'),
+        ),
+        StreamBuilder<double>(
+          stream: player.stream.rate,
+          initialData: player.state.rate,
+          builder: (context, snapshot) {
+            final rate = snapshot.data ?? 1.0;
+            return PopupMenuButton<double>(
+              tooltip: language.t('media.speed'),
+              icon: const Icon(Icons.speed_outlined),
+              onSelected: (value) => unawaited(player.setRate(value)),
+              itemBuilder: (_) => [
+                for (final value in const [.5, .75, 1.0, 1.25, 1.5, 2.0])
+                  CheckedPopupMenuItem(
+                    value: value,
+                    checked: (rate - value).abs() < .01,
+                    child: Text('${value.toStringAsFixed(2)}x'),
+                  ),
+              ],
+            );
+          },
+        ),
+        _tracksMenuButton(),
+        _equalizerMenuButton(),
+      ];
+
+  Widget _tracksMenuButton() => StreamBuilder<Tracks>(
+        stream: player.stream.tracks,
+        initialData: player.state.tracks,
+        builder: (context, snapshot) {
+          final tracks = snapshot.data ?? const Tracks();
+          return PopupMenuButton<Object>(
+            tooltip: language.t('media.tracks'),
+            icon: const Icon(Icons.subtitles_outlined),
+            onSelected: _selectExtraControl,
+            itemBuilder: (_) => _trackItems(tracks),
+          );
+        },
+      );
+
+  Widget _equalizerMenuButton() => PopupMenuButton<String>(
+        tooltip: language.t('media.equalizer'),
+        icon: const Icon(Icons.equalizer_outlined),
+        onSelected: (preset) =>
+            unawaited(_applyEqualizerPreset(player, preset)),
+        itemBuilder: (_) => [
+          for (final preset in const [
+            'flat',
+            'bass',
+            'voice',
+            'treble',
+            'loudness'
+          ])
+            PopupMenuItem(
+              value: preset,
+              child: Text(language.t('media.equalizer.$preset')),
+            ),
+        ],
+      );
+
+  Widget _combinedControls() => StreamBuilder<Tracks>(
+        stream: player.stream.tracks,
+        initialData: player.state.tracks,
+        builder: (context, snapshot) {
+          final tracks = snapshot.data ?? const Tracks();
+          final rate = player.state.rate;
+          return PopupMenuButton<Object>(
+            tooltip: language.t('media.more.controls'),
+            icon: const Icon(Icons.tune_outlined),
+            onSelected: _selectExtraControl,
+            itemBuilder: (_) => [
+              CheckedPopupMenuItem<Object>(
+                value: 'shuffle',
+                checked: shuffle,
+                child: Text(language.t('media.shuffle')),
+              ),
+              CheckedPopupMenuItem<Object>(
+                value: 'repeatOne',
+                checked: repeatOne,
+                child: Text(language.t('media.repeat.one')),
+              ),
+              const PopupMenuDivider(),
+              PopupMenuItem<Object>(
+                enabled: false,
+                child: Text(language.t('media.speed')),
+              ),
+              for (final value in const [.5, .75, 1.0, 1.25, 1.5, 2.0])
+                CheckedPopupMenuItem<Object>(
+                  value: 'speed:$value',
+                  checked: (rate - value).abs() < .01,
+                  child: Text('${value.toStringAsFixed(2)}x'),
+                ),
+              const PopupMenuDivider(),
+              ..._trackItems(tracks),
+              const PopupMenuDivider(),
+              PopupMenuItem<Object>(
+                enabled: false,
+                child: Text(language.t('media.equalizer')),
+              ),
+              for (final preset in const [
+                'flat',
+                'bass',
+                'voice',
+                'treble',
+                'loudness'
+              ])
+                PopupMenuItem<Object>(
+                  value: 'eq:$preset',
+                  child: Text(language.t('media.equalizer.$preset')),
+                ),
+            ],
+          );
+        },
+      );
+
+  List<PopupMenuEntry<Object>> _trackItems(Tracks tracks) => [
+        PopupMenuItem<Object>(
+          enabled: false,
+          child: Text(language.t('media.audio.track')),
+        ),
+        for (final track in tracks.audio)
+          PopupMenuItem<Object>(
+            value: track,
+            child: Text(_trackTitle(track)),
+          ),
+        const PopupMenuDivider(),
+        PopupMenuItem<Object>(
+          enabled: false,
+          child: Text(language.t('media.subtitle.track')),
+        ),
+        for (final track in tracks.subtitle)
+          PopupMenuItem<Object>(
+            value: track,
+            child: Text(_trackTitle(track)),
+          ),
+      ];
+
+  void _selectExtraControl(Object value) {
+    if (value == 'shuffle') {
+      onShuffle();
+      return;
+    }
+    if (value == 'repeatOne') {
+      onRepeatOne();
+      return;
+    }
+    if (value is String && value.startsWith('speed:')) {
+      final speed = double.tryParse(value.substring('speed:'.length));
+      if (speed != null) unawaited(player.setRate(speed));
+      return;
+    }
+    if (value is String && value.startsWith('eq:')) {
+      unawaited(_applyEqualizerPreset(player, value.substring(3)));
+      return;
+    }
+    if (value is AudioTrack) {
+      unawaited(player.setAudioTrack(value));
+    } else if (value is SubtitleTrack) {
+      unawaited(player.setSubtitleTrack(value));
+    }
   }
 
   String _formatDuration(Duration duration) {
@@ -9317,10 +10037,6 @@ class _MediaPlaylistView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final currentIndex = player.state.playlist.index;
-    final currentItems = items.isEmpty
-        ? const <MediaPreviewItem>[]
-        : [items[currentIndex.clamp(0, items.length - 1).toInt()]];
     return Card(
       elevation: 0,
       child: Padding(
@@ -9357,7 +10073,7 @@ class _MediaPlaylistView extends StatelessWidget {
                       return TabBarView(children: [
                         _MediaPlaylistItems(
                           player: player,
-                          items: currentItems,
+                          items: items,
                           allItems: items,
                           language: language,
                           current: current,
@@ -9587,6 +10303,7 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
   late final TextEditingController _controller;
   late final TextEditingController _searchController;
   late final TextEditingController _outputController;
+  late final ScrollController _editorScrollController;
   var _mode = 'text';
   var _encoding = 'auto';
   var _busy = false;
@@ -9599,6 +10316,7 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
     _bytes = Uint8List.fromList(widget.preview.bytes ?? const <int>[]);
     _controller = TextEditingController();
     _searchController = TextEditingController();
+    _editorScrollController = ScrollController();
     final directory = widget.currentDirectory ??
         (widget.preview.sourcePath == null
             ? Directory.current.path
@@ -9615,6 +10333,7 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
     _controller.dispose();
     _searchController.dispose();
     _outputController.dispose();
+    _editorScrollController.dispose();
     super.dispose();
   }
 
@@ -9726,6 +10445,7 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
         Expanded(
           child: TextField(
             controller: _controller,
+            scrollController: _editorScrollController,
             expands: true,
             maxLines: null,
             minLines: null,
@@ -9847,7 +10567,23 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
       baseOffset: index,
       extentOffset: index + query.length,
     );
+    _scrollEditorToOffset(index, text);
     setState(() => _status = null);
+  }
+
+  void _scrollEditorToOffset(int offset, String text) {
+    if (!_editorScrollController.hasClients) return;
+    final before = text.substring(0, offset.clamp(0, text.length).toInt());
+    final line = '\n'.allMatches(before).length;
+    final target = (line * 17.5).clamp(
+      0.0,
+      _editorScrollController.position.maxScrollExtent,
+    );
+    _editorScrollController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
   }
 
   bool _canOverwriteSource(FilePreview preview) {
@@ -9855,52 +10591,73 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
     if (path == null || preview.decrypted) return false;
     return !(path.startsWith('remote://') ||
         path.startsWith('zip://') ||
+        path.startsWith('rar://') ||
         path.startsWith('torrent://'));
   }
 
   String _toHex(Uint8List bytes) {
     final buffer = StringBuffer();
-    for (var i = 0; i < bytes.length; i++) {
-      if (i > 0) {
-        buffer.write(i % 16 == 0 ? '\n' : ' ');
-      }
-      buffer.write(bytes[i].toRadixString(16).padLeft(2, '0'));
+    for (var i = 0; i < bytes.length; i += 16) {
+      final chunk = bytes.sublist(i, math.min(i + 16, bytes.length));
+      final hex =
+          chunk.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(' ');
+      final ascii = _printableAscii(chunk);
+      if (buffer.isNotEmpty) buffer.write('\n');
+      buffer.write(
+        '${i.toRadixString(16).padLeft(8, '0')}  '
+        '${hex.padRight(47)}  |$ascii|',
+      );
     }
     return buffer.toString();
   }
 
   String _toBinary(Uint8List bytes) {
     final buffer = StringBuffer();
-    for (var i = 0; i < bytes.length; i++) {
-      if (i > 0) {
-        buffer.write(i % 8 == 0 ? '\n' : ' ');
-      }
-      buffer.write(bytes[i].toRadixString(2).padLeft(8, '0'));
+    for (var i = 0; i < bytes.length; i += 8) {
+      final chunk = bytes.sublist(i, math.min(i + 8, bytes.length));
+      final bits =
+          chunk.map((byte) => byte.toRadixString(2).padLeft(8, '0')).join(' ');
+      final ascii = _printableAscii(chunk);
+      if (buffer.isNotEmpty) buffer.write('\n');
+      buffer.write(
+        '${i.toRadixString(16).padLeft(8, '0')}  '
+        '${bits.padRight(71)}  |$ascii|',
+      );
     }
     return buffer.toString();
   }
 
   Uint8List _parseHex(String value) {
-    final cleaned = value.replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
-    if (cleaned.length.isOdd) {
-      throw const FormatException('Hex length must be even.');
+    final bytes = <int>[];
+    for (final line in value.split(RegExp(r'\r?\n'))) {
+      final left = line.split('|').first.replaceFirst(
+            RegExp(r'^\s*[0-9a-fA-F]{8}\s+'),
+            '',
+          );
+      for (final match in RegExp(r'\b[0-9a-fA-F]{2}\b').allMatches(left)) {
+        bytes.add(int.parse(match.group(0)!, radix: 16));
+      }
     }
-    return Uint8List.fromList([
-      for (var i = 0; i < cleaned.length; i += 2)
-        int.parse(cleaned.substring(i, i + 2), radix: 16),
-    ]);
+    return Uint8List.fromList(bytes);
   }
 
   Uint8List _parseBinary(String value) {
-    final cleaned = value.replaceAll(RegExp(r'[^01]'), '');
-    if (cleaned.length % 8 != 0) {
-      throw const FormatException('Binary length must be divisible by 8.');
+    final bytes = <int>[];
+    for (final line in value.split(RegExp(r'\r?\n'))) {
+      final left = line.split('|').first.replaceFirst(
+            RegExp(r'^\s*[0-9a-fA-F]{8}\s+'),
+            '',
+          );
+      for (final match in RegExp(r'\b[01]{8}\b').allMatches(left)) {
+        bytes.add(int.parse(match.group(0)!, radix: 2));
+      }
     }
-    return Uint8List.fromList([
-      for (var i = 0; i < cleaned.length; i += 8)
-        int.parse(cleaned.substring(i, i + 8), radix: 2),
-    ]);
+    return Uint8List.fromList(bytes);
   }
+
+  String _printableAscii(List<int> bytes) => String.fromCharCodes(
+        bytes.map((byte) => byte >= 32 && byte <= 126 ? byte : 46),
+      );
 }
 
 class _DrawStroke {
@@ -10620,6 +11377,7 @@ class _FfmpegEditorDialogState extends State<_FfmpegEditorDialog> {
     if (source == null ||
         source.startsWith('remote://') ||
         source.startsWith('zip://') ||
+        source.startsWith('rar://') ||
         source.startsWith('torrent://')) {
       return;
     }
@@ -10775,11 +11533,13 @@ class _ConnectionProfileDialog extends StatefulWidget {
   const _ConnectionProfileDialog({
     required this.language,
     required this.plugin,
+    this.availableProfiles = const <PluginConnectionProfile>[],
     this.initialProfile,
   });
 
   final AppLanguage language;
   final CloudPluginDefinition plugin;
+  final List<PluginConnectionProfile> availableProfiles;
   final PluginConnectionProfile? initialProfile;
 
   @override
@@ -10793,6 +11553,7 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
       <String, TextEditingController>{};
   final List<_EndpointFieldControllers> _endpoints =
       <_EndpointFieldControllers>[];
+  final Set<String> _selectedRaidMembers = <String>{};
   String? _error;
 
   static const _endpointVariableKeys = <String>{
@@ -10813,9 +11574,21 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
       if (_endpointVariableKeys.contains(entry.key)) {
         continue;
       }
+      if (_isRaidPlugin && entry.key == 'members') {
+        continue;
+      }
       _variableControllers[entry.key] = TextEditingController(
         text: initialProfile?.variables[entry.key] ??
             _variableDefault(entry.value),
+      );
+    }
+    if (_isRaidPlugin) {
+      _selectedRaidMembers.addAll(
+        _splitProfileList(
+          initialProfile?.variables['members'] ??
+              initialProfile?.variables['memberProfileIds'] ??
+              '',
+        ),
       );
     }
     if (initialProfile != null && initialProfile.endpoints.isNotEmpty) {
@@ -10858,6 +11631,12 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
   bool get _requiresEndpoint {
     final variables = widget.plugin.variables ?? const <String, Object?>{};
     return variables.keys.any(_endpointVariableKeys.contains);
+  }
+
+  bool get _isRaidPlugin {
+    final executor = widget.plugin.components?['executor']?.toString() ??
+        widget.plugin.pluginType;
+    return executor == 'raid0' || executor == 'raid1';
   }
 
   @override
@@ -10914,10 +11693,12 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
   Widget _profileForm(BuildContext context) {
     final language = widget.language;
     final variables = widget.plugin.variables ?? const <String, Object?>{};
+    final compact = MediaQuery.sizeOf(context).width < 640;
     return SingleChildScrollView(
       padding: EdgeInsets.only(
-        left: 0,
-        right: 0,
+        left: compact ? 18 : 0,
+        right: compact ? 18 : 0,
+        top: compact ? 14 : 0,
         bottom: MediaQuery.viewInsetsOf(context).bottom + 16,
       ),
       child: Column(
@@ -10978,7 +11759,9 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
           ),
           const SizedBox(height: 8),
           if (_variableControllers.isEmpty)
-            Text(language.t('settings.plugin.no.global.settings'))
+            Text(_isRaidPlugin
+                ? language.t('locations.profile.raid.choose')
+                : language.t('settings.plugin.no.global.settings'))
           else
             for (final entry in _variableControllers.entries) ...[
               TextField(
@@ -10991,6 +11774,33 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
               ),
               const SizedBox(height: 8),
             ],
+          if (_isRaidPlugin) ...[
+            const SizedBox(height: 12),
+            Text(
+              language.t('locations.profile.raid.members'),
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 8),
+            if (_raidMemberCandidates.isEmpty)
+              Text(language.t('locations.profile.raid.empty'))
+            else
+              for (final profile in _raidMemberCandidates)
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _selectedRaidMembers.contains(profile.runtimePluginId),
+                  title: Text(profile.name),
+                  subtitle: Text(profile.runtimePluginId),
+                  onChanged: (value) {
+                    setState(() {
+                      if (value == true) {
+                        _selectedRaidMembers.add(profile.runtimePluginId);
+                      } else {
+                        _selectedRaidMembers.remove(profile.runtimePluginId);
+                      }
+                    });
+                  },
+                ),
+          ],
           if (_error != null) ...[
             const SizedBox(height: 8),
             Text(
@@ -11042,12 +11852,20 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
           () => _error = widget.language.t('locations.profile.need.endpoint'));
       return;
     }
+    if (_isRaidPlugin && _selectedRaidMembers.length < 2) {
+      setState(
+          () => _error = widget.language.t('locations.profile.raid.need.two'));
+      return;
+    }
     final variables = <String, String>{};
     for (final entry in _variableControllers.entries) {
       final value = entry.value.text.trim();
       if (value.isNotEmpty) {
         variables[entry.key] = value;
       }
+    }
+    if (_isRaidPlugin) {
+      variables['members'] = _selectedRaidMembers.join(',');
     }
     final initialProfile = widget.initialProfile;
     final profile = initialProfile == null
@@ -11067,6 +11885,18 @@ class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
       profile,
     );
   }
+
+  List<PluginConnectionProfile> get _raidMemberCandidates =>
+      widget.availableProfiles
+          .where((profile) => profile.id != widget.initialProfile?.id)
+          .toList();
+
+  List<String> _splitProfileList(String value) => value
+      .split(RegExp(r'[,;\n]'))
+      .map((item) => item.trim())
+      .where((item) => item.isNotEmpty)
+      .map((item) => item.startsWith('profile-') ? item : 'profile-$item')
+      .toList();
 
   bool _isSecret(Object? value) => value is Map && value['secret'] == true;
 
@@ -11211,18 +12041,23 @@ class _PluginSettingsDialog extends StatefulWidget {
     required this.language,
     required this.plugins,
     required this.pluginSettingsById,
+    required this.disabledPluginIds,
     required this.onInstallPluginZip,
     required this.onExportPluginZip,
     required this.onDeletePlugin,
+    required this.onSetPluginEnabled,
     required this.onSavePluginSettings,
   });
 
   final AppLanguage language;
   final List<CloudPluginDefinition> plugins;
   final Map<String, Map<String, String>> pluginSettingsById;
+  final List<String> disabledPluginIds;
   final Future<String> Function(String path) onInstallPluginZip;
   final Future<String> Function(String pluginId) onExportPluginZip;
   final Future<String> Function(String pluginId) onDeletePlugin;
+  final Future<String> Function(String pluginId, bool enabled)
+      onSetPluginEnabled;
   final Future<String> Function(String pluginId, Map<String, String> settings)
       onSavePluginSettings;
 
@@ -11232,6 +12067,7 @@ class _PluginSettingsDialog extends StatefulWidget {
 
 class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
   final _zipController = TextEditingController();
+  late final Set<String> _disabledPluginIds = widget.disabledPluginIds.toSet();
   String? _message;
   var _busy = false;
 
@@ -11278,6 +12114,7 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
             for (final plugin in widget.plugins)
               Builder(builder: (context) {
                 final globalSettings = _globalSettings(plugin);
+                final enabled = !_disabledPluginIds.contains(plugin.id);
                 return Card(
                   elevation: 0,
                   child: Padding(
@@ -11288,6 +12125,9 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
                         title: Text('${plugin.name} ${plugin.version}'),
                         subtitle: SelectableText(
                           [
+                            enabled
+                                ? language.t('common.enabled')
+                                : language.t('common.disabled'),
                             plugin.description ?? '',
                             plugin.pluginType,
                             plugin.manifestPath,
@@ -11301,6 +12141,17 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
                         ),
                       ),
                       Wrap(spacing: 8, runSpacing: 8, children: [
+                        OutlinedButton.icon(
+                          onPressed: _busy
+                              ? null
+                              : () => _setEnabled(plugin, !enabled),
+                          icon: Icon(enabled
+                              ? Icons.toggle_on_outlined
+                              : Icons.toggle_off_outlined),
+                          label: Text(enabled
+                              ? language.t('settings.plugin.disable')
+                              : language.t('settings.plugin.enable')),
+                        ),
                         OutlinedButton.icon(
                           onPressed: () => _showPluginInfo(plugin),
                           icon: const Icon(Icons.info_outline),
@@ -11401,6 +12252,33 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
     try {
       final message = await widget.onDeletePlugin(plugin.id);
       if (mounted) setState(() => _message = message);
+    } catch (error) {
+      if (mounted) setState(() => _message = '$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _setEnabled(
+    CloudPluginDefinition plugin,
+    bool enabled,
+  ) async {
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    try {
+      final message = await widget.onSetPluginEnabled(plugin.id, enabled);
+      if (mounted) {
+        setState(() {
+          if (enabled) {
+            _disabledPluginIds.remove(plugin.id);
+          } else {
+            _disabledPluginIds.add(plugin.id);
+          }
+          _message = message;
+        });
+      }
     } catch (error) {
       if (mounted) setState(() => _message = '$error');
     } finally {
@@ -11538,6 +12416,7 @@ class _SettingsView extends StatefulWidget {
     required this.onInstallPluginZip,
     required this.onExportPluginZip,
     required this.onDeletePlugin,
+    required this.onSetPluginEnabled,
     required this.onSavePluginSettings,
     required this.onExportConfigurationArchive,
     required this.onExportLanguageSample,
@@ -11612,6 +12491,8 @@ class _SettingsView extends StatefulWidget {
     required bool externalFloatingPlayer,
     required bool encryptThumbnailCache,
     required bool encryptResumePositions,
+    required bool rememberVideoPositions,
+    required bool rememberAudioPositions,
   }) onSave;
   final Future<void> Function() onRequestAndroidStorageAccess;
   final Future<void> Function() onClear;
@@ -11621,6 +12502,8 @@ class _SettingsView extends StatefulWidget {
   final Future<String> Function(String path) onInstallPluginZip;
   final Future<String> Function(String pluginId) onExportPluginZip;
   final Future<String> Function(String pluginId) onDeletePlugin;
+  final Future<String> Function(String pluginId, bool enabled)
+      onSetPluginEnabled;
   final Future<String> Function(String pluginId, Map<String, String> settings)
       onSavePluginSettings;
   final Future<String> Function() onExportConfigurationArchive;
@@ -11695,6 +12578,8 @@ class _SettingsViewState extends State<_SettingsView> {
   late bool _externalFloatingPlayer;
   late bool _encryptThumbnailCache;
   late bool _encryptResumePositions;
+  late bool _rememberVideoPositions;
+  late bool _rememberAudioPositions;
   late String _languageCode;
   late String _commonAlgorithm;
   late String _navigationPolicy;
@@ -11745,6 +12630,8 @@ class _SettingsViewState extends State<_SettingsView> {
     _externalFloatingPlayer = widget.settings.externalFloatingPlayer;
     _encryptThumbnailCache = widget.settings.encryptThumbnailCache;
     _encryptResumePositions = widget.settings.encryptResumePositions;
+    _rememberVideoPositions = widget.settings.rememberVideoPositions;
+    _rememberAudioPositions = widget.settings.rememberAudioPositions;
     _commonAlgorithm = widget.settings.commonEncryptionAlgorithm;
     _navigationPolicy = widget.settings.navigationPolicy;
     _searchMode = widget.settings.searchMode;
@@ -12329,6 +13216,16 @@ class _SettingsViewState extends State<_SettingsView> {
           title: Text(language.t('settings.media.resume.encrypted')),
         ),
         SwitchListTile(
+          value: _rememberVideoPositions,
+          onChanged: (v) => setState(() => _rememberVideoPositions = v),
+          title: Text(language.t('settings.media.resume.video')),
+        ),
+        SwitchListTile(
+          value: _rememberAudioPositions,
+          onChanged: (v) => setState(() => _rememberAudioPositions = v),
+          title: Text(language.t('settings.media.resume.audio')),
+        ),
+        SwitchListTile(
           value: _autoCloseMediaOnSectionChange,
           onChanged: (v) => setState(() => _autoCloseMediaOnSectionChange = v),
           title: Text(language.t('settings.background.autoclose')),
@@ -12591,6 +13488,8 @@ class _SettingsViewState extends State<_SettingsView> {
         externalFloatingPlayer: _externalFloatingPlayer,
         encryptThumbnailCache: _encryptThumbnailCache,
         encryptResumePositions: _encryptResumePositions,
+        rememberVideoPositions: _rememberVideoPositions,
+        rememberAudioPositions: _rememberAudioPositions,
       );
       if (showSnack) {
         _snack(widget.language.t('settings.saved'));
@@ -12643,9 +13542,11 @@ class _SettingsViewState extends State<_SettingsView> {
         language: widget.language,
         plugins: widget.plugins,
         pluginSettingsById: widget.settings.pluginSettingsById,
+        disabledPluginIds: widget.settings.disabledPluginIds,
         onInstallPluginZip: widget.onInstallPluginZip,
         onExportPluginZip: widget.onExportPluginZip,
         onDeletePlugin: widget.onDeletePlugin,
+        onSetPluginEnabled: widget.onSetPluginEnabled,
         onSavePluginSettings: widget.onSavePluginSettings,
       ),
     );

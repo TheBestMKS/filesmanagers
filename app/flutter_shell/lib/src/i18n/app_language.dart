@@ -117,6 +117,13 @@ class AppLanguage {
         'Delete this connection profile from locations?',
     'locations.profile.need.name': 'Enter a location name.',
     'locations.profile.need.endpoint': 'Add at least one host or URL.',
+    'locations.profile.raid.choose':
+        'Choose two or more existing locations to combine.',
+    'locations.profile.raid.members': 'Member locations',
+    'locations.profile.raid.empty':
+        'Create at least two ordinary locations before creating RAID.',
+    'locations.profile.raid.need.two':
+        'Choose at least two member locations for RAID.',
     'locations.profile.created': 'Connection profile created:',
     'locations.profile.updated': 'Connection profile updated:',
     'locations.profile.deleted': 'Connection profile deleted:',
@@ -517,6 +524,8 @@ class AppLanguage {
         'Android media notification controls',
     'settings.media.headset.controls': 'Headset media controls',
     'settings.media.resume.encrypted': 'Encrypt saved playback positions',
+    'settings.media.resume.video': 'Remember video playback positions',
+    'settings.media.resume.audio': 'Remember audio playback positions',
     'settings.reset.defaults': 'Reset to defaults',
     'settings.reset.confirm': 'Reset all settings to default values?',
     'settings.reset.done': 'Settings reset to defaults.',
@@ -531,6 +540,10 @@ class AppLanguage {
     'settings.plugin.delete': 'Delete plugin',
     'settings.plugin.exported': 'Plugin exported:',
     'settings.plugin.deleted': 'Plugin deleted.',
+    'settings.plugin.enable': 'Enable plugin',
+    'settings.plugin.disable': 'Disable plugin',
+    'settings.plugin.enabled': 'Plugin enabled.',
+    'settings.plugin.disabled': 'Plugin disabled.',
     'settings.plugin.no.settings':
         'This plugin does not declare editable variables.',
     'jobs.title': 'Background operations',
@@ -557,6 +570,7 @@ class AppLanguage {
     'media.audio.track': 'Audio track',
     'media.subtitle.track': 'Subtitles',
     'media.lyrics': 'Lyrics',
+    'media.more.controls': 'More playback controls',
     'media.equalizer': 'Equalizer',
     'media.equalizer.flat': 'Flat',
     'media.equalizer.bass': 'Bass boost',
@@ -569,6 +583,11 @@ class AppLanguage {
         'Built-in real plugin executors cover WebDAV, FTP, embedded SFTP/SSH and embedded SMB2/3; plugin manager supports info, settings, export and delete.',
     'about.features.background.jobs':
         'Encryption and recursive folder processing show cancellable background progress at the bottom of the app.',
+    'storage.checking': 'Checking storage...',
+    'storage.total': 'total',
+    'storage.used': 'used',
+    'storage.free': 'free',
+    'storage.unavailable': 'Storage information is unavailable',
   };
 
   static const _russianStrings = <String, String>{
@@ -661,6 +680,13 @@ class AppLanguage {
         'Удалить этот профиль подключения из расположений?',
     'locations.profile.need.name': 'Введите название расположения.',
     'locations.profile.need.endpoint': 'Добавьте хотя бы один хост или URL.',
+    'locations.profile.raid.choose':
+        'Выберите два или больше существующих расположений для объединения.',
+    'locations.profile.raid.members': 'Расположения-участники',
+    'locations.profile.raid.empty':
+        'Перед созданием RAID создайте хотя бы два обычных расположения.',
+    'locations.profile.raid.need.two':
+        'Выберите хотя бы два расположения-участника RAID.',
     'locations.profile.created': 'Профиль подключения создан:',
     'locations.profile.updated': 'Профиль подключения обновлен:',
     'locations.profile.deleted': 'Профиль подключения удален:',
@@ -1050,6 +1076,8 @@ class AppLanguage {
     'settings.media.headset.controls': 'Управление с гарнитуры',
     'settings.media.resume.encrypted':
         'Шифровать сохраненные позиции воспроизведения',
+    'settings.media.resume.video': 'Запоминать позиции просмотра видео',
+    'settings.media.resume.audio': 'Запоминать позиции прослушивания аудио',
     'settings.reset.defaults': 'Сбросить по умолчанию',
     'settings.reset.confirm':
         'Сбросить все настройки к значениям по умолчанию?',
@@ -1065,6 +1093,10 @@ class AppLanguage {
     'settings.plugin.delete': 'Удалить плагин',
     'settings.plugin.exported': 'Плагин экспортирован:',
     'settings.plugin.deleted': 'Плагин удален.',
+    'settings.plugin.enable': 'Включить плагин',
+    'settings.plugin.disable': 'Отключить плагин',
+    'settings.plugin.enabled': 'Плагин включен.',
+    'settings.plugin.disabled': 'Плагин отключен.',
     'settings.plugin.no.settings':
         'Этот плагин не объявляет редактируемые переменные.',
     'jobs.title': 'Фоновые операции',
@@ -1092,6 +1124,7 @@ class AppLanguage {
     'media.audio.track': 'Звуковая дорожка',
     'media.subtitle.track': 'Субтитры',
     'media.lyrics': 'Текст песни',
+    'media.more.controls': 'Дополнительные элементы плеера',
     'media.equalizer': 'Эквалайзер',
     'media.equalizer.flat': 'Без изменений',
     'media.equalizer.bass': 'Больше баса',
@@ -1104,6 +1137,11 @@ class AppLanguage {
         'Встроенные реальные plugin-executor покрывают WebDAV, FTP, embedded SFTP/SSH и embedded SMB2/3; менеджер плагинов поддерживает информацию, настройки, экспорт и удаление.',
     'about.features.background.jobs':
         'Шифрование и рекурсивная обработка папок показывают отменяемый фоновый прогресс в нижней части приложения.',
+    'storage.checking': 'Проверка памяти...',
+    'storage.total': 'всего',
+    'storage.used': 'занято',
+    'storage.free': 'свободно',
+    'storage.unavailable': 'Информация о памяти недоступна',
   };
 
   static List<String> get requiredStringKeys => _englishStrings.keys.toList();

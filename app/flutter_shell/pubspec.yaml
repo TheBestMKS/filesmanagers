@@ -1,7 +1,7 @@
 name: secure_vault_shell
 description: Flutter shell for the secure vault explorer.
 publish_to: "none"
-version: 0.12.7
+version: 0.12.8
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -23,6 +23,7 @@ dependencies:
   media_kit_libs_android_video: ^1.3.8
   dartssh2: ^2.17.1
   dart_smb2: ^0.1.0
+  rar: 0.3.0
 
 dev_dependencies:
   flutter_test:

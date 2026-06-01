@@ -73,7 +73,9 @@ class RemoteFileSystemRepository {
         executor == 'ftp' ||
         executor == 'ssh' ||
         executor == 'sftp' ||
-        executor == 'smb';
+        executor == 'smb' ||
+        executor == 'raid0' ||
+        executor == 'raid1';
   }
 
   RemoteFileSystemClient clientFor(String pluginId) {
@@ -87,6 +89,8 @@ class RemoteFileSystemRepository {
       'ftp' => FtpRemoteClient(plugin),
       'ssh' || 'sftp' => SftpRemoteClient(plugin),
       'smb' => SmbRemoteClient(plugin),
+      'raid0' => RaidRemoteClient(plugin, this, mirror: false),
+      'raid1' => RaidRemoteClient(plugin, this, mirror: true),
       _ => throw UnsupportedError('Unsupported plugin executor: $executor'),
     };
   }
@@ -1021,6 +1025,205 @@ class _SmbConnectionSettings {
   final bool seal;
   final bool signing;
   final Smb2Version version;
+}
+
+class RaidRemoteClient implements RemoteFileSystemClient {
+  RaidRemoteClient(this.plugin, this.repository, {required this.mirror});
+
+  final CloudPluginDefinition plugin;
+  final RemoteFileSystemRepository repository;
+  final bool mirror;
+
+  @override
+  Future<List<RemoteFileSystemEntry>> list(String path) async {
+    final members = _members();
+    final merged = <String, RemoteFileSystemEntry>{};
+    Object? lastError;
+    var successful = 0;
+    for (final member in members) {
+      try {
+        final entries = await repository.clientFor(member).list(path);
+        successful++;
+        for (final entry in entries) {
+          final key = '${entry.isDirectory ? 'd' : 'f'}:${entry.path}';
+          merged.putIfAbsent(key, () => entry);
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (successful == 0 && lastError != null) {
+      throw StateError('RAID location could not be opened: $lastError');
+    }
+    return merged.values.toList()
+      ..sort((a, b) {
+        if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+  }
+
+  @override
+  Future<RemoteFileStat?> stat(String path) async {
+    if (path == '/' || path.isEmpty) {
+      return RemoteFileStat(
+        path: '/',
+        exists: true,
+        isDirectory: true,
+        sizeBytes: 0,
+        modifiedAt: DateTime.now(),
+      );
+    }
+    Object? lastError;
+    for (final member in _members()) {
+      try {
+        final stat = await repository.clientFor(member).stat(path);
+        if (stat != null && stat.exists) return stat;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError != null) return null;
+    return null;
+  }
+
+  @override
+  Future<Uint8List> readBytes(String path) async {
+    Object? lastError;
+    for (final member in _members()) {
+      try {
+        final stat = await repository.clientFor(member).stat(path);
+        if (stat == null || !stat.exists || stat.isDirectory) continue;
+        return await repository.clientFor(member).readBytes(path);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw StateError('RAID file is unavailable: $path ($lastError)');
+  }
+
+  @override
+  Future<void> writeBytes(String path, List<int> bytes) async {
+    final members = _members();
+    await _ensureParentsOnMembers(path, members);
+    if (mirror) {
+      await Future.wait(
+        members.map((member) => repository.clientFor(member).writeBytes(
+              path,
+              bytes,
+            )),
+      );
+      return;
+    }
+    final target = _chooseRaid0Member(path, members);
+    await repository.clientFor(target).writeBytes(path, bytes);
+  }
+
+  @override
+  Future<void> createDirectory(String path) async {
+    final members = _members();
+    await _ensureParentsOnMembers(path, members);
+    await Future.wait(members.map((member) async {
+      final client = repository.clientFor(member);
+      final stat = await client.stat(path);
+      if (stat?.exists == true) return;
+      await client.createDirectory(path);
+    }));
+  }
+
+  @override
+  Future<void> delete(String path, {required bool recursive}) async {
+    Object? lastError;
+    var deleted = false;
+    for (final member in _members()) {
+      try {
+        final client = repository.clientFor(member);
+        final stat = await client.stat(path);
+        if (stat == null || !stat.exists) continue;
+        await client.delete(path, recursive: recursive || stat.isDirectory);
+        deleted = true;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!deleted && lastError != null) {
+      throw StateError('RAID delete failed: $lastError');
+    }
+  }
+
+  List<String> _members() {
+    final variables = _variables(plugin);
+    final raw = variables['members'] ?? variables['memberProfileIds'] ?? '';
+    final members = raw
+        .split(RegExp(r'[,;\n]'))
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .map(_resolveMemberToken)
+        .whereType<String>()
+        .where((id) => id != plugin.id)
+        .where(repository.hasPlugin)
+        .toSet()
+        .toList();
+    if (members.isEmpty) {
+      throw StateError('RAID profile ${plugin.name} has no available members.');
+    }
+    return members;
+  }
+
+  String? _resolveMemberToken(String token) {
+    if (repository.hasPlugin(token)) return token;
+    final prefixed = token.startsWith('profile-') ? token : 'profile-$token';
+    if (repository.hasPlugin(prefixed)) return prefixed;
+    for (final entry in repository._plugins.entries) {
+      final candidate = entry.value;
+      if (candidate.profileId == token ||
+          candidate.name == token ||
+          candidate.sourcePluginId == token) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _ensureParentsOnMembers(
+    String path,
+    List<String> members,
+  ) async {
+    final parents = <String>[];
+    var parent = _remoteParent(path);
+    while (parent != '/' && parent.isNotEmpty) {
+      parents.add(parent);
+      parent = _remoteParent(parent);
+    }
+    for (final directory in parents.reversed) {
+      await Future.wait(members.map((member) async {
+        final client = repository.clientFor(member);
+        final stat = await client.stat(directory);
+        if (stat?.exists == true) return;
+        await client.createDirectory(directory);
+      }));
+    }
+  }
+
+  String _chooseRaid0Member(String path, List<String> members) {
+    var bestMember = members.first;
+    var bestFree = -1;
+    for (final member in members) {
+      final plugin = repository._plugins[member];
+      if (plugin == null) continue;
+      final free =
+          int.tryParse(_variables(plugin)['freeSpaceBytes'] ?? '') ?? -1;
+      if (free > bestFree) {
+        bestFree = free;
+        bestMember = member;
+      }
+    }
+    if (bestFree >= 0) return bestMember;
+    var hash = 0;
+    for (final codeUnit in path.codeUnits) {
+      hash = ((hash * 31) + codeUnit) & 0x7fffffff;
+    }
+    return members[hash % members.length];
+  }
 }
 
 String _joinSmbFragments(List<String?> fragments) {

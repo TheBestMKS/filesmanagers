@@ -290,7 +290,7 @@
     "settings.background.video": "Allow background video",
     "settings.navigation.allow": "Enter without warning",
     "settings.navigation.fallback": "Fallback to locations when going above/into forbidden paths",
-    "settings.interface.text.scale": "Whole interface text scale",
+    "settings.interface.text.scale": "Overall interface scale",
     "settings.proxy.program": "Program proxy URL",
     "explorer.use.as.music": "Music folder",
     "settings.proxy": "Proxy",
@@ -365,6 +365,10 @@
     "locations.profile.save": "Create profile",
     "locations.profile.need.name": "Enter a location name.",
     "locations.profile.need.endpoint": "Add at least one host or URL.",
+    "locations.profile.raid.choose": "Choose two or more existing locations to combine.",
+    "locations.profile.raid.members": "Member locations",
+    "locations.profile.raid.empty": "Create at least two ordinary locations before creating RAID.",
+    "locations.profile.raid.need.two": "Choose at least two member locations for RAID.",
     "locations.profile.created": "Connection profile created:",
     "locations.profile.edit": "Edit profile",
     "locations.profile.update": "Update profile",
@@ -489,8 +493,19 @@
     "plugin.music.invalid.site": "Enter a section name and a valid site URL.",
     "plugin.music.unavailable": "Universal Web Music Parser plugin is not installed.",
     "plugin.media.download": "Download track",
-    "transfer.done": "Done:"
-  },
-  "about.open.log": "Open program log",
-  "settings.interface.text.scale": "Overall interface scale"
+    "transfer.done": "Done:",
+    "settings.media.resume.video": "Remember video playback positions",
+    "settings.media.resume.audio": "Remember audio playback positions",
+    "settings.plugin.enable": "Enable plugin",
+    "settings.plugin.disable": "Disable plugin",
+    "settings.plugin.enabled": "Plugin enabled.",
+    "settings.plugin.disabled": "Plugin disabled.",
+    "media.more.controls": "More playback controls",
+    "storage.checking": "Checking storage...",
+    "storage.total": "total",
+    "storage.used": "used",
+    "storage.free": "free",
+    "storage.unavailable": "Storage information is unavailable",
+    "about.open.log": "Open program log"
+  }
 }

@@ -52,6 +52,9 @@ class FileViewerService {
   };
   static const archiveExtensions = {
     '.zip',
+    '.rar',
+    '.cbr',
+    '.rev',
   };
   static const documentExtensions = {
     '.docx',
@@ -148,7 +151,7 @@ class FileViewerService {
       final bytes = await file.readAsBytes();
       return FilePreview(
         title: name,
-        subtitle: 'ZIP archive, $size bytes',
+        subtitle: 'Archive, $size bytes',
         sourcePath: file.path,
         text: _zipSummary(bytes),
         bytes: bytes,
@@ -338,7 +341,7 @@ class FileViewerService {
       FileContentKind.html =>
         'HTML pages are rendered as a safe in-app text preview. External browser opening is available after the disclosure warning.',
       FileContentKind.archive =>
-        'ZIP archives can be inspected and extracted from the file context menu.',
+        'ZIP and RAR archives can be inspected and extracted from the file context menu.',
       FileContentKind.unknown =>
         'No built-in viewer association exists yet. Add an extension association in settings or open externally.',
       _ => '',

@@ -63,12 +63,15 @@ class SecuritySettings {
     this.globalPluginProxy,
     this.pluginProxyById = const <String, String>{},
     this.pluginSettingsById = const <String, Map<String, String>>{},
+    this.disabledPluginIds = const <String>[],
     this.enableBackgroundVideo = true,
     this.enableMiniVideo = true,
     this.enableMiniAudio = true,
     this.continueMediaInBackground = true,
     this.autoCloseMediaOnSectionChange = false,
     this.mediaResumePositions = const <String, int>{},
+    this.rememberVideoPositions = true,
+    this.rememberAudioPositions = true,
     this.folderSortModes = const <String, String>{},
     this.showVideoThumbnails = true,
     this.animateVideoThumbnails = false,
@@ -147,12 +150,15 @@ class SecuritySettings {
   final String? globalPluginProxy;
   final Map<String, String> pluginProxyById;
   final Map<String, Map<String, String>> pluginSettingsById;
+  final List<String> disabledPluginIds;
   final bool enableBackgroundVideo;
   final bool enableMiniVideo;
   final bool enableMiniAudio;
   final bool continueMediaInBackground;
   final bool autoCloseMediaOnSectionChange;
   final Map<String, int> mediaResumePositions;
+  final bool rememberVideoPositions;
+  final bool rememberAudioPositions;
   final Map<String, String> folderSortModes;
   final bool showVideoThumbnails;
   final bool animateVideoThumbnails;
@@ -247,12 +253,15 @@ class SecuritySettings {
     bool clearGlobalPluginProxy = false,
     Map<String, String>? pluginProxyById,
     Map<String, Map<String, String>>? pluginSettingsById,
+    List<String>? disabledPluginIds,
     bool? enableBackgroundVideo,
     bool? enableMiniVideo,
     bool? enableMiniAudio,
     bool? continueMediaInBackground,
     bool? autoCloseMediaOnSectionChange,
     Map<String, int>? mediaResumePositions,
+    bool? rememberVideoPositions,
+    bool? rememberAudioPositions,
     Map<String, String>? folderSortModes,
     bool? showVideoThumbnails,
     bool? animateVideoThumbnails,
@@ -365,6 +374,7 @@ class SecuritySettings {
           : globalPluginProxy ?? this.globalPluginProxy,
       pluginProxyById: pluginProxyById ?? this.pluginProxyById,
       pluginSettingsById: pluginSettingsById ?? this.pluginSettingsById,
+      disabledPluginIds: disabledPluginIds ?? this.disabledPluginIds,
       enableBackgroundVideo:
           enableBackgroundVideo ?? this.enableBackgroundVideo,
       enableMiniVideo: enableMiniVideo ?? this.enableMiniVideo,
@@ -374,6 +384,10 @@ class SecuritySettings {
       autoCloseMediaOnSectionChange:
           autoCloseMediaOnSectionChange ?? this.autoCloseMediaOnSectionChange,
       mediaResumePositions: mediaResumePositions ?? this.mediaResumePositions,
+      rememberVideoPositions:
+          rememberVideoPositions ?? this.rememberVideoPositions,
+      rememberAudioPositions:
+          rememberAudioPositions ?? this.rememberAudioPositions,
       folderSortModes: folderSortModes ?? this.folderSortModes,
       showVideoThumbnails: showVideoThumbnails ?? this.showVideoThumbnails,
       animateVideoThumbnails:
@@ -421,6 +435,7 @@ class SecuritySettings {
     final recent = json['recentFilePaths'];
     final pluginProxy = json['pluginProxyById'];
     final pluginSettings = json['pluginSettingsById'];
+    final disabledPlugins = json['disabledPluginIds'];
     final mediaResume = json['mediaResumePositions'];
     final folderSortModes = json['folderSortModes'];
     final perFileEqualizer = json['perFileEqualizerPresets'];
@@ -518,6 +533,9 @@ class SecuritySettings {
               return MapEntry(key.toString(), settings);
             })
           : const <String, Map<String, String>>{},
+      disabledPluginIds: disabledPlugins is List
+          ? disabledPlugins.map((item) => item.toString()).toList()
+          : const <String>[],
       enableBackgroundVideo: json['enableBackgroundVideo'] as bool? ?? true,
       enableMiniVideo: json['enableMiniVideo'] as bool? ?? true,
       enableMiniAudio: json['enableMiniAudio'] as bool? ?? true,
@@ -531,6 +549,8 @@ class SecuritySettings {
                 value is num ? value.round() : int.tryParse('$value') ?? 0,
               ))
           : const <String, int>{},
+      rememberVideoPositions: json['rememberVideoPositions'] as bool? ?? true,
+      rememberAudioPositions: json['rememberAudioPositions'] as bool? ?? true,
       folderSortModes: folderSortModes is Map
           ? folderSortModes.map(
               (key, value) => MapEntry(key.toString(), value.toString()),
@@ -635,12 +655,15 @@ class SecuritySettings {
       'globalPluginProxy': globalPluginProxy,
       'pluginProxyById': pluginProxyById,
       'pluginSettingsById': pluginSettingsById,
+      'disabledPluginIds': disabledPluginIds,
       'enableBackgroundVideo': enableBackgroundVideo,
       'enableMiniVideo': enableMiniVideo,
       'enableMiniAudio': enableMiniAudio,
       'continueMediaInBackground': continueMediaInBackground,
       'autoCloseMediaOnSectionChange': autoCloseMediaOnSectionChange,
       'mediaResumePositions': mediaResumePositions,
+      'rememberVideoPositions': rememberVideoPositions,
+      'rememberAudioPositions': rememberAudioPositions,
       'folderSortModes': folderSortModes,
       'showVideoThumbnails': showVideoThumbnails,
       'animateVideoThumbnails': animateVideoThumbnails,
@@ -1009,6 +1032,8 @@ class SecuritySettingsRepository {
     bool? externalFloatingPlayer,
     bool? encryptThumbnailCache,
     bool? encryptResumePositions,
+    bool? rememberVideoPositions,
+    bool? rememberAudioPositions,
   }) async {
     var next = current.copyWith(
       useSeparateFilePassword: useSeparateFilePassword,
@@ -1085,6 +1110,8 @@ class SecuritySettingsRepository {
       externalFloatingPlayer: externalFloatingPlayer,
       encryptThumbnailCache: encryptThumbnailCache,
       encryptResumePositions: encryptResumePositions,
+      rememberVideoPositions: rememberVideoPositions,
+      rememberAudioPositions: rememberAudioPositions,
       recentFilePaths: rememberRecentFiles == false
           ? const <String>[]
           : current.recentFilePaths
