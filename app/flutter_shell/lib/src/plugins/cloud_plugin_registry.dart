@@ -815,7 +815,7 @@ class CloudPluginRegistry {
       },
     );
 
-    await _writeTemplate(
+    final rarDir = await _writeTemplate(
       pluginsDir,
       deleted: deleted,
       folder: 'rar_archive_support',
@@ -860,6 +860,9 @@ class CloudPluginRegistry {
         ],
       },
     );
+    if (rarDir != null) {
+      await _ensureRarPluginPayload(rarDir);
+    }
 
     await _writeTemplate(
       pluginsDir,
@@ -953,6 +956,40 @@ class CloudPluginRegistry {
         }
         return;
       }
+    }
+  }
+
+  Future<void> _ensureRarPluginPayload(Directory pluginDir) async {
+    final targetDir = Directory(
+      '${pluginDir.path}${Platform.pathSeparator}components'
+      '${Platform.pathSeparator}7zip${Platform.pathSeparator}windows-x64',
+    );
+    final target = File('${targetDir.path}${Platform.pathSeparator}7z.exe');
+    if (await target.exists()) return;
+    final candidates = <Directory>[
+      Directory('windows${Platform.pathSeparator}runner'
+          '${Platform.pathSeparator}resources${Platform.pathSeparator}7zip'),
+      Directory('app${Platform.pathSeparator}flutter_shell'
+          '${Platform.pathSeparator}windows${Platform.pathSeparator}runner'
+          '${Platform.pathSeparator}resources${Platform.pathSeparator}7zip'),
+    ];
+    for (final sourceDir in candidates) {
+      final exe = File('${sourceDir.path}${Platform.pathSeparator}7z.exe');
+      final dll = File('${sourceDir.path}${Platform.pathSeparator}7z.dll');
+      if (!await exe.exists() || !await dll.exists()) continue;
+      await targetDir.create(recursive: true);
+      for (final name in [
+        '7z.exe',
+        '7z.dll',
+        '7zip_LICENSE.txt',
+        '7zip_README.txt',
+      ]) {
+        final source = File('${sourceDir.path}${Platform.pathSeparator}$name');
+        if (await source.exists()) {
+          await source.copy('${targetDir.path}${Platform.pathSeparator}$name');
+        }
+      }
+      return;
     }
   }
 }
