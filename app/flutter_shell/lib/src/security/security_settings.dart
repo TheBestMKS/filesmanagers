@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:archive/archive.dart';
 
+import '../plugins/connection_profile.dart';
 import '../storage/app_paths.dart';
 import 'vault_crypto.dart';
 
@@ -89,6 +90,7 @@ class SecuritySettings {
     this.videoEqualizerPreset = 'flat',
     this.perFileEqualizerPresets = const <String, String>{},
     this.lastPlayedMediaKey,
+    this.connectionProfiles = const <PluginConnectionProfile>[],
   });
 
   final String? appPasswordSalt;
@@ -171,6 +173,7 @@ class SecuritySettings {
   final String videoEqualizerPreset;
   final Map<String, String> perFileEqualizerPresets;
   final String? lastPlayedMediaKey;
+  final List<PluginConnectionProfile> connectionProfiles;
 
   bool get hasAppPassword =>
       appPasswordSalt != null && appPasswordDigest != null;
@@ -270,6 +273,7 @@ class SecuritySettings {
     Map<String, String>? perFileEqualizerPresets,
     String? lastPlayedMediaKey,
     bool clearLastPlayedMediaKey = false,
+    List<PluginConnectionProfile>? connectionProfiles,
   }) {
     return SecuritySettings(
       appPasswordSalt:
@@ -401,6 +405,7 @@ class SecuritySettings {
       lastPlayedMediaKey: clearLastPlayedMediaKey
           ? null
           : lastPlayedMediaKey ?? this.lastPlayedMediaKey,
+      connectionProfiles: connectionProfiles ?? this.connectionProfiles,
     );
   }
 
@@ -414,6 +419,7 @@ class SecuritySettings {
     final mediaResume = json['mediaResumePositions'];
     final folderSortModes = json['folderSortModes'];
     final perFileEqualizer = json['perFileEqualizerPresets'];
+    final connectionProfiles = json['connectionProfiles'];
     List<String> listField(String key) {
       final value = json[key];
       return value is List
@@ -544,6 +550,17 @@ class SecuritySettings {
               .map((key, value) => MapEntry(key.toString(), value.toString()))
           : const <String, String>{},
       lastPlayedMediaKey: json['lastPlayedMediaKey'] as String?,
+      connectionProfiles: connectionProfiles is List
+          ? connectionProfiles
+              .whereType<Map>()
+              .map((item) => PluginConnectionProfile.fromJson(
+                    item.map((key, value) => MapEntry(key.toString(), value)),
+                  ))
+              .where((profile) =>
+                  profile.pluginId.trim().isNotEmpty &&
+                  profile.name.trim().isNotEmpty)
+              .toList()
+          : const <PluginConnectionProfile>[],
     );
   }
 
@@ -630,6 +647,8 @@ class SecuritySettings {
       'videoEqualizerPreset': videoEqualizerPreset,
       'perFileEqualizerPresets': perFileEqualizerPresets,
       'lastPlayedMediaKey': lastPlayedMediaKey,
+      'connectionProfiles':
+          connectionProfiles.map((profile) => profile.toJson()).toList(),
     };
   }
 }
@@ -811,6 +830,15 @@ class SecuritySettingsRepository {
       musicFolders: musicFolders,
       videoFolders: videoFolders,
     );
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> setConnectionProfiles(
+    SecuritySettings current,
+    List<PluginConnectionProfile> profiles,
+  ) async {
+    final next = current.copyWith(connectionProfiles: profiles);
     await save(next);
     return next;
   }

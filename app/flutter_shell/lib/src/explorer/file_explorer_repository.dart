@@ -6,6 +6,7 @@ import 'package:archive/archive.dart';
 
 import '../ffi/crypt_bindings.dart';
 import '../plugins/cloud_plugin_registry.dart' hide basename;
+import '../plugins/connection_profile.dart';
 import '../remote/remote_file_system.dart';
 import '../security/vault_crypto.dart';
 import '../storage/app_paths.dart';
@@ -28,9 +29,15 @@ class FileExplorerRepository {
   static const String _torrentScheme = 'torrent://';
   static const String _folderMetaFileName = '.folder.cryptmeta';
 
-  void configurePlugins(List<CloudPluginDefinition> plugins) {
-    _remote.configurePlugins(plugins);
+  void configurePlugins(
+    List<CloudPluginDefinition> plugins, [
+    List<PluginConnectionProfile> profiles = const <PluginConnectionProfile>[],
+  ]) {
+    _remote.configurePlugins(_runtimePlugins(plugins, profiles));
   }
+
+  bool supportsRemotePlugin(CloudPluginDefinition plugin) =>
+      _remote.isSupported(plugin);
 
   bool isVirtualPath(String path) =>
       _ZipVirtualPath.tryParse(path) != null ||
@@ -80,7 +87,9 @@ class FileExplorerRepository {
   }
 
   Future<List<ExplorerLocation>> loadLocations(
-      List<CloudPluginDefinition> plugins) async {
+    List<CloudPluginDefinition> plugins, [
+    List<PluginConnectionProfile> profiles = const <PluginConnectionProfile>[],
+  ]) async {
     final hidden = await AppPaths.hiddenVaultDirectory();
     final locations = <ExplorerLocation>[];
 
@@ -148,21 +157,49 @@ class FileExplorerRepository {
       ),
     );
 
-    for (final plugin in plugins) {
+    final pluginsById = {
+      for (final plugin in plugins) plugin.id: plugin,
+    };
+    for (final profile in profiles) {
+      final plugin = pluginsById[profile.pluginId];
+      if (plugin == null || !_remote.isSupported(plugin)) {
+        continue;
+      }
+      final description = [
+        plugin.name,
+        if (profile.endpointSummary.trim().isNotEmpty) profile.endpointSummary,
+      ].join(' • ');
       locations.add(
         ExplorerLocation(
-          id: 'cloud-${plugin.id}',
-          name: plugin.name,
-          kind: ExplorerLocationKind.cloudPlugin,
-          description: plugin.description ?? 'JSON cloud plugin',
-          enabled: _remote.isSupported(plugin),
-          path: _remote.isSupported(plugin) ? remoteRootPath(plugin.id) : null,
-          pluginId: plugin.id,
+          id: 'profile-${profile.id}',
+          name: profile.name,
+          kind: plugin.pluginType.contains('network')
+              ? ExplorerLocationKind.network
+              : ExplorerLocationKind.cloudPlugin,
+          description: description,
+          enabled: true,
+          path: remoteRootPath(profile.runtimePluginId),
+          pluginId: profile.runtimePluginId,
         ),
       );
     }
 
     return locations;
+  }
+
+  List<CloudPluginDefinition> _runtimePlugins(
+    List<CloudPluginDefinition> plugins,
+    List<PluginConnectionProfile> profiles,
+  ) {
+    final pluginsById = {
+      for (final plugin in plugins) plugin.id: plugin,
+    };
+    return <CloudPluginDefinition>[
+      ...plugins,
+      for (final profile in profiles)
+        if (pluginsById[profile.pluginId] case final plugin?)
+          plugin.withConnectionProfile(profile),
+    ];
   }
 
   Future<DirectorySnapshot> listDirectory(
@@ -414,6 +451,65 @@ class FileExplorerRepository {
   ) async {
     final entries = <ExplorerEntry>[];
     for (final path in paths) {
+      final entry = await entryForPath(path);
+      if (entry != null) {
+        entries.add(entry);
+      } else {
+        entries.add(
+          ExplorerEntry(
+            name: basename(path),
+            path: path,
+            kind: ExplorerEntryKind.unknown,
+            sizeBytes: 0,
+            modifiedAt: DateTime.fromMillisecondsSinceEpoch(0),
+            exists: false,
+          ),
+        );
+      }
+    }
+    return DirectorySnapshot(path: label, entries: entries);
+  }
+
+  Future<DirectorySnapshot> snapshotForLocations(
+    String label,
+    List<ExplorerLocation> locations, {
+    List<String> extraPaths = const <String>[],
+  }) async {
+    final entries = <ExplorerEntry>[];
+    for (final location in locations) {
+      final path = location.path;
+      if (!location.enabled || path == null) {
+        continue;
+      }
+      final entry = await entryForPath(path);
+      if (entry != null) {
+        entries.add(
+          ExplorerEntry(
+            name: location.name,
+            path: entry.path,
+            kind: entry.isDirectory
+                ? ExplorerEntryKind.directory
+                : ExplorerEntryKind.unknown,
+            sizeBytes: entry.sizeBytes,
+            modifiedAt: entry.modifiedAt,
+            createdAt: entry.createdAt,
+            exists: entry.exists,
+          ),
+        );
+      } else {
+        entries.add(
+          ExplorerEntry(
+            name: location.name,
+            path: path,
+            kind: ExplorerEntryKind.unknown,
+            sizeBytes: 0,
+            modifiedAt: DateTime.fromMillisecondsSinceEpoch(0),
+            exists: false,
+          ),
+        );
+      }
+    }
+    for (final path in extraPaths) {
       final entry = await entryForPath(path);
       if (entry != null) {
         entries.add(entry);

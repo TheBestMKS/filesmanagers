@@ -16,13 +16,14 @@ import 'src/ffi/crypt_bindings.dart';
 import 'src/i18n/app_language.dart';
 import 'src/platform_services.dart';
 import 'src/plugins/cloud_plugin_registry.dart' hide basename;
+import 'src/plugins/connection_profile.dart';
 import 'src/security/security_settings.dart';
 import 'src/security/vault_crypto.dart';
 import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.0';
+const _appVersion = '0.12.1';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
@@ -315,8 +316,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     await PlatformServices.setScreenProtection(settings.blockScreenCapture);
     final runtime = await _bindings.getRuntimeInfo();
     final pluginDefs = await _plugins.loadPlugins();
-    _explorer.configurePlugins(pluginDefs);
-    final locations = await _explorer.loadLocations(pluginDefs);
+    _explorer.configurePlugins(pluginDefs, settings.connectionProfiles);
+    final locations =
+        await _explorer.loadLocations(pluginDefs, settings.connectionProfiles);
     final first =
         locations.where((e) => e.enabled && e.path != null).firstOrNull;
 
@@ -648,10 +650,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   Future<void> _showAddLocationDialog() async {
-    final candidates = _locations
-        .where((location) =>
-            location.kind == ExplorerLocationKind.cloudPlugin ||
-            location.kind == ExplorerLocationKind.network)
+    final candidates = _pluginDefs
+        .where((plugin) => _explorer.supportsRemotePlugin(plugin))
         .toList();
     await showDialog<void>(
       context: context,
@@ -664,17 +664,15 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
               : ListView(
                   shrinkWrap: true,
                   children: [
-                    for (final location in candidates)
+                    for (final plugin in candidates)
                       ListTile(
-                        leading: Icon(location.enabled
-                            ? Icons.add_link
-                            : Icons.extension_outlined),
-                        title: Text(location.name),
-                        subtitle: Text(location.description ??
+                        leading: const Icon(Icons.add_link),
+                        title: Text(plugin.name),
+                        subtitle: Text(plugin.description ??
                             _language.t('settings.plugins.note')),
                         onTap: () {
                           Navigator.pop(context);
-                          _selectLocation(location);
+                          unawaited(_showConnectionProfileDialog(plugin));
                         },
                       ),
                   ],
@@ -696,6 +694,44 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         ],
       ),
     );
+  }
+
+  Future<void> _showConnectionProfileDialog(
+    CloudPluginDefinition plugin,
+  ) async {
+    final profile = await showDialog<PluginConnectionProfile>(
+      context: context,
+      builder: (context) => _ConnectionProfileDialog(
+        language: _language,
+        plugin: plugin,
+      ),
+    );
+    if (profile == null) {
+      return;
+    }
+    final nextProfiles = <PluginConnectionProfile>[
+      ..._settings.connectionProfiles,
+      profile,
+    ];
+    final nextSettings =
+        await _settingsRepo.setConnectionProfiles(_settings, nextProfiles);
+    _explorer.configurePlugins(_pluginDefs, nextSettings.connectionProfiles);
+    final locations = await _explorer.loadLocations(
+      _pluginDefs,
+      nextSettings.connectionProfiles,
+    );
+    if (!mounted) return;
+    setState(() {
+      _settings = nextSettings;
+      _locations = locations;
+    });
+    _snack('${_language.t('locations.profile.created')} ${profile.name}');
+    final created = locations
+        .where((location) => location.pluginId == profile.runtimePluginId)
+        .firstOrNull;
+    if (created != null && created.path != null) {
+      unawaited(_openPathSafely(created.path!));
+    }
   }
 
   void _openExplorerHome() {
@@ -729,9 +765,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   void _openLocationsHome() {
-    final paths = <String>[
-      for (final location in _locations)
-        if (location.enabled && location.path != null) location.path!,
+    final extraPaths = <String>[
       ..._settings.galleryFolders,
       ..._settings.musicFolders,
       ..._settings.videoFolders,
@@ -745,9 +779,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _mediaPlaylist = const [];
       _imagePlaylist = const [];
       _selectedPaths = const <String>{};
-      _snapshot = _explorer.snapshotForPaths(
+      _snapshot = _explorer.snapshotForLocations(
         _language.t('nav.explorer'),
-        paths,
+        _locations,
+        extraPaths: extraPaths,
       );
     });
   }
@@ -3454,8 +3489,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Future<String> _installPluginZip(String path) async {
     final dir = await _plugins.installPluginZip(path);
     final pluginDefs = await _plugins.loadPlugins();
-    _explorer.configurePlugins(pluginDefs);
-    final locations = await _explorer.loadLocations(pluginDefs);
+    _explorer.configurePlugins(pluginDefs, _settings.connectionProfiles);
+    final locations =
+        await _explorer.loadLocations(pluginDefs, _settings.connectionProfiles);
     setState(() {
       _pluginDefs = pluginDefs;
       _locations = locations;
@@ -3478,10 +3514,20 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Future<String> _deletePlugin(String pluginId) async {
     await _plugins.deletePlugin(pluginId);
     final pluginDefs = await _plugins.loadPlugins();
-    _explorer.configurePlugins(pluginDefs);
-    final locations = await _explorer.loadLocations(pluginDefs);
+    var settings = _settings;
+    final filteredProfiles = settings.connectionProfiles
+        .where((profile) => profile.pluginId != pluginId)
+        .toList();
+    if (filteredProfiles.length != settings.connectionProfiles.length) {
+      settings =
+          await _settingsRepo.setConnectionProfiles(settings, filteredProfiles);
+    }
+    _explorer.configurePlugins(pluginDefs, settings.connectionProfiles);
+    final locations =
+        await _explorer.loadLocations(pluginDefs, settings.connectionProfiles);
     if (mounted) {
       setState(() {
+        _settings = settings;
         _pluginDefs = pluginDefs;
         _locations = locations;
       });
@@ -3507,10 +3553,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       persistentCacheEnabled: true,
       encryptPersistentCache: next.encryptThumbnailCache,
     );
+    final pluginDefs = await _plugins.loadPlugins();
+    _explorer.configurePlugins(pluginDefs, next.connectionProfiles);
+    final locations =
+        await _explorer.loadLocations(pluginDefs, next.connectionProfiles);
     if (mounted) {
       setState(() {
         _settings = next;
         _language = language;
+        _pluginDefs = pluginDefs;
+        _locations = locations;
         _searchMode = next.searchMode;
         _searchUseRegex = next.searchUseRegex;
         _searchRecursive = next.searchRecursive;
@@ -9773,6 +9825,349 @@ bool _isEditablePreview(FilePreview preview) =>
     preview.contentKind == FileContentKind.ebook ||
     preview.contentKind == FileContentKind.unknown;
 
+class _EndpointFieldControllers {
+  _EndpointFieldControllers({
+    String label = '',
+    String host = '',
+    String port = '',
+  })  : label = TextEditingController(text: label),
+        host = TextEditingController(text: host),
+        port = TextEditingController(text: port);
+
+  final TextEditingController label;
+  final TextEditingController host;
+  final TextEditingController port;
+
+  void dispose() {
+    label.dispose();
+    host.dispose();
+    port.dispose();
+  }
+}
+
+class _ConnectionProfileDialog extends StatefulWidget {
+  const _ConnectionProfileDialog({
+    required this.language,
+    required this.plugin,
+  });
+
+  final AppLanguage language;
+  final CloudPluginDefinition plugin;
+
+  @override
+  State<_ConnectionProfileDialog> createState() =>
+      _ConnectionProfileDialogState();
+}
+
+class _ConnectionProfileDialogState extends State<_ConnectionProfileDialog> {
+  late final TextEditingController _nameController;
+  final Map<String, TextEditingController> _variableControllers =
+      <String, TextEditingController>{};
+  final List<_EndpointFieldControllers> _endpoints =
+      <_EndpointFieldControllers>[];
+  String? _error;
+
+  static const _endpointVariableKeys = <String>{
+    'host',
+    'server',
+    'baseUrl',
+    'port',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.plugin.name);
+    final variables = widget.plugin.variables ?? const <String, Object?>{};
+    for (final entry in variables.entries) {
+      if (_endpointVariableKeys.contains(entry.key)) {
+        continue;
+      }
+      _variableControllers[entry.key] = TextEditingController(
+        text: _variableDefault(entry.value),
+      );
+    }
+    final endpointHost = _variableDefault(variables['host']).isNotEmpty
+        ? _variableDefault(variables['host'])
+        : _variableDefault(variables['server']).isNotEmpty
+            ? _variableDefault(variables['server'])
+            : _variableDefault(variables['baseUrl']);
+    final endpointPort = _variableDefault(variables['port']);
+    if (_requiresEndpoint) {
+      _endpoints.add(
+        _EndpointFieldControllers(host: endpointHost, port: endpointPort),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    for (final controller in _variableControllers.values) {
+      controller.dispose();
+    }
+    for (final endpoint in _endpoints) {
+      endpoint.dispose();
+    }
+    super.dispose();
+  }
+
+  bool get _requiresEndpoint {
+    final variables = widget.plugin.variables ?? const <String, Object?>{};
+    return variables.keys.any(_endpointVariableKeys.contains);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final language = widget.language;
+    final variables = widget.plugin.variables ?? const <String, Object?>{};
+    return AlertDialog(
+      title: Text(language.t('locations.profile.title')),
+      content: SizedBox(
+        width: 680,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(widget.plugin.name,
+                  style: Theme.of(context).textTheme.titleMedium),
+              if (widget.plugin.description != null) ...[
+                const SizedBox(height: 4),
+                Text(widget.plugin.description!),
+              ],
+              const SizedBox(height: 16),
+              TextField(
+                controller: _nameController,
+                decoration: InputDecoration(
+                  labelText: language.t('locations.profile.name'),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      language.t('locations.profile.endpoint'),
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _addEndpoint,
+                    icon: const Icon(Icons.add),
+                    label: Text(language.t('locations.profile.endpoint.add')),
+                  ),
+                ],
+              ),
+              if (_endpoints.isEmpty)
+                Text(language.t('locations.profile.endpoint.optional'))
+              else
+                for (var i = 0; i < _endpoints.length; i++) ...[
+                  _EndpointEditorRow(
+                    language: language,
+                    index: i,
+                    total: _endpoints.length,
+                    controllers: _endpoints[i],
+                    onMoveUp: i == 0 ? null : () => _moveEndpoint(i, -1),
+                    onMoveDown: i == _endpoints.length - 1
+                        ? null
+                        : () => _moveEndpoint(i, 1),
+                    onRemove: () => _removeEndpoint(i),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              const SizedBox(height: 12),
+              Text(
+                language.t('locations.profile.parameters'),
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 8),
+              if (_variableControllers.isEmpty)
+                Text(language.t('settings.plugin.no.global.settings'))
+              else
+                for (final entry in _variableControllers.entries) ...[
+                  TextField(
+                    controller: entry.value,
+                    obscureText: _isSecret(variables[entry.key]),
+                    decoration: InputDecoration(
+                      labelText:
+                          _pluginVariableLabel(entry.key, variables[entry.key]),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              if (_error != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _error!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(language.t('common.cancel')),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: Text(language.t('locations.profile.save')),
+        ),
+      ],
+    );
+  }
+
+  void _addEndpoint() {
+    setState(() => _endpoints.add(_EndpointFieldControllers()));
+  }
+
+  void _removeEndpoint(int index) {
+    final endpoint = _endpoints.removeAt(index);
+    endpoint.dispose();
+    setState(() {});
+  }
+
+  void _moveEndpoint(int index, int direction) {
+    final item = _endpoints.removeAt(index);
+    _endpoints.insert(index + direction, item);
+    setState(() {});
+  }
+
+  void _save() {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = widget.language.t('locations.profile.need.name'));
+      return;
+    }
+    final endpoints = <PluginConnectionEndpoint>[];
+    for (final controller in _endpoints) {
+      final host = controller.host.text.trim();
+      if (host.isEmpty) continue;
+      endpoints.add(
+        PluginConnectionEndpoint(
+          label: controller.label.text.trim(),
+          host: host,
+          port: int.tryParse(controller.port.text.trim()),
+        ),
+      );
+    }
+    if (_requiresEndpoint && endpoints.isEmpty) {
+      setState(
+          () => _error = widget.language.t('locations.profile.need.endpoint'));
+      return;
+    }
+    final variables = <String, String>{};
+    for (final entry in _variableControllers.entries) {
+      final value = entry.value.text.trim();
+      if (value.isNotEmpty) {
+        variables[entry.key] = value;
+      }
+    }
+    Navigator.pop(
+      context,
+      PluginConnectionProfile.create(
+        pluginId: widget.plugin.id,
+        name: name,
+        variables: variables,
+        endpoints: endpoints,
+      ),
+    );
+  }
+
+  bool _isSecret(Object? value) => value is Map && value['secret'] == true;
+
+  String _variableDefault(Object? value) {
+    if (value is Map && value['default'] != null) {
+      return value['default'].toString();
+    }
+    return '';
+  }
+
+  String _pluginVariableLabel(String key, Object? value) {
+    if (value is Map && value['label'] != null) {
+      return value['label'].toString();
+    }
+    return key;
+  }
+}
+
+class _EndpointEditorRow extends StatelessWidget {
+  const _EndpointEditorRow({
+    required this.language,
+    required this.index,
+    required this.total,
+    required this.controllers,
+    required this.onMoveUp,
+    required this.onMoveDown,
+    required this.onRemove,
+  });
+
+  final AppLanguage language;
+  final int index;
+  final int total;
+  final _EndpointFieldControllers controllers;
+  final VoidCallback? onMoveUp;
+  final VoidCallback? onMoveDown;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        SizedBox(width: 28, child: Text('${index + 1}.')),
+        Expanded(
+          flex: 2,
+          child: TextField(
+            controller: controllers.label,
+            decoration: InputDecoration(
+              labelText: language.t('locations.profile.endpoint.label'),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          flex: 3,
+          child: TextField(
+            controller: controllers.host,
+            decoration: InputDecoration(
+              labelText: language.t('locations.profile.endpoint.host'),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 100,
+          child: TextField(
+            controller: controllers.port,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: language.t('locations.profile.endpoint.port'),
+            ),
+          ),
+        ),
+        IconButton(
+          tooltip: language.t('common.up'),
+          onPressed: onMoveUp,
+          icon: const Icon(Icons.arrow_upward),
+        ),
+        IconButton(
+          tooltip: language.t('common.down'),
+          onPressed: onMoveDown,
+          icon: const Icon(Icons.arrow_downward),
+        ),
+        IconButton(
+          tooltip: language.t('common.delete'),
+          onPressed: total <= 1 ? null : onRemove,
+          icon: const Icon(Icons.close),
+        ),
+      ],
+    );
+  }
+}
+
 class _PluginSettingsDialog extends StatefulWidget {
   const _PluginSettingsDialog({
     required this.language,
@@ -9838,53 +10233,69 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
             ],
             const Divider(height: 32),
             for (final plugin in widget.plugins)
-              Card(
-                elevation: 0,
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Column(children: [
-                    ListTile(
-                      leading: const Icon(Icons.extension_outlined),
-                      title: Text('${plugin.name} ${plugin.version}'),
-                      subtitle: SelectableText(
-                        [
-                          plugin.description ?? '',
-                          plugin.pluginType,
-                          plugin.manifestPath,
-                          if (plugin.capabilities.isNotEmpty)
-                            plugin.capabilities.join(', '),
-                          if (plugin.repositoryUrl != null)
-                            '${language.t('settings.plugin.repository')}: ${plugin.repositoryUrl}',
-                          if (plugin.updateUrl != null)
-                            '${language.t('settings.plugin.update')}: ${plugin.updateUrl}',
-                        ].where((item) => item.trim().isNotEmpty).join('\n'),
+              Builder(builder: (context) {
+                final globalSettings = _globalSettings(plugin);
+                return Card(
+                  elevation: 0,
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Column(children: [
+                      ListTile(
+                        leading: const Icon(Icons.extension_outlined),
+                        title: Text('${plugin.name} ${plugin.version}'),
+                        subtitle: SelectableText(
+                          [
+                            plugin.description ?? '',
+                            plugin.pluginType,
+                            plugin.manifestPath,
+                            if (plugin.capabilities.isNotEmpty)
+                              plugin.capabilities.join(', '),
+                            if (plugin.repositoryUrl != null)
+                              '${language.t('settings.plugin.repository')}: ${plugin.repositoryUrl}',
+                            if (plugin.updateUrl != null)
+                              '${language.t('settings.plugin.update')}: ${plugin.updateUrl}',
+                          ].where((item) => item.trim().isNotEmpty).join('\n'),
+                        ),
                       ),
-                    ),
-                    Wrap(spacing: 8, runSpacing: 8, children: [
-                      OutlinedButton.icon(
-                        onPressed: () => _showPluginInfo(plugin),
-                        icon: const Icon(Icons.info_outline),
-                        label: Text(language.t('settings.plugin.info')),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: () => _showPluginSettings(plugin),
-                        icon: const Icon(Icons.tune_outlined),
-                        label: Text(language.t('settings.plugin.settings')),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: () => _exportPlugin(plugin),
-                        icon: const Icon(Icons.archive_outlined),
-                        label: Text(language.t('settings.plugin.export')),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: () => _deletePlugin(plugin),
-                        icon: const Icon(Icons.delete_outline),
-                        label: Text(language.t('settings.plugin.delete')),
-                      ),
+                      Wrap(spacing: 8, runSpacing: 8, children: [
+                        OutlinedButton.icon(
+                          onPressed: () => _showPluginInfo(plugin),
+                          icon: const Icon(Icons.info_outline),
+                          label: Text(language.t('settings.plugin.info')),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: globalSettings.isEmpty
+                              ? null
+                              : () => _showPluginSettings(plugin),
+                          icon: const Icon(Icons.tune_outlined),
+                          label: Text(language.t('settings.plugin.settings')),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => _exportPlugin(plugin),
+                          icon: const Icon(Icons.archive_outlined),
+                          label: Text(language.t('settings.plugin.export')),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => _deletePlugin(plugin),
+                          icon: const Icon(Icons.delete_outline),
+                          label: Text(language.t('settings.plugin.delete')),
+                        ),
+                      ]),
+                      if (globalSettings.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              language.t('settings.plugin.no.global.settings'),
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                        ),
                     ]),
-                  ]),
-                ),
-              ),
+                  ),
+                );
+              }),
           ],
         ),
       ),
@@ -9974,21 +10385,21 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
   }
 
   Future<void> _showPluginSettings(CloudPluginDefinition plugin) {
-    final variables = plugin.variables ?? const <String, Object?>{};
+    final settings = _globalSettings(plugin);
     return showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text(widget.language.t('settings.plugin.settings')),
+        title: Text(widget.language.t('settings.plugin.global.settings')),
         content: SizedBox(
           width: 520,
           child: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (variables.isEmpty)
-                  Text(widget.language.t('settings.plugin.no.settings'))
+                if (settings.isEmpty)
+                  Text(widget.language.t('settings.plugin.no.global.settings'))
                 else
-                  for (final entry in variables.entries)
+                  for (final entry in settings.entries)
                     TextField(
                       decoration: InputDecoration(
                         labelText: _pluginVariableLabel(entry.key, entry.value),
@@ -10008,6 +10419,14 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
         ],
       ),
     );
+  }
+
+  Map<String, Object?> _globalSettings(CloudPluginDefinition plugin) {
+    final value = plugin.raw['settings'];
+    if (value is Map) {
+      return value.map((key, value) => MapEntry(key.toString(), value));
+    }
+    return const <String, Object?>{};
   }
 
   String _pluginVariableLabel(String key, Object? value) {

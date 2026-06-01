@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 
 import '../storage/app_paths.dart';
+import 'connection_profile.dart';
 
 class CloudPluginDefinition {
   const CloudPluginDefinition({
@@ -23,6 +24,8 @@ class CloudPluginDefinition {
     this.platformComponents,
     this.proxy,
     this.mediaCatalog,
+    this.profileId,
+    this.sourcePluginId,
     this.listRequest,
     this.infoRequest,
     this.streamRequest,
@@ -45,6 +48,8 @@ class CloudPluginDefinition {
   final Map<String, Object?>? platformComponents;
   final Map<String, Object?>? proxy;
   final Map<String, Object?>? mediaCatalog;
+  final String? profileId;
+  final String? sourcePluginId;
   final Map<String, Object?>? listRequest;
   final Map<String, Object?>? infoRequest;
   final Map<String, Object?>? streamRequest;
@@ -91,6 +96,48 @@ class CloudPluginDefinition {
       infoRequest: mapField('fileInfo'),
       streamRequest: mapField('fileStream'),
       raw: json,
+    );
+  }
+
+  CloudPluginDefinition withConnectionProfile(
+    PluginConnectionProfile profile,
+  ) {
+    final mergedVariables = <String, Object?>{
+      ...?variables,
+      ...profile.variables,
+      if (profile.endpoints.isNotEmpty)
+        'endpointsJson':
+            jsonEncode(profile.endpoints.map((item) => item.toJson()).toList()),
+      if (profile.endpoints.isNotEmpty)
+        ...profile.endpoints.first.toVariables(),
+    };
+    return CloudPluginDefinition(
+      id: profile.runtimePluginId,
+      name: profile.name,
+      rootPath: rootPath,
+      manifestPath: manifestPath,
+      version: version,
+      pluginType: pluginType,
+      description: description,
+      authType: authType,
+      updateUrl: updateUrl,
+      repositoryUrl: repositoryUrl,
+      capabilities: capabilities,
+      variables: mergedVariables,
+      components: components,
+      platformComponents: platformComponents,
+      proxy: proxy,
+      mediaCatalog: mediaCatalog,
+      profileId: profile.id,
+      sourcePluginId: id,
+      listRequest: listRequest,
+      infoRequest: infoRequest,
+      streamRequest: streamRequest,
+      raw: <String, Object?>{
+        ...raw,
+        'connectionProfile': profile.toJson(),
+        'sourcePluginId': id,
+      },
     );
   }
 }

@@ -272,49 +272,56 @@ class WebDavRemoteClient implements RemoteFileSystemClient {
     if (urlTemplate == null || urlTemplate.trim().isEmpty) {
       throw StateError('Plugin ${plugin.id} has no URL template.');
     }
-    final variables = _variables(plugin);
-    final uri = Uri.parse(
-      _substitute(urlTemplate, variables, path: path),
-    );
-    final client = HttpClient();
-    final proxy = _proxy(plugin);
-    if (proxy != null && proxy.isNotEmpty) {
-      client.findProxy = (_) => 'PROXY $proxy';
+    Object? lastError;
+    for (final variables in _endpointVariableSets(_variables(plugin))) {
+      try {
+        final uri = Uri.parse(
+          _substitute(urlTemplate, variables, path: path),
+        );
+        final client = HttpClient();
+        final proxy = _proxy(plugin, variables);
+        if (proxy != null && proxy.isNotEmpty) {
+          client.findProxy = (_) => 'PROXY $proxy';
+        }
+        final method = request['method']?.toString() ?? defaultMethod;
+        final httpRequest = await client.openUrl(method, uri);
+        final headers = request['headers'];
+        if (headers is Map) {
+          headers.forEach(
+            (key, value) => httpRequest.headers.set(key.toString(), value),
+          );
+        }
+        if (depth != null) {
+          httpRequest.headers.set('Depth', depth);
+        }
+        if (request['auth'] == 'basic') {
+          final username = variables['username'] ?? variables['login'] ?? '';
+          final password = variables['password'] ?? variables['token'] ?? '';
+          httpRequest.headers.set(
+            HttpHeaders.authorizationHeader,
+            'Basic ${base64Encode(utf8.encode('$username:$password'))}',
+          );
+        } else if (variables['token'] case final token? when token.isNotEmpty) {
+          httpRequest.headers.set(
+            HttpHeaders.authorizationHeader,
+            'Bearer $token',
+          );
+        }
+        if (body != null) {
+          httpRequest.headers.contentType =
+              ContentType('application', 'xml', charset: 'utf-8');
+          httpRequest.write(body);
+        }
+        if (bytes != null) {
+          httpRequest.headers.contentLength = bytes.length;
+          httpRequest.add(bytes);
+        }
+        return httpRequest.close();
+      } catch (error) {
+        lastError = error;
+      }
     }
-    final method = request['method']?.toString() ?? defaultMethod;
-    final httpRequest = await client.openUrl(method, uri);
-    final headers = request['headers'];
-    if (headers is Map) {
-      headers.forEach(
-        (key, value) => httpRequest.headers.set(key.toString(), value),
-      );
-    }
-    if (depth != null) {
-      httpRequest.headers.set('Depth', depth);
-    }
-    if (request['auth'] == 'basic') {
-      final username = variables['username'] ?? variables['login'] ?? '';
-      final password = variables['password'] ?? variables['token'] ?? '';
-      httpRequest.headers.set(
-        HttpHeaders.authorizationHeader,
-        'Basic ${base64Encode(utf8.encode('$username:$password'))}',
-      );
-    } else if (variables['token'] case final token? when token.isNotEmpty) {
-      httpRequest.headers.set(
-        HttpHeaders.authorizationHeader,
-        'Bearer $token',
-      );
-    }
-    if (body != null) {
-      httpRequest.headers.contentType =
-          ContentType('application', 'xml', charset: 'utf-8');
-      httpRequest.write(body);
-    }
-    if (bytes != null) {
-      httpRequest.headers.contentLength = bytes.length;
-      httpRequest.add(bytes);
-    }
-    return httpRequest.close();
+    throw StateError('WebDAV connection failed: $lastError');
   }
 
   String _propfindBody() => '''<?xml version="1.0" encoding="utf-8" ?>
@@ -488,23 +495,31 @@ class FtpRemoteClient implements RemoteFileSystemClient {
   }
 
   Future<T> _withConnection<T>(Future<T> Function(_FtpConnection) body) async {
-    final variables = _variables(plugin);
-    final host = variables['host'] ?? variables['server'];
-    if (host == null || host.isEmpty) {
-      throw StateError('FTP plugin ${plugin.id} has no host variable.');
+    Object? lastError;
+    for (final variables in _endpointVariableSets(_variables(plugin))) {
+      final host = variables['host'] ?? variables['server'];
+      if (host == null || host.isEmpty) {
+        lastError = StateError('FTP plugin ${plugin.id} has no host variable.');
+        continue;
+      }
+      final port = int.tryParse(variables['port'] ?? '') ?? 21;
+      try {
+        final connection = await _FtpConnection.connect(
+          host,
+          port,
+          username: variables['username'] ?? variables['user'] ?? 'anonymous',
+          password: variables['password'] ?? 'anonymous@',
+        );
+        try {
+          return await body(connection);
+        } finally {
+          await connection.close();
+        }
+      } catch (error) {
+        lastError = error;
+      }
     }
-    final port = int.tryParse(variables['port'] ?? '') ?? 21;
-    final connection = await _FtpConnection.connect(
-      host,
-      port,
-      username: variables['username'] ?? variables['user'] ?? 'anonymous',
-      password: variables['password'] ?? 'anonymous@',
-    );
-    try {
-      return await body(connection);
-    } finally {
-      await connection.close();
-    }
+    throw StateError('FTP connection failed: $lastError');
   }
 
   RemoteFileSystemEntry? _parseListLine(String line, String parent) {
@@ -664,44 +679,54 @@ class SftpRemoteClient implements RemoteFileSystemClient {
   }
 
   Future<T> _withSftp<T>(Future<T> Function(SftpClient) body) async {
-    final variables = _variables(plugin);
-    final host = variables['host'] ?? variables['server'];
-    if (host == null || host.isEmpty) {
-      throw StateError('SFTP plugin ${plugin.id} has no host variable.');
-    }
-    final port = int.tryParse(variables['port'] ?? '') ?? 22;
-    final username = variables['username'] ??
-        variables['user'] ??
-        Platform.environment['USERNAME'] ??
-        Platform.environment['USER'] ??
-        'anonymous';
-    final password = _emptyToNull(variables['password']);
-    final identities = await _loadSshIdentities(variables);
-    final socket = await SSHSocket.connect(
-      host,
-      port,
-      timeout: _connectionTimeout(variables),
-    );
-    final client = SSHClient(
-      socket,
-      username: username,
-      identities: identities,
-      onPasswordRequest: password == null ? null : () => password,
-      onUserInfoRequest: password == null
-          ? null
-          : (request) => List<String>.filled(request.prompts.length, password),
-      ident: 'SecureVaultEmbeddedSSH_1.0',
-    );
-    final sftp = await client.sftp();
-    try {
-      return await body(sftp);
-    } finally {
-      sftp.close();
-      client.close();
+    Object? lastError;
+    for (final variables in _endpointVariableSets(_variables(plugin))) {
+      final host = variables['host'] ?? variables['server'];
+      if (host == null || host.isEmpty) {
+        lastError =
+            StateError('SFTP plugin ${plugin.id} has no host variable.');
+        continue;
+      }
       try {
-        await client.done.timeout(const Duration(seconds: 2));
-      } catch (_) {}
+        final port = int.tryParse(variables['port'] ?? '') ?? 22;
+        final username = variables['username'] ??
+            variables['user'] ??
+            Platform.environment['USERNAME'] ??
+            Platform.environment['USER'] ??
+            'anonymous';
+        final password = _emptyToNull(variables['password']);
+        final identities = await _loadSshIdentities(variables);
+        final socket = await SSHSocket.connect(
+          host,
+          port,
+          timeout: _connectionTimeout(variables),
+        );
+        final client = SSHClient(
+          socket,
+          username: username,
+          identities: identities,
+          onPasswordRequest: password == null ? null : () => password,
+          onUserInfoRequest: password == null
+              ? null
+              : (request) =>
+                  List<String>.filled(request.prompts.length, password),
+          ident: 'SecureVaultEmbeddedSSH_1.0',
+        );
+        final sftp = await client.sftp();
+        try {
+          return await body(sftp);
+        } finally {
+          sftp.close();
+          client.close();
+          try {
+            await client.done.timeout(const Duration(seconds: 2));
+          } catch (_) {}
+        }
+      } catch (error) {
+        lastError = error;
+      }
     }
+    throw StateError('SFTP connection failed: $lastError');
   }
 
   Future<List<SSHKeyPair>?> _loadSshIdentities(
@@ -844,24 +869,32 @@ class SmbRemoteClient implements RemoteFileSystemClient {
   Future<T> _withPool<T>(
     Future<T> Function(Smb2Pool, _SmbConnectionSettings) body,
   ) async {
-    final settings = _smbSettings(_variables(plugin));
-    final pool = await Smb2Pool.connect(
-      host: settings.host,
-      share: settings.share,
-      user: settings.username,
-      password: settings.password,
-      domain: settings.domain,
-      workers: settings.workers,
-      timeoutSeconds: settings.timeoutSeconds,
-      seal: settings.seal,
-      signing: settings.signing,
-      version: settings.version,
-    );
-    try {
-      return await body(pool, settings);
-    } finally {
-      await pool.disconnect();
+    Object? lastError;
+    for (final variables in _endpointVariableSets(_variables(plugin))) {
+      try {
+        final settings = _smbSettings(variables);
+        final pool = await Smb2Pool.connect(
+          host: settings.host,
+          share: settings.share,
+          user: settings.username,
+          password: settings.password,
+          domain: settings.domain,
+          workers: settings.workers,
+          timeoutSeconds: settings.timeoutSeconds,
+          seal: settings.seal,
+          signing: settings.signing,
+          version: settings.version,
+        );
+        try {
+          return await body(pool, settings);
+        } finally {
+          await pool.disconnect();
+        }
+      } catch (error) {
+        lastError = error;
+      }
     }
+    throw StateError('SMB connection failed: $lastError');
   }
 
   _SmbConnectionSettings _smbSettings(Map<String, String> variables) {
@@ -1217,7 +1250,37 @@ Map<String, String> _variables(CloudPluginDefinition plugin) {
   return result;
 }
 
-String? _proxy(CloudPluginDefinition plugin) {
+List<Map<String, String>> _endpointVariableSets(Map<String, String> base) {
+  final raw = base['endpointsJson'];
+  if (raw == null || raw.trim().isEmpty) return [base];
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) return [base];
+    final result = <Map<String, String>>[];
+    for (final item in decoded.whereType<Map>()) {
+      final host = item['host']?.toString().trim() ?? '';
+      if (host.isEmpty) continue;
+      final port = item['port']?.toString().trim() ?? '';
+      final next = Map<String, String>.of(base)
+        ..['host'] = host
+        ..['server'] = host;
+      if (host.startsWith('http://') || host.startsWith('https://')) {
+        next['baseUrl'] = host;
+      }
+      if (port.isNotEmpty) {
+        next['port'] = port;
+      }
+      result.add(next);
+    }
+    return result.isEmpty ? [base] : result;
+  } catch (_) {
+    return [base];
+  }
+}
+
+String? _proxy(CloudPluginDefinition plugin, [Map<String, String>? variables]) {
+  final variableProxy = variables?['proxy'];
+  if (variableProxy != null && variableProxy.isNotEmpty) return variableProxy;
   final proxy = plugin.proxy;
   if (proxy == null) return null;
   final value = proxy['value']?.toString();
