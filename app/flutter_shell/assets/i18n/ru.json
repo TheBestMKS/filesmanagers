@@ -268,7 +268,7 @@
     "provider.reserved": "Настройте и включите соответствующий сетевой или облачный плагин в менеджере плагинов.",
     "provider.plugin": "JSON-плагин найден:",
     "provider.plugin.detail": "Executor плагина обрабатывает auth, listFiles, fileInfo и fileStream согласно manifest.",
-    "settings.storage.note": "Если выключено, настройки, плагины, языки, экспорт и скрытое хранилище находятся рядом с программой в SecureVaultData.",
+    "settings.storage.note": "Если выключено, настройки, языки, экспорт и скрытое хранилище находятся рядом с программой в SecureVaultData; плагины хранятся в папке plugins рядом с программой.",
     "settings.storage": "Хранение и навигация",
     "explorer.use.as": "Использовать как",
     "explorer.use.as.multimedia": "Папку мультимедиа",

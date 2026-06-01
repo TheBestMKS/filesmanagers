@@ -268,7 +268,7 @@
     "editor.video.rotate": "Rotate video 90 degrees",
     "editor.video.quality": "Video CRF quality, lower is better",
     "editor.render": "Render",
-    "settings.storage.note": "When disabled, settings, plugins, languages, exports, and hidden storage are kept near the program in SecureVaultData.",
+    "settings.storage.note": "When disabled, settings, languages, exports, and hidden storage are kept near the program in SecureVaultData; plugins are kept in the program plugins folder.",
     "settings.storage": "Storage and navigation",
     "explorer.use.as": "Use as",
     "explorer.use.as.multimedia": "Multimedia folder",

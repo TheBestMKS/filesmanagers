@@ -337,7 +337,7 @@ class AppLanguage {
     'settings.storage': 'Storage and navigation',
     'settings.storage.user': 'Store settings in the user profile folder',
     'settings.storage.note':
-        'When disabled, settings, plugins, languages, exports, and hidden storage are kept near the program in SecureVaultData.',
+        'When disabled, settings, languages, exports, and hidden storage are kept near the program in SecureVaultData; plugins are kept in the program plugins folder.',
     'settings.export.config': 'Export configuration and plugins',
     'settings.export.done': 'Configuration archive exported:',
     'settings.remember.last.folder': 'Remember the last opened folder',
@@ -888,7 +888,7 @@ class AppLanguage {
     'settings.storage': 'Хранение и навигация',
     'settings.storage.user': 'Хранить настройки в папке пользователя',
     'settings.storage.note':
-        'Если выключено, настройки, плагины, языки, экспорт и скрытое хранилище находятся рядом с программой в SecureVaultData.',
+        'Если выключено, настройки, языки, экспорт и скрытое хранилище находятся рядом с программой в SecureVaultData; плагины хранятся в папке plugins рядом с программой.',
     'settings.export.config': 'Экспортировать конфигурацию и плагины',
     'settings.export.done': 'Архив конфигурации выгружен:',
     'settings.remember.last.folder': 'Запоминать последнюю открытую папку',

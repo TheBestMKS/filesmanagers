@@ -251,57 +251,55 @@ class TorrentService {
   }
 
   Future<String> _aria2Executable() async {
-    final override = Platform.environment['SECUREVAULT_ARIA2C'];
-    if (override != null && override.trim().isNotEmpty) {
-      return override.trim();
-    }
+    final pluginsDir = await AppPaths.pluginsDirectory();
+    final platform = _torrentEnginePlatform();
     final executableName = Platform.isWindows ? 'aria2c.exe' : 'aria2c';
-    final appDir = File(Platform.resolvedExecutable).parent;
     final bundledCandidates = <File>[
-      File('${appDir.path}${Platform.pathSeparator}$executableName'),
       File(
-        '${appDir.path}${Platform.pathSeparator}bin'
-        '${Platform.pathSeparator}$executableName',
+        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
+        '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
+        '${Platform.pathSeparator}$platform${Platform.pathSeparator}'
+        '$executableName',
       ),
       File(
-        '${appDir.path}${Platform.pathSeparator}tools'
-        '${Platform.pathSeparator}$executableName',
+        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
+        '${Platform.pathSeparator}components${Platform.pathSeparator}torrent'
+        '${Platform.pathSeparator}$platform${Platform.pathSeparator}'
+        '$executableName',
       ),
     ];
-    if (Platform.isAndroid) {
-      final dataDir = await AppPaths.appDataDirectory();
-      bundledCandidates.addAll([
-        File('${dataDir.path}${Platform.pathSeparator}$executableName'),
-        File(
-          '${dataDir.path}${Platform.pathSeparator}bin'
-          '${Platform.pathSeparator}$executableName',
-        ),
-      ]);
-    }
-    final pluginsDir = await AppPaths.pluginsDirectory();
-    bundledCandidates.addAll([
-      File(
-        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
-        '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
-        '${Platform.pathSeparator}windows-x64${Platform.pathSeparator}aria2c.exe',
-      ),
-      File(
-        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
-        '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
-        '${Platform.pathSeparator}linux-x64${Platform.pathSeparator}aria2c',
-      ),
-      File(
-        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
-        '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
-        '${Platform.pathSeparator}android-arm64${Platform.pathSeparator}aria2c',
-      ),
-    ]);
     for (final candidate in bundledCandidates) {
       if (await candidate.exists()) {
         return candidate.path;
       }
     }
-    return 'aria2c';
+    final override = Platform.environment['SECUREVAULT_ARIA2C'];
+    if (override != null && override.trim().isNotEmpty) {
+      return override.trim();
+    }
+    throw FileSystemException(
+      'Torrent engine not found in plugin components for $platform. '
+      'Place aria2c or another compatible engine in the SecureVault Torrent '
+      'plugin folder, or set SECUREVAULT_ARIA2C for development.',
+      pluginsDir.path,
+    );
+  }
+
+  String _torrentEnginePlatform() {
+    final arch = _cpuArch();
+    if (Platform.isWindows) return 'windows-$arch';
+    if (Platform.isLinux) return 'linux-$arch';
+    if (Platform.isAndroid) return 'android-$arch';
+    if (Platform.isMacOS) return 'macos-$arch';
+    return '${Platform.operatingSystem}-$arch';
+  }
+
+  String _cpuArch() {
+    final arch = Platform.version.toLowerCase();
+    if (arch.contains('arm64') || arch.contains('aarch64')) return 'arm64';
+    if (arch.contains('arm')) return 'arm';
+    if (arch.contains('ia32') || arch.contains('x86 ')) return 'x86';
+    return 'x64';
   }
 }
 
@@ -415,7 +413,7 @@ class _TorrentHttpStreamer {
           response.headers.contentType = ContentType.text;
           response.write(
             'Torrent engine is unavailable: $error\n'
-            'Install/bundle aria2c or set SECUREVAULT_ARIA2C.',
+            'Install the engine inside the SecureVault Torrent plugin folder.',
           );
           await response.close();
           return;

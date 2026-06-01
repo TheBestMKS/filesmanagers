@@ -25,7 +25,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.6';
+const _appVersion = '0.12.7';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {

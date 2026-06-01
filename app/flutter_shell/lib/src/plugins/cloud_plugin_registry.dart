@@ -626,7 +626,7 @@ class CloudPluginRegistry {
       manifest: <String, Object?>{
         'id': 'securevault-torrent',
         'name': 'SecureVault Torrent',
-        'version': '1.1.0',
+        'version': '1.2.0',
         'pluginType': 'media-extension',
         'description':
             'Adds the Torrent section, .torrent file handling, folder-like torrent browsing and audio/video streaming.',
@@ -650,7 +650,7 @@ class CloudPluginRegistry {
         },
         'components': <String, Object?>{
           'executor': 'torrent',
-          'engine': 'aria2c',
+          'engine': 'plugin-bundled',
         },
         'platformComponents': <String, Object?>{
           'windows-x64': <String, Object?>{
@@ -812,14 +812,7 @@ class CloudPluginRegistry {
       '${Platform.pathSeparator}aria2c.exe',
     );
     if (await target.exists()) return;
-    final executableName = Platform.isWindows ? 'aria2c.exe' : 'aria2c';
-    final appDir = File(Platform.resolvedExecutable).parent;
     final candidates = <File>[
-      File('${appDir.path}${Platform.pathSeparator}$executableName'),
-      File('${appDir.path}${Platform.pathSeparator}bin'
-          '${Platform.pathSeparator}$executableName'),
-      File('${appDir.path}${Platform.pathSeparator}tools'
-          '${Platform.pathSeparator}$executableName'),
       File('windows${Platform.pathSeparator}runner'
           '${Platform.pathSeparator}resources${Platform.pathSeparator}aria2c.exe'),
       File('app${Platform.pathSeparator}flutter_shell'

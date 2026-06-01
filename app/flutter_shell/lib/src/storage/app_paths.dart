@@ -6,6 +6,7 @@ class AppPaths {
 
   static const _storageFileName = 'securevault_storage.json';
   static const _programDataFolder = 'SecureVaultData';
+  static const _pluginsFolder = 'plugins';
 
   static Future<Directory> appDataDirectory() async {
     if (await useUserDataDirectory()) {
@@ -99,12 +100,25 @@ class AppPaths {
   }
 
   static Future<Directory> pluginsDirectory() async {
-    final appData = await appDataDirectory();
-    final dir = Directory('${appData.path}${Platform.pathSeparator}plugins');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
+    final override = Platform.environment['SECUREVAULT_PLUGINS_DIR'];
+    if (override != null && override.trim().isNotEmpty) {
+      return _ensureDirectory(Directory(override.trim()));
     }
-    return dir;
+    final dir = Directory(
+      '${_programDirectory()}${Platform.pathSeparator}$_pluginsFolder',
+    );
+    try {
+      final ensured = await _ensureDirectory(dir);
+      await _migrateLegacyPlugins(ensured);
+      return ensured;
+    } on FileSystemException {
+      // Some desktop installs can be read-only. Keep the fallback outside of
+      // SecureVaultData so plugins are still separated from encrypted data.
+      final userData = await userDataDirectory();
+      return _ensureDirectory(
+        Directory('${userData.path}${Platform.pathSeparator}$_pluginsFolder'),
+      );
+    }
   }
 
   static Future<Directory> languagesDirectory() async {
@@ -153,6 +167,60 @@ class AppPaths {
     }
     return dir;
   }
+
+  static Future<void> _migrateLegacyPlugins(Directory target) async {
+    final targetPath = _normalize(target.path);
+    final legacyRoots = <Directory>[
+      Directory(
+        '${_programDirectory()}${Platform.pathSeparator}$_programDataFolder'
+        '${Platform.pathSeparator}$_pluginsFolder',
+      ),
+    ];
+    try {
+      final userData = await userDataDirectory();
+      legacyRoots.add(
+        Directory('${userData.path}${Platform.pathSeparator}$_pluginsFolder'),
+      );
+    } catch (_) {}
+    for (final legacy in legacyRoots) {
+      if (_normalize(legacy.path) == targetPath || !await legacy.exists()) {
+        continue;
+      }
+      await for (final entity in legacy.list(followLinks: false)) {
+        final name = entity.path.split(Platform.pathSeparator).last;
+        if (name.isEmpty) continue;
+        final destination = '${target.path}${Platform.pathSeparator}$name';
+        if (entity is Directory) {
+          final targetDir = Directory(destination);
+          if (!await targetDir.exists()) {
+            await _copyDirectory(entity, targetDir);
+          }
+        } else if (entity is File) {
+          final targetFile = File(destination);
+          if (!await targetFile.exists()) {
+            await entity.copy(targetFile.path);
+          }
+        }
+      }
+    }
+  }
+
+  static Future<void> _copyDirectory(Directory source, Directory target) async {
+    await target.create(recursive: true);
+    await for (final entity in source.list(followLinks: false)) {
+      final name = entity.path.split(Platform.pathSeparator).last;
+      final destination = '${target.path}${Platform.pathSeparator}$name';
+      if (entity is Directory) {
+        await _copyDirectory(entity, Directory(destination));
+      } else if (entity is File) {
+        await File(destination).parent.create(recursive: true);
+        await entity.copy(destination);
+      }
+    }
+  }
+
+  static String _normalize(String path) =>
+      Platform.isWindows ? path.toLowerCase() : path;
 
   static String _programDirectory() {
     if (Platform.isAndroid) {
