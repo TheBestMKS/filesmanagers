@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -39,6 +40,8 @@ class TorrentFileEntry {
 
 class TorrentService {
   const TorrentService();
+
+  static _TorrentHttpStreamer? _streamer;
 
   Future<File> importTorrent(String torrentPath) async {
     final source = File(torrentPath);
@@ -137,11 +140,17 @@ class TorrentService {
       '--seed-time=0',
       '--continue=true',
       '--summary-interval=1',
+      '--stream-piece-selector=inorder',
+      '--bt-prioritize-piece=head=64M,tail=16M',
       '--dir=${dir.path}',
       if (select.isNotEmpty) '--select-file=$select',
       metadata.sourcePath,
     ];
-    return Process.run('aria2c', args, runInShell: Platform.isWindows);
+    return Process.run(
+      await _aria2Executable(),
+      args,
+      runInShell: Platform.isWindows,
+    );
   }
 
   Future<File?> prepareStreamingFile(
@@ -166,6 +175,25 @@ class TorrentService {
     return await local.exists() ? local : null;
   }
 
+  Future<Uri> streamingUri(
+    TorrentMetadata metadata,
+    TorrentFileEntry file,
+  ) async {
+    final local = await downloadedFile(metadata, file);
+    final streamer = _streamer ??= await _TorrentHttpStreamer.start();
+    return streamer.add(
+      _TorrentStreamSource(
+        metadata: metadata,
+        file: file,
+        localFile: local,
+        startDownload: () => _startDownloadDetached(
+          metadata,
+          selectedFiles: [file],
+        ),
+      ),
+    );
+  }
+
   Future<void> _startDownloadDetached(
     TorrentMetadata metadata, {
     Iterable<TorrentFileEntry> selectedFiles = const [],
@@ -180,13 +208,14 @@ class TorrentService {
       '--file-allocation=none',
       '--allow-overwrite=true',
       '--auto-file-renaming=false',
+      '--stream-piece-selector=inorder',
       '--bt-prioritize-piece=head=64M,tail=16M',
       '--dir=${dir.path}',
       if (select.isNotEmpty) '--select-file=$select',
       metadata.sourcePath,
     ];
     await Process.start(
-      'aria2c',
+      await _aria2Executable(),
       args,
       runInShell: Platform.isWindows,
       mode: ProcessStartMode.detached,
@@ -198,6 +227,267 @@ class TorrentService {
     final length = await local.length().catchError((_) => 0);
     if (file.sizeBytes <= 0) return length > 0;
     return length >= math.min(file.sizeBytes, 256 * 1024);
+  }
+
+  Future<String> _aria2Executable() async {
+    final override = Platform.environment['SECUREVAULT_ARIA2C'];
+    if (override != null && override.trim().isNotEmpty) {
+      return override.trim();
+    }
+    final executableName = Platform.isWindows ? 'aria2c.exe' : 'aria2c';
+    final appDir = File(Platform.resolvedExecutable).parent;
+    final bundledCandidates = <File>[
+      File('${appDir.path}${Platform.pathSeparator}$executableName'),
+      File(
+        '${appDir.path}${Platform.pathSeparator}bin'
+        '${Platform.pathSeparator}$executableName',
+      ),
+      File(
+        '${appDir.path}${Platform.pathSeparator}tools'
+        '${Platform.pathSeparator}$executableName',
+      ),
+    ];
+    if (Platform.isAndroid) {
+      final dataDir = await AppPaths.appDataDirectory();
+      bundledCandidates.addAll([
+        File('${dataDir.path}${Platform.pathSeparator}$executableName'),
+        File(
+          '${dataDir.path}${Platform.pathSeparator}bin'
+          '${Platform.pathSeparator}$executableName',
+        ),
+      ]);
+    }
+    for (final candidate in bundledCandidates) {
+      if (await candidate.exists()) {
+        return candidate.path;
+      }
+    }
+    return 'aria2c';
+  }
+}
+
+class _TorrentStreamSource {
+  _TorrentStreamSource({
+    required this.metadata,
+    required this.file,
+    required this.localFile,
+    required this.startDownload,
+  });
+
+  final TorrentMetadata metadata;
+  final TorrentFileEntry file;
+  final File localFile;
+  final Future<void> Function() startDownload;
+  Future<void>? _downloadStart;
+
+  Future<void> ensureDownloadStarted() {
+    final existing = _downloadStart;
+    if (existing != null) return existing;
+    final started = _startAndResetOnFailure();
+    _downloadStart = started;
+    return started;
+  }
+
+  Future<void> _startAndResetOnFailure() async {
+    try {
+      await startDownload();
+    } catch (_) {
+      _downloadStart = null;
+      rethrow;
+    }
+  }
+}
+
+class _TorrentHttpStreamer {
+  _TorrentHttpStreamer._(this._server);
+
+  final HttpServer _server;
+  final Map<String, _TorrentStreamSource> _sources =
+      <String, _TorrentStreamSource>{};
+
+  static Future<_TorrentHttpStreamer> start() async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final streamer = _TorrentHttpStreamer._(server);
+    unawaited(streamer._serve());
+    return streamer;
+  }
+
+  Uri add(_TorrentStreamSource source) {
+    final token = sha1
+        .convert(utf8.encode(
+          '${source.metadata.infoHash}:${source.file.index}:${source.file.path}',
+        ))
+        .toString();
+    _sources[token] = source;
+    return Uri(
+      scheme: 'http',
+      host: InternetAddress.loopbackIPv4.address,
+      port: _server.port,
+      pathSegments: ['torrent', token, source.file.name],
+    );
+  }
+
+  Future<void> _serve() async {
+    await for (final request in _server) {
+      unawaited(_handle(request));
+    }
+  }
+
+  Future<void> _handle(HttpRequest request) async {
+    final response = request.response;
+    try {
+      if (request.method != 'GET' && request.method != 'HEAD') {
+        response.statusCode = HttpStatus.methodNotAllowed;
+        await response.close();
+        return;
+      }
+      final segments = request.uri.pathSegments;
+      if (segments.length < 2 || segments.first != 'torrent') {
+        response.statusCode = HttpStatus.notFound;
+        await response.close();
+        return;
+      }
+      final source = _sources[segments[1]];
+      if (source == null) {
+        response.statusCode = HttpStatus.notFound;
+        await response.close();
+        return;
+      }
+      try {
+        await source.ensureDownloadStarted();
+      } catch (error) {
+        response.statusCode = HttpStatus.serviceUnavailable;
+        response.headers.contentType = ContentType.text;
+        response.write(
+          'Torrent engine is unavailable: $error\n'
+          'Install/bundle aria2c or set SECUREVAULT_ARIA2C.',
+        );
+        await response.close();
+        return;
+      }
+
+      final totalSize = math.max(0, source.file.sizeBytes);
+      final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+      final range =
+          rangeHeader == null ? null : _parseRange(rangeHeader, totalSize);
+      if (rangeHeader != null && range == null && totalSize > 0) {
+        response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
+        response.headers
+            .set(HttpHeaders.contentRangeHeader, 'bytes */$totalSize');
+        await response.close();
+        return;
+      }
+      final start = range?.$1 ?? 0;
+      final end = range?.$2 ?? math.max(0, totalSize - 1);
+      final length = totalSize <= 0 ? null : end - start + 1;
+      response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+      response.headers.contentType = _contentTypeFor(source.file.name);
+      response.headers.set(
+        HttpHeaders.cacheControlHeader,
+        'no-store, no-cache, must-revalidate',
+      );
+      if (range != null) {
+        response.statusCode = HttpStatus.partialContent;
+        response.headers.set(
+          HttpHeaders.contentRangeHeader,
+          'bytes $start-$end/$totalSize',
+        );
+      } else {
+        response.statusCode = HttpStatus.ok;
+      }
+      if (length != null) {
+        response.contentLength = length;
+      }
+      if (request.method == 'HEAD') {
+        await response.close();
+        return;
+      }
+      await _writeRange(response, source.localFile, start, end);
+    } catch (error) {
+      try {
+        response.statusCode = HttpStatus.internalServerError;
+        response.headers.contentType = ContentType.text;
+        response.write(error.toString());
+      } catch (_) {}
+      try {
+        await response.close();
+      } catch (_) {}
+    }
+  }
+
+  (int, int)? _parseRange(String? header, int totalSize) {
+    if (totalSize <= 0) return (0, 0);
+    if (header == null || header.trim().isEmpty) {
+      return null;
+    }
+    final match = RegExp(r'^bytes=(\d*)-(\d*)$').firstMatch(header.trim());
+    if (match == null) return null;
+    final startText = match.group(1) ?? '';
+    final endText = match.group(2) ?? '';
+    if (startText.isEmpty && endText.isEmpty) return null;
+    int start;
+    int end;
+    if (startText.isEmpty) {
+      final suffix = int.tryParse(endText) ?? 0;
+      if (suffix <= 0) return null;
+      start = math.max(0, totalSize - suffix);
+      end = totalSize - 1;
+    } else {
+      start = int.tryParse(startText) ?? -1;
+      end = endText.isEmpty ? totalSize - 1 : int.tryParse(endText) ?? -1;
+    }
+    if (start < 0 || end < start || start >= totalSize) return null;
+    return (start, math.min(end, totalSize - 1));
+  }
+
+  Future<void> _writeRange(
+    HttpResponse response,
+    File file,
+    int start,
+    int end,
+  ) async {
+    var position = start;
+    var idleTicks = 0;
+    while (position <= end) {
+      if (!await file.exists()) {
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        if (++idleTicks > 360) break;
+        continue;
+      }
+      final available = await file.length().catchError((_) => 0);
+      if (available <= position) {
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        if (++idleTicks > 360) break;
+        continue;
+      }
+      idleTicks = 0;
+      final nextEnd = math.min(end + 1, available);
+      await response.addStream(file.openRead(position, nextEnd));
+      position = nextEnd;
+      await response.flush();
+    }
+    await response.close();
+  }
+
+  ContentType _contentTypeFor(String name) {
+    final lower = name.toLowerCase();
+    if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) {
+      return ContentType('video', 'mp4');
+    }
+    if (lower.endsWith('.webm')) return ContentType('video', 'webm');
+    if (lower.endsWith('.mkv')) return ContentType('video', 'x-matroska');
+    if (lower.endsWith('.avi')) return ContentType('video', 'x-msvideo');
+    if (lower.endsWith('.mov')) return ContentType('video', 'quicktime');
+    if (lower.endsWith('.mp3')) return ContentType('audio', 'mpeg');
+    if (lower.endsWith('.m4a') || lower.endsWith('.aac')) {
+      return ContentType('audio', 'aac');
+    }
+    if (lower.endsWith('.flac')) return ContentType('audio', 'flac');
+    if (lower.endsWith('.ogg') || lower.endsWith('.oga')) {
+      return ContentType('audio', 'ogg');
+    }
+    if (lower.endsWith('.wav')) return ContentType('audio', 'wav');
+    return ContentType.binary;
   }
 }
 

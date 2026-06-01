@@ -24,7 +24,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.3';
+const _appVersion = '0.12.4';
 final _sharedMediaSession = _SharedMediaSession();
 
 void main(List<String> args) {
@@ -8030,12 +8030,17 @@ class _SharedMediaSession extends ChangeNotifier {
         final uri = server.add(item, i);
         medias.add(Media(uri.toString()));
       } else if (item.path != null && item.path!.isNotEmpty) {
-        if (item.path!.startsWith('remote://') ||
-            item.path!.startsWith('torrent://') ||
-            item.path!.startsWith('zip://')) {
+        final path = item.path!;
+        if (path.startsWith('http://') || path.startsWith('https://')) {
+          medias.add(Media(path));
           continue;
         }
-        medias.add(Media(Uri.file(item.path!).toString()));
+        if (path.startsWith('remote://') ||
+            path.startsWith('torrent://') ||
+            path.startsWith('zip://')) {
+          continue;
+        }
+        medias.add(Media(Uri.file(path).toString()));
       }
     }
     if (medias.isEmpty) {

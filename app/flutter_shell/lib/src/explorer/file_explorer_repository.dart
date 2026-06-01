@@ -1479,6 +1479,20 @@ class FileExplorerRepository {
         sourcePath: torrent.fullPath,
       );
     }
+    final kind = FileViewerService.kindForName(file.name);
+    if (kind == FileContentKind.audio || kind == FileContentKind.video) {
+      final streamUri = await _torrents.streamingUri(metadata, file);
+      return FilePreview(
+        title: file.name,
+        subtitle:
+            'Torrent stream, ${(file.sizeBytes / 1024 / 1024).toStringAsFixed(1)} MB',
+        sourcePath: streamUri.toString(),
+        text:
+            'SecureVault streams this torrent entry through a local range server. '
+            'The torrent engine starts when playback requests the URL.',
+        contentKind: kind,
+      );
+    }
     final local = await _torrents.downloadedFile(metadata, file);
     var localReady = false;
     if (await local.exists()) {
