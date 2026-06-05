@@ -150,6 +150,7 @@ class CloudPluginRegistry {
     await _ensureWebDavTemplates(pluginsDir, deleted);
     await _ensureRaidTemplates(pluginsDir, deleted);
     await _ensureExperiencePlugins(pluginsDir, deleted);
+    await _ensureUtilityPlugins(pluginsDir, deleted);
     final plugins = <CloudPluginDefinition>[];
     await for (final entity in pluginsDir.list(followLinks: false)) {
       if (entity is! Directory) {
@@ -901,6 +902,107 @@ class CloudPluginRegistry {
           'userSites': true,
           'defaultSearchPath': '/search?q={query}',
         },
+      },
+    );
+  }
+
+  Future<void> _ensureUtilityPlugins(
+    Directory pluginsDir,
+    Set<String> deleted,
+  ) async {
+    await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'tesseract_ocr_search',
+      manifest: <String, Object?>{
+        'id': 'tesseract-ocr',
+        'name': 'Tesseract OCR Search',
+        'version': '1.0.0',
+        'pluginType': 'content-search-extension',
+        'description':
+            'Adds OCR-assisted content search for images and PDFs through bundled or system Tesseract executors.',
+        'authType': 'none',
+        'capabilities': [
+          'contentSearch',
+          'ocr',
+          'pdfImageSearch',
+          'contextMenuActions'
+        ],
+        'settings': <String, Object?>{
+          'languages': <String, Object?>{
+            'label': 'OCR languages',
+            'default': 'rus+eng',
+          },
+          'useSystemTesseract': <String, Object?>{
+            'label': 'Use system tesseract if bundled component is absent',
+            'default': 'true',
+          },
+        },
+        'components': <String, Object?>{'executor': 'tesseract-ocr'},
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{
+            'executor': 'tesseract-ocr',
+            'binary': 'components/tesseract/windows-x64/tesseract.exe',
+          },
+          'linux-x64': <String, Object?>{
+            'executor': 'tesseract-ocr',
+            'binary': 'components/tesseract/linux-x64/tesseract',
+          },
+          'android-arm64': <String, Object?>{
+            'executor': 'tesseract-ocr',
+            'binary': 'components/tesseract/android-arm64/tesseract',
+          },
+          'fallback': <String, Object?>{'executor': 'tesseract-ocr'},
+        },
+      },
+    );
+
+    await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'veracrypt_container_support',
+      manifest: <String, Object?>{
+        'id': 'veracrypt-container-support',
+        'name': 'TrueCrypt / VeraCrypt Containers',
+        'version': '1.0.0',
+        'pluginType': 'container-extension',
+        'description':
+            'Creates, recognizes and mounts VeraCrypt/TrueCrypt containers through installed system drivers or bundled platform CLI components.',
+        'authType': 'password',
+        'capabilities': [
+          'containerCreate',
+          'containerMount',
+          'containerDismount',
+          'fileHandler'
+        ],
+        'settings': <String, Object?>{
+          'veracryptCommand': <String, Object?>{
+            'label': 'VeraCrypt command',
+            'default': 'veracrypt',
+          },
+          'defaultFilesystem': <String, Object?>{
+            'label': 'Default filesystem',
+            'default': 'exFAT',
+          },
+        },
+        'components': <String, Object?>{'executor': 'veracrypt-cli'},
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{
+            'executor': 'veracrypt-cli',
+            'binary': 'components/veracrypt/windows-x64/VeraCrypt.exe',
+          },
+          'linux-x64': <String, Object?>{
+            'executor': 'veracrypt-cli',
+            'binary': 'components/veracrypt/linux-x64/veracrypt',
+          },
+          'fallback': <String, Object?>{'executor': 'veracrypt-cli'},
+        },
+        'fileHandlers': [
+          <String, Object?>{
+            'extensions': ['.hc', '.tc', '.vc'],
+            'mode': 'encrypted-container',
+          }
+        ],
       },
     );
   }

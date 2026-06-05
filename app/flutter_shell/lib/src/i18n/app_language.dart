@@ -23,8 +23,8 @@ class AppLanguage {
 
   String t(String key) => strings[key] ?? _englishStrings[key] ?? key;
 
-  static const russianTitle = 'Защищенное хранилище файлов';
-  static const englishTitle = 'Secure File Vault';
+  static const russianTitle = 'Файловый менеджер';
+  static const englishTitle = 'File Manager';
 
   static const _englishStrings = <String, String>{
     'app.title': englishTitle,
@@ -588,6 +588,54 @@ class AppLanguage {
     'storage.used': 'used',
     'storage.free': 'free',
     'storage.unavailable': 'Storage information is unavailable',
+    'common.extension': 'Extension',
+    'settings.logging.enabled': 'Write program log',
+    'settings.logging.note':
+        'When disabled, SecureVault stops adding new records to the program log.',
+    'settings.interface.scale': 'Overall interface scale',
+    'settings.interface.scale.note':
+        'Applies to all major UI areas and is useful on high-DPI phones.',
+    'settings.navigation.sections': 'Visible left-panel sections',
+    'permissions.title': 'Access permissions',
+    'permissions.mode': 'Mode (octal)',
+    'permissions.recursive': 'Apply recursively',
+    'permissions.changed': 'Permissions changed.',
+    'permissions.unsupported':
+        'This location does not expose permission changes.',
+    'folder.settings.title': 'Folder settings',
+    'folder.settings.inherit': 'Inherit parent folder settings',
+    'folder.settings.remember.open': 'Remember location when opened',
+    'folder.settings.remember.background.collapse':
+        'Remember location after background collapse',
+    'folder.settings.remember.background.video':
+        'Remember background video for this folder',
+    'folder.settings.remember.background.audio':
+        'Remember background audio for this folder',
+    'folder.settings.forbid.background': 'Forbid background playback',
+    'folder.settings.forbid.mini': 'Forbid mini-player playback',
+    'folder.settings.remember.recent': 'Remember recent files from this folder',
+    'folder.settings.show.hidden.files': 'Show hidden files',
+    'folder.settings.show.hidden.folders': 'Show hidden folders',
+    'folder.settings.show.system.folders': 'Show protected system folders',
+    'folder.settings.show.system.files': 'Show protected system files',
+    'folder.settings.block.screenshots':
+        'Block screenshots for this folder and opened files',
+    'folder.settings.disable.camera':
+        'Disable camera while working in this folder when supported',
+    'folder.settings.disable.microphone':
+        'Disable microphone while working in this folder when supported',
+    'preview.unknown.body':
+        'The extension is unknown. Open externally or force a built-in viewer mode?',
+    'preview.unknown.remember': 'Remember this choice for the extension',
+    'preview.force.text': 'As text',
+    'preview.force.audio': 'As audio',
+    'preview.force.video': 'As video',
+    'preview.force.image': 'As image',
+    'preview.forced': 'Opened by saved/forced association.',
+    'preview.html.assets': 'Linked page files',
+    'preview.swf.title': 'SWF / Flash object',
+    'preview.swf.body':
+        'Interactive SWF playback requires an external handler or a Ruffle-compatible plugin. Use the preview menu to open it externally after the warning.',
   };
 
   static const _russianStrings = <String, String>{
@@ -1142,6 +1190,56 @@ class AppLanguage {
     'storage.used': 'занято',
     'storage.free': 'свободно',
     'storage.unavailable': 'Информация о памяти недоступна',
+    'common.extension': 'Расширение',
+    'settings.logging.enabled': 'Вести лог программы',
+    'settings.logging.note':
+        'Если выключено, новые записи в лог программы больше не добавляются.',
+    'settings.interface.scale': 'Общий масштаб интерфейса',
+    'settings.interface.scale.note':
+        'Применяется ко всем основным областям интерфейса и удобен на телефонах с высоким DPI.',
+    'settings.navigation.sections': 'Отображаемые разделы левой панели',
+    'permissions.title': 'Права доступа',
+    'permissions.mode': 'Режим (восьмеричный)',
+    'permissions.recursive': 'Применить рекурсивно',
+    'permissions.changed': 'Права доступа изменены.',
+    'permissions.unsupported':
+        'Это расположение не предоставляет изменение прав доступа.',
+    'folder.settings.title': 'Настройки папки',
+    'folder.settings.inherit': 'Наследовать настройки родительской папки',
+    'folder.settings.remember.open': 'Запоминать расположение при открытии',
+    'folder.settings.remember.background.collapse':
+        'Запоминать расположение при фоновом сворачивании',
+    'folder.settings.remember.background.video':
+        'Запоминать видео фонового воспроизведения',
+    'folder.settings.remember.background.audio':
+        'Запоминать аудио фонового воспроизведения',
+    'folder.settings.forbid.background': 'Запретить фоновое воспроизведение',
+    'folder.settings.forbid.mini': 'Запретить миниатюрное воспроизведение',
+    'folder.settings.remember.recent': 'Запоминать недавние из этой папки',
+    'folder.settings.show.hidden.files': 'Показывать скрытые файлы',
+    'folder.settings.show.hidden.folders': 'Показывать скрытые папки',
+    'folder.settings.show.system.folders':
+        'Показывать защищенные системные папки',
+    'folder.settings.show.system.files':
+        'Показывать защищенные системные файлы',
+    'folder.settings.block.screenshots':
+        'Запрещать скриншоты для папки и открытых файлов',
+    'folder.settings.disable.camera':
+        'Отключать камеру при работе в этой папке, если поддерживается',
+    'folder.settings.disable.microphone':
+        'Отключать микрофон при работе в этой папке, если поддерживается',
+    'preview.unknown.body':
+        'Расширение неизвестно. Открыть во внешней программе или принудительно выбрать встроенный режим?',
+    'preview.unknown.remember': 'Запомнить выбор для этого расширения',
+    'preview.force.text': 'Как текст',
+    'preview.force.audio': 'Как аудио',
+    'preview.force.video': 'Как видео',
+    'preview.force.image': 'Как картинку',
+    'preview.forced': 'Открыто по сохраненной или принудительной ассоциации.',
+    'preview.html.assets': 'Связанные файлы страницы',
+    'preview.swf.title': 'SWF / Flash-объект',
+    'preview.swf.body':
+        'Для интерактивного запуска SWF нужен внешний обработчик или Ruffle-совместимый плагин. Используйте меню просмотра для внешнего открытия после предупреждения.',
   };
 
   static List<String> get requiredStringKeys => _englishStrings.keys.toList();

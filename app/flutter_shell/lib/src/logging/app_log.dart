@@ -5,6 +5,8 @@ import '../storage/app_paths.dart';
 class AppLog {
   AppLog._();
 
+  static bool enabled = true;
+
   static Future<File> file() async {
     final dir = await AppPaths.appDataDirectory();
     final logDir = Directory('${dir.path}${Platform.pathSeparator}logs');
@@ -22,6 +24,7 @@ class AppLog {
   }
 
   static Future<void> write(String message, [Object? error]) async {
+    if (!enabled) return;
     try {
       final target = await file();
       final suffix = error == null ? '' : ' | $error';

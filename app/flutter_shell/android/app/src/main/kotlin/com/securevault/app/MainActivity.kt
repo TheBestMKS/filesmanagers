@@ -57,6 +57,13 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(null)
                 }
+                "setPrivacyHints" -> {
+                    // Android does not allow a normal file manager to revoke camera or
+                    // microphone globally for other apps. The folder policy is accepted
+                    // here so Android builds can enforce available in-app protections
+                    // without failing the call.
+                    result.success(null)
+                }
                 "getInitialOpenPath" -> result.success(resolveIntentToLocalPath(intent))
                 "storageAccessStatus" -> result.success(storageAccessStatus())
                 "requestStorageAccess" -> {

@@ -42,6 +42,8 @@ class RemoteFileStat {
 }
 
 abstract class RemoteFileSystemClient {
+  bool get supportsPermissions => false;
+
   Future<List<RemoteFileSystemEntry>> list(String path);
 
   Future<RemoteFileStat?> stat(String path);
@@ -53,6 +55,14 @@ abstract class RemoteFileSystemClient {
   Future<void> createDirectory(String path);
 
   Future<void> delete(String path, {required bool recursive});
+
+  Future<void> setPermissions(
+    String path, {
+    required int mode,
+    required bool recursive,
+  }) async {
+    throw UnsupportedError('Permissions are not supported by this location.');
+  }
 }
 
 class RemoteFileSystemRepository {
@@ -121,6 +131,18 @@ class WebDavRemoteClient implements RemoteFileSystemClient {
   WebDavRemoteClient(this.plugin);
 
   final CloudPluginDefinition plugin;
+
+  @override
+  bool get supportsPermissions => false;
+
+  @override
+  Future<void> setPermissions(
+    String path, {
+    required int mode,
+    required bool recursive,
+  }) async {
+    throw UnsupportedError('WebDAV permissions are not supported.');
+  }
 
   @override
   Future<List<RemoteFileSystemEntry>> list(String path) async {
@@ -429,6 +451,18 @@ class FtpRemoteClient implements RemoteFileSystemClient {
   final CloudPluginDefinition plugin;
 
   @override
+  bool get supportsPermissions => false;
+
+  @override
+  Future<void> setPermissions(
+    String path, {
+    required int mode,
+    required bool recursive,
+  }) async {
+    throw UnsupportedError('FTP permissions are not supported.');
+  }
+
+  @override
   Future<List<RemoteFileSystemEntry>> list(String path) async {
     return _withConnection((connection) async {
       await connection.login();
@@ -579,6 +613,9 @@ class SftpRemoteClient implements RemoteFileSystemClient {
   final CloudPluginDefinition plugin;
 
   @override
+  bool get supportsPermissions => true;
+
+  @override
   Future<List<RemoteFileSystemEntry>> list(String path) async {
     return _withSftp((sftp) async {
       final entries = await sftp.listdir(_remotePath(path));
@@ -657,6 +694,32 @@ class SftpRemoteClient implements RemoteFileSystemClient {
     return _withSftp((sftp) => _deleteSftpPath(sftp, path, recursive));
   }
 
+  @override
+  Future<void> setPermissions(
+    String path, {
+    required int mode,
+    required bool recursive,
+  }) async {
+    if (mode < 0 || mode > 0xFFF) {
+      throw ArgumentError('Permission mode must be an octal value like 755.');
+    }
+    return _withSsh((client, _) async {
+      final modeText = mode.toRadixString(8).padLeft(3, '0');
+      final command = [
+        'chmod',
+        if (recursive) '-R',
+        modeText,
+        '--',
+        _shellQuote(_remotePath(path)),
+      ].join(' ');
+      final output = await client.run(command, stderr: true);
+      final message = utf8.decode(output, allowMalformed: true).trim();
+      if (message.toLowerCase().contains('permission denied')) {
+        throw StateError(message);
+      }
+    });
+  }
+
   Future<void> _deleteSftpPath(
     SftpClient sftp,
     String path,
@@ -680,6 +743,57 @@ class SftpRemoteClient implements RemoteFileSystemClient {
     } else {
       await sftp.remove(remotePath);
     }
+  }
+
+  Future<T> _withSsh<T>(
+    Future<T> Function(SSHClient, Map<String, String>) body,
+  ) async {
+    Object? lastError;
+    for (final variables in _endpointVariableSets(_variables(plugin))) {
+      final host = variables['host'] ?? variables['server'];
+      if (host == null || host.isEmpty) {
+        lastError =
+            StateError('SFTP plugin ${plugin.id} has no host variable.');
+        continue;
+      }
+      try {
+        final port = int.tryParse(variables['port'] ?? '') ?? 22;
+        final username = variables['username'] ??
+            variables['user'] ??
+            Platform.environment['USERNAME'] ??
+            Platform.environment['USER'] ??
+            'anonymous';
+        final password = _emptyToNull(variables['password']);
+        final identities = await _loadSshIdentities(variables);
+        final socket = await SSHSocket.connect(
+          host,
+          port,
+          timeout: _connectionTimeout(variables),
+        );
+        final client = SSHClient(
+          socket,
+          username: username,
+          identities: identities,
+          onPasswordRequest: password == null ? null : () => password,
+          onUserInfoRequest: password == null
+              ? null
+              : (request) =>
+                  List<String>.filled(request.prompts.length, password),
+          ident: 'SecureVaultEmbeddedSSH_1.0',
+        );
+        try {
+          return await body(client, variables);
+        } finally {
+          client.close();
+          try {
+            await client.done.timeout(const Duration(seconds: 2));
+          } catch (_) {}
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw StateError('SSH connection failed: $lastError');
   }
 
   Future<T> _withSftp<T>(Future<T> Function(SftpClient) body) async {
@@ -761,6 +875,20 @@ class SmbRemoteClient implements RemoteFileSystemClient {
   SmbRemoteClient(this.plugin);
 
   final CloudPluginDefinition plugin;
+
+  @override
+  bool get supportsPermissions => false;
+
+  @override
+  Future<void> setPermissions(
+    String path, {
+    required int mode,
+    required bool recursive,
+  }) async {
+    throw UnsupportedError(
+      'SMB permission changes are not exposed by the bundled dart_smb2/libsmb2 API.',
+    );
+  }
 
   @override
   Future<List<RemoteFileSystemEntry>> list(String path) async {
@@ -1035,6 +1163,18 @@ class RaidRemoteClient implements RemoteFileSystemClient {
   final bool mirror;
 
   @override
+  bool get supportsPermissions => false;
+
+  @override
+  Future<void> setPermissions(
+    String path, {
+    required int mode,
+    required bool recursive,
+  }) async {
+    throw UnsupportedError('Composite RAID locations do not expose chmod.');
+  }
+
+  @override
   Future<List<RemoteFileSystemEntry>> list(String path) async {
     final members = _members();
     final merged = <String, RemoteFileSystemEntry>{};
@@ -1244,6 +1384,11 @@ Duration _connectionTimeout(Map<String, String> variables) {
       max: 300,
     ),
   );
+}
+
+String _shellQuote(String value) {
+  final escaped = value.replaceAll("'", r"'\''");
+  return "'$escaped'";
 }
 
 String? _emptyToNull(String? value) {

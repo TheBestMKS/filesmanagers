@@ -7,6 +7,7 @@ enum ExplorerLocationKind {
   local,
   appHidden,
   phoneFiles,
+  mtp,
   network,
   cloudPlugin,
 }
@@ -48,6 +49,8 @@ enum FileContentKind {
   ebook,
   html,
   archive,
+  flash,
+  container,
   unknown,
 }
 

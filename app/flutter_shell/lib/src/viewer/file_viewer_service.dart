@@ -56,6 +56,14 @@ class FileViewerService {
     '.cbr',
     '.rev',
   };
+  static const flashExtensions = {
+    '.swf',
+  };
+  static const containerExtensions = {
+    '.hc',
+    '.tc',
+    '.vc',
+  };
   static const documentExtensions = {
     '.docx',
     '.doc',
@@ -99,6 +107,10 @@ class FileViewerService {
     if (imageExtensions.contains(extension)) return FileContentKind.image;
     if (htmlExtensions.contains(extension)) return FileContentKind.html;
     if (archiveExtensions.contains(extension)) return FileContentKind.archive;
+    if (flashExtensions.contains(extension)) return FileContentKind.flash;
+    if (containerExtensions.contains(extension)) {
+      return FileContentKind.container;
+    }
     if (textExtensions.contains(extension)) return FileContentKind.text;
     if (documentExtensions.contains(extension)) return FileContentKind.document;
     if (ebookExtensions.contains(extension)) return FileContentKind.ebook;
@@ -155,6 +167,26 @@ class FileViewerService {
         sourcePath: file.path,
         text: _zipSummary(bytes),
         bytes: bytes,
+        contentKind: kind,
+      );
+    }
+    if (kind == FileContentKind.flash && size <= 80 * 1024 * 1024) {
+      final bytes = await file.readAsBytes();
+      return FilePreview(
+        title: name,
+        subtitle: 'SWF/Flash, $size bytes',
+        sourcePath: file.path,
+        text: _flashSummary(bytes),
+        bytes: bytes,
+        contentKind: kind,
+      );
+    }
+    if (kind == FileContentKind.container) {
+      return FilePreview(
+        title: name,
+        subtitle: 'Encrypted disk container, $size bytes',
+        sourcePath: file.path,
+        text: _containerSummary(name, size),
         contentKind: kind,
       );
     }
@@ -266,6 +298,28 @@ class FileViewerService {
           decrypted: true,
           contentKind: kind);
     }
+    if (kind == FileContentKind.flash) {
+      return FilePreview(
+          title: name,
+          subtitle: subtitle,
+          sourcePath: sourcePath,
+          text: _flashSummary(bytes),
+          bytes: bytes,
+          containerInfo: containerInfo,
+          decrypted: true,
+          contentKind: kind);
+    }
+    if (kind == FileContentKind.container) {
+      return FilePreview(
+          title: name,
+          subtitle: subtitle,
+          sourcePath: sourcePath,
+          text: _containerSummary(name, bytes.length),
+          bytes: bytes,
+          containerInfo: containerInfo,
+          decrypted: true,
+          contentKind: kind);
+    }
     if (kind == FileContentKind.ebook) {
       final text = await _extractEbookText(name, bytes);
       return FilePreview(
@@ -322,6 +376,8 @@ class FileViewerService {
       FileContentKind.ebook => 'E-book file, $size bytes',
       FileContentKind.html => 'HTML page, $size bytes',
       FileContentKind.archive => 'Archive file, $size bytes',
+      FileContentKind.flash => 'SWF/Flash file, $size bytes',
+      FileContentKind.container => 'Encrypted disk container, $size bytes',
       FileContentKind.image => 'Image file, $size bytes',
       FileContentKind.text => 'Text file, $size bytes',
       FileContentKind.unknown => 'Unknown file type, $size bytes',
@@ -342,6 +398,10 @@ class FileViewerService {
         'HTML pages are rendered as a safe in-app text preview. External browser opening is available after the disclosure warning.',
       FileContentKind.archive =>
         'ZIP and RAR archives can be inspected and extracted from the file context menu.',
+      FileContentKind.flash =>
+        'SWF is recognized. Interactive playback requires an installed external handler or a Ruffle-compatible plugin.',
+      FileContentKind.container =>
+        'TrueCrypt/VeraCrypt-compatible container. Mounting uses the bundled container plugin or an installed VeraCrypt CLI/driver.',
       FileContentKind.unknown =>
         'No built-in viewer association exists yet. Add an extension association in settings or open externally.',
       _ => '',
@@ -440,6 +500,34 @@ class FileViewerService {
     } catch (error) {
       return 'ZIP archive could not be read: $error';
     }
+  }
+
+  static String _flashSummary(List<int> bytes) {
+    final signature = bytes.length >= 3
+        ? String.fromCharCodes(bytes.take(3)).toUpperCase()
+        : '';
+    final compressed = signature == 'CWS' || signature == 'ZWS';
+    final version = bytes.length > 3 ? bytes[3] : 0;
+    return [
+      'SWF / Flash object',
+      'Version: $version',
+      'Compressed: ${compressed ? 'yes' : 'no'}',
+      'Interactive opening is available through the preview menu and uses the configured external application or plugin handler.',
+    ].join('\n');
+  }
+
+  static String _containerSummary(String name, int size) {
+    final extension = extensionForName(name);
+    final family = switch (extension) {
+      '.hc' || '.vc' => 'VeraCrypt',
+      '.tc' => 'TrueCrypt',
+      _ => 'Encrypted disk',
+    };
+    return [
+      '$family container',
+      'Size: $size bytes',
+      'Use the container plugin profile or installed VeraCrypt CLI/driver to mount it as a location.',
+    ].join('\n');
   }
 
   static Future<String> _extractDocumentText(

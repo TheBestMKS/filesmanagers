@@ -8,6 +8,127 @@ import '../plugins/connection_profile.dart';
 import '../storage/app_paths.dart';
 import 'vault_crypto.dart';
 
+class FolderBehaviorSettings {
+  const FolderBehaviorSettings({
+    this.inheritParent = true,
+    this.rememberLocationOnOpen = true,
+    this.rememberLocationOnBackgroundCollapse = true,
+    this.rememberBackgroundVideo = true,
+    this.rememberBackgroundAudio = true,
+    this.forbidBackgroundPlayback = false,
+    this.forbidMiniPlayback = false,
+    this.rememberRecent = true,
+    this.showHiddenFiles = false,
+    this.showHiddenFolders = false,
+    this.showProtectedSystemFolders = false,
+    this.showProtectedSystemFiles = false,
+    this.blockScreenshots = false,
+    this.disableCamera = false,
+    this.disableMicrophone = false,
+  });
+
+  final bool inheritParent;
+  final bool rememberLocationOnOpen;
+  final bool rememberLocationOnBackgroundCollapse;
+  final bool rememberBackgroundVideo;
+  final bool rememberBackgroundAudio;
+  final bool forbidBackgroundPlayback;
+  final bool forbidMiniPlayback;
+  final bool rememberRecent;
+  final bool showHiddenFiles;
+  final bool showHiddenFolders;
+  final bool showProtectedSystemFolders;
+  final bool showProtectedSystemFiles;
+  final bool blockScreenshots;
+  final bool disableCamera;
+  final bool disableMicrophone;
+
+  FolderBehaviorSettings copyWith({
+    bool? inheritParent,
+    bool? rememberLocationOnOpen,
+    bool? rememberLocationOnBackgroundCollapse,
+    bool? rememberBackgroundVideo,
+    bool? rememberBackgroundAudio,
+    bool? forbidBackgroundPlayback,
+    bool? forbidMiniPlayback,
+    bool? rememberRecent,
+    bool? showHiddenFiles,
+    bool? showHiddenFolders,
+    bool? showProtectedSystemFolders,
+    bool? showProtectedSystemFiles,
+    bool? blockScreenshots,
+    bool? disableCamera,
+    bool? disableMicrophone,
+  }) {
+    return FolderBehaviorSettings(
+      inheritParent: inheritParent ?? this.inheritParent,
+      rememberLocationOnOpen:
+          rememberLocationOnOpen ?? this.rememberLocationOnOpen,
+      rememberLocationOnBackgroundCollapse:
+          rememberLocationOnBackgroundCollapse ??
+              this.rememberLocationOnBackgroundCollapse,
+      rememberBackgroundVideo:
+          rememberBackgroundVideo ?? this.rememberBackgroundVideo,
+      rememberBackgroundAudio:
+          rememberBackgroundAudio ?? this.rememberBackgroundAudio,
+      forbidBackgroundPlayback:
+          forbidBackgroundPlayback ?? this.forbidBackgroundPlayback,
+      forbidMiniPlayback: forbidMiniPlayback ?? this.forbidMiniPlayback,
+      rememberRecent: rememberRecent ?? this.rememberRecent,
+      showHiddenFiles: showHiddenFiles ?? this.showHiddenFiles,
+      showHiddenFolders: showHiddenFolders ?? this.showHiddenFolders,
+      showProtectedSystemFolders:
+          showProtectedSystemFolders ?? this.showProtectedSystemFolders,
+      showProtectedSystemFiles:
+          showProtectedSystemFiles ?? this.showProtectedSystemFiles,
+      blockScreenshots: blockScreenshots ?? this.blockScreenshots,
+      disableCamera: disableCamera ?? this.disableCamera,
+      disableMicrophone: disableMicrophone ?? this.disableMicrophone,
+    );
+  }
+
+  factory FolderBehaviorSettings.fromJson(Map<String, Object?> json) {
+    bool field(String key, bool fallback) => json[key] as bool? ?? fallback;
+    return FolderBehaviorSettings(
+      inheritParent: field('inheritParent', true),
+      rememberLocationOnOpen: field('rememberLocationOnOpen', true),
+      rememberLocationOnBackgroundCollapse:
+          field('rememberLocationOnBackgroundCollapse', true),
+      rememberBackgroundVideo: field('rememberBackgroundVideo', true),
+      rememberBackgroundAudio: field('rememberBackgroundAudio', true),
+      forbidBackgroundPlayback: field('forbidBackgroundPlayback', false),
+      forbidMiniPlayback: field('forbidMiniPlayback', false),
+      rememberRecent: field('rememberRecent', true),
+      showHiddenFiles: field('showHiddenFiles', false),
+      showHiddenFolders: field('showHiddenFolders', false),
+      showProtectedSystemFolders: field('showProtectedSystemFolders', false),
+      showProtectedSystemFiles: field('showProtectedSystemFiles', false),
+      blockScreenshots: field('blockScreenshots', false),
+      disableCamera: field('disableCamera', false),
+      disableMicrophone: field('disableMicrophone', false),
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'inheritParent': inheritParent,
+        'rememberLocationOnOpen': rememberLocationOnOpen,
+        'rememberLocationOnBackgroundCollapse':
+            rememberLocationOnBackgroundCollapse,
+        'rememberBackgroundVideo': rememberBackgroundVideo,
+        'rememberBackgroundAudio': rememberBackgroundAudio,
+        'forbidBackgroundPlayback': forbidBackgroundPlayback,
+        'forbidMiniPlayback': forbidMiniPlayback,
+        'rememberRecent': rememberRecent,
+        'showHiddenFiles': showHiddenFiles,
+        'showHiddenFolders': showHiddenFolders,
+        'showProtectedSystemFolders': showProtectedSystemFolders,
+        'showProtectedSystemFiles': showProtectedSystemFiles,
+        'blockScreenshots': blockScreenshots,
+        'disableCamera': disableCamera,
+        'disableMicrophone': disableMicrophone,
+      };
+}
+
 class SecuritySettings {
   const SecuritySettings({
     this.appPasswordSalt,
@@ -28,7 +149,9 @@ class SecuritySettings {
     this.blockScreenCapture = true,
     this.languageCode = 'ru',
     this.customLanguagePath,
+    this.loggingEnabled = true,
     this.extensionAssociations = const <String, String>{},
+    this.unknownExtensionModes = const <String, String>{},
     this.favoritePaths = const <String>[],
     this.rememberRecentFiles = true,
     this.recentSidebarCount = 5,
@@ -50,11 +173,13 @@ class SecuritySettings {
     this.documentExclusions = '',
     this.torrentEnabled = true,
     this.androidStoragePermissionPromptDismissed = false,
+    this.androidWorkProfilePromptDismissed = false,
     this.storeSettingsInUserProfile = false,
     this.rememberLastFolder = true,
     this.lastOpenedFolder,
     this.navigationPolicy = 'fallbackToLocations',
     this.interfaceTextScale = 1.0,
+    this.interfaceScale = 1.0,
     this.toolbarIconScale = 1.0,
     this.searchMode = 'name',
     this.searchUseRegex = false,
@@ -73,6 +198,7 @@ class SecuritySettings {
     this.rememberVideoPositions = true,
     this.rememberAudioPositions = true,
     this.folderSortModes = const <String, String>{},
+    this.folderBehaviorByPath = const <String, FolderBehaviorSettings>{},
     this.showVideoThumbnails = true,
     this.animateVideoThumbnails = false,
     this.showAudioArtwork = true,
@@ -82,6 +208,13 @@ class SecuritySettings {
     this.savedPreviewVisible = false,
     this.includeFavoritesInPathDropdown = false,
     this.locationSidebarCount = 5,
+    this.visibleNavigationSections = const <String>[
+      'explorer',
+      'gallery',
+      'music',
+      'video',
+      'documents',
+    ],
     this.requirePasswordOnAndroidResume = false,
     this.showHiddenFiles = false,
     this.showSystemFiles = false,
@@ -115,7 +248,9 @@ class SecuritySettings {
   final bool blockScreenCapture;
   final String languageCode;
   final String? customLanguagePath;
+  final bool loggingEnabled;
   final Map<String, String> extensionAssociations;
+  final Map<String, String> unknownExtensionModes;
   final List<String> favoritePaths;
   final bool rememberRecentFiles;
   final int recentSidebarCount;
@@ -137,11 +272,13 @@ class SecuritySettings {
   final String documentExclusions;
   final bool torrentEnabled;
   final bool androidStoragePermissionPromptDismissed;
+  final bool androidWorkProfilePromptDismissed;
   final bool storeSettingsInUserProfile;
   final bool rememberLastFolder;
   final String? lastOpenedFolder;
   final String navigationPolicy;
   final double interfaceTextScale;
+  final double interfaceScale;
   final double toolbarIconScale;
   final String searchMode;
   final bool searchUseRegex;
@@ -160,6 +297,7 @@ class SecuritySettings {
   final bool rememberVideoPositions;
   final bool rememberAudioPositions;
   final Map<String, String> folderSortModes;
+  final Map<String, FolderBehaviorSettings> folderBehaviorByPath;
   final bool showVideoThumbnails;
   final bool animateVideoThumbnails;
   final bool showAudioArtwork;
@@ -169,6 +307,7 @@ class SecuritySettings {
   final bool savedPreviewVisible;
   final bool includeFavoritesInPathDropdown;
   final int locationSidebarCount;
+  final List<String> visibleNavigationSections;
   final bool requirePasswordOnAndroidResume;
   final bool showHiddenFiles;
   final bool showSystemFiles;
@@ -215,7 +354,9 @@ class SecuritySettings {
     String? languageCode,
     String? customLanguagePath,
     bool clearCustomLanguagePath = false,
+    bool? loggingEnabled,
     Map<String, String>? extensionAssociations,
+    Map<String, String>? unknownExtensionModes,
     List<String>? favoritePaths,
     bool? rememberRecentFiles,
     int? recentSidebarCount,
@@ -237,12 +378,14 @@ class SecuritySettings {
     String? documentExclusions,
     bool? torrentEnabled,
     bool? androidStoragePermissionPromptDismissed,
+    bool? androidWorkProfilePromptDismissed,
     bool? storeSettingsInUserProfile,
     bool? rememberLastFolder,
     String? lastOpenedFolder,
     bool clearLastOpenedFolder = false,
     String? navigationPolicy,
     double? interfaceTextScale,
+    double? interfaceScale,
     double? toolbarIconScale,
     String? searchMode,
     bool? searchUseRegex,
@@ -263,6 +406,7 @@ class SecuritySettings {
     bool? rememberVideoPositions,
     bool? rememberAudioPositions,
     Map<String, String>? folderSortModes,
+    Map<String, FolderBehaviorSettings>? folderBehaviorByPath,
     bool? showVideoThumbnails,
     bool? animateVideoThumbnails,
     bool? showAudioArtwork,
@@ -272,6 +416,7 @@ class SecuritySettings {
     bool? savedPreviewVisible,
     bool? includeFavoritesInPathDropdown,
     int? locationSidebarCount,
+    List<String>? visibleNavigationSections,
     bool? requirePasswordOnAndroidResume,
     bool? showHiddenFiles,
     bool? showSystemFiles,
@@ -328,8 +473,11 @@ class SecuritySettings {
       customLanguagePath: clearCustomLanguagePath
           ? null
           : customLanguagePath ?? this.customLanguagePath,
+      loggingEnabled: loggingEnabled ?? this.loggingEnabled,
       extensionAssociations:
           extensionAssociations ?? this.extensionAssociations,
+      unknownExtensionModes:
+          unknownExtensionModes ?? this.unknownExtensionModes,
       favoritePaths: favoritePaths ?? this.favoritePaths,
       rememberRecentFiles: rememberRecentFiles ?? this.rememberRecentFiles,
       recentSidebarCount: recentSidebarCount ?? this.recentSidebarCount,
@@ -355,6 +503,8 @@ class SecuritySettings {
       androidStoragePermissionPromptDismissed:
           androidStoragePermissionPromptDismissed ??
               this.androidStoragePermissionPromptDismissed,
+      androidWorkProfilePromptDismissed: androidWorkProfilePromptDismissed ??
+          this.androidWorkProfilePromptDismissed,
       storeSettingsInUserProfile:
           storeSettingsInUserProfile ?? this.storeSettingsInUserProfile,
       rememberLastFolder: rememberLastFolder ?? this.rememberLastFolder,
@@ -363,6 +513,7 @@ class SecuritySettings {
           : lastOpenedFolder ?? this.lastOpenedFolder,
       navigationPolicy: navigationPolicy ?? this.navigationPolicy,
       interfaceTextScale: interfaceTextScale ?? this.interfaceTextScale,
+      interfaceScale: interfaceScale ?? this.interfaceScale,
       toolbarIconScale: toolbarIconScale ?? this.toolbarIconScale,
       searchMode: searchMode ?? this.searchMode,
       searchUseRegex: searchUseRegex ?? this.searchUseRegex,
@@ -389,6 +540,7 @@ class SecuritySettings {
       rememberAudioPositions:
           rememberAudioPositions ?? this.rememberAudioPositions,
       folderSortModes: folderSortModes ?? this.folderSortModes,
+      folderBehaviorByPath: folderBehaviorByPath ?? this.folderBehaviorByPath,
       showVideoThumbnails: showVideoThumbnails ?? this.showVideoThumbnails,
       animateVideoThumbnails:
           animateVideoThumbnails ?? this.animateVideoThumbnails,
@@ -403,6 +555,8 @@ class SecuritySettings {
       includeFavoritesInPathDropdown:
           includeFavoritesInPathDropdown ?? this.includeFavoritesInPathDropdown,
       locationSidebarCount: locationSidebarCount ?? this.locationSidebarCount,
+      visibleNavigationSections:
+          visibleNavigationSections ?? this.visibleNavigationSections,
       requirePasswordOnAndroidResume:
           requirePasswordOnAndroidResume ?? this.requirePasswordOnAndroidResume,
       showHiddenFiles: showHiddenFiles ?? this.showHiddenFiles,
@@ -431,6 +585,7 @@ class SecuritySettings {
     final envelope = json['savedFilePasswordEnvelope'];
     final commonEnvelope = json['commonEncryptionEnvelope'];
     final associations = json['extensionAssociations'];
+    final unknownModes = json['unknownExtensionModes'];
     final favorites = json['favoritePaths'];
     final recent = json['recentFilePaths'];
     final pluginProxy = json['pluginProxyById'];
@@ -438,6 +593,7 @@ class SecuritySettings {
     final disabledPlugins = json['disabledPluginIds'];
     final mediaResume = json['mediaResumePositions'];
     final folderSortModes = json['folderSortModes'];
+    final folderBehavior = json['folderBehaviorByPath'];
     final perFileEqualizer = json['perFileEqualizerPresets'];
     final connectionProfiles = json['connectionProfiles'];
     List<String> listField(String key) {
@@ -474,8 +630,13 @@ class SecuritySettings {
       blockScreenCapture: json['blockScreenCapture'] as bool? ?? true,
       languageCode: json['languageCode'] as String? ?? 'ru',
       customLanguagePath: json['customLanguagePath'] as String?,
+      loggingEnabled: json['loggingEnabled'] as bool? ?? true,
       extensionAssociations: associations is Map
           ? associations.map((key, value) =>
+              MapEntry(key.toString().toLowerCase(), value.toString()))
+          : const <String, String>{},
+      unknownExtensionModes: unknownModes is Map
+          ? unknownModes.map((key, value) =>
               MapEntry(key.toString().toLowerCase(), value.toString()))
           : const <String, String>{},
       favoritePaths: favorites is List
@@ -505,6 +666,8 @@ class SecuritySettings {
       torrentEnabled: json['torrentEnabled'] as bool? ?? true,
       androidStoragePermissionPromptDismissed:
           json['androidStoragePermissionPromptDismissed'] as bool? ?? false,
+      androidWorkProfilePromptDismissed:
+          json['androidWorkProfilePromptDismissed'] as bool? ?? false,
       storeSettingsInUserProfile:
           json['storeSettingsInUserProfile'] as bool? ?? false,
       rememberLastFolder: json['rememberLastFolder'] as bool? ?? true,
@@ -513,6 +676,7 @@ class SecuritySettings {
           json['navigationPolicy'] as String? ?? 'fallbackToLocations',
       interfaceTextScale:
           (json['interfaceTextScale'] as num?)?.toDouble() ?? 1.0,
+      interfaceScale: (json['interfaceScale'] as num?)?.toDouble() ?? 1.0,
       toolbarIconScale: (json['toolbarIconScale'] as num?)?.toDouble() ?? 1.0,
       searchMode: json['searchMode'] as String? ?? 'name',
       searchUseRegex: json['searchUseRegex'] as bool? ?? false,
@@ -556,6 +720,17 @@ class SecuritySettings {
               (key, value) => MapEntry(key.toString(), value.toString()),
             )
           : const <String, String>{},
+      folderBehaviorByPath: folderBehavior is Map
+          ? folderBehavior.map((key, value) {
+              final map = value is Map
+                  ? value.map((k, v) => MapEntry(k.toString(), v))
+                  : const <String, Object?>{};
+              return MapEntry(
+                key.toString(),
+                FolderBehaviorSettings.fromJson(map),
+              );
+            })
+          : const <String, FolderBehaviorSettings>{},
       showVideoThumbnails: json['showVideoThumbnails'] as bool? ?? true,
       animateVideoThumbnails: json['animateVideoThumbnails'] as bool? ?? false,
       showAudioArtwork: json['showAudioArtwork'] as bool? ?? true,
@@ -568,6 +743,17 @@ class SecuritySettings {
       includeFavoritesInPathDropdown:
           json['includeFavoritesInPathDropdown'] as bool? ?? false,
       locationSidebarCount: json['locationSidebarCount'] as int? ?? 5,
+      visibleNavigationSections: json['visibleNavigationSections'] is List
+          ? (json['visibleNavigationSections'] as List)
+              .map((item) => item.toString())
+              .toList()
+          : const <String>[
+              'explorer',
+              'gallery',
+              'music',
+              'video',
+              'documents',
+            ],
       requirePasswordOnAndroidResume:
           json['requirePasswordOnAndroidResume'] as bool? ?? false,
       showHiddenFiles: json['showHiddenFiles'] as bool? ?? false,
@@ -619,7 +805,9 @@ class SecuritySettings {
       'blockScreenCapture': blockScreenCapture,
       'languageCode': languageCode,
       'customLanguagePath': customLanguagePath,
+      'loggingEnabled': loggingEnabled,
       'extensionAssociations': extensionAssociations,
+      'unknownExtensionModes': unknownExtensionModes,
       'favoritePaths': favoritePaths,
       'rememberRecentFiles': rememberRecentFiles,
       'recentSidebarCount': recentSidebarCount,
@@ -642,11 +830,13 @@ class SecuritySettings {
       'torrentEnabled': torrentEnabled,
       'androidStoragePermissionPromptDismissed':
           androidStoragePermissionPromptDismissed,
+      'androidWorkProfilePromptDismissed': androidWorkProfilePromptDismissed,
       'storeSettingsInUserProfile': storeSettingsInUserProfile,
       'rememberLastFolder': rememberLastFolder,
       'lastOpenedFolder': lastOpenedFolder,
       'navigationPolicy': navigationPolicy,
       'interfaceTextScale': interfaceTextScale,
+      'interfaceScale': interfaceScale,
       'toolbarIconScale': toolbarIconScale,
       'searchMode': searchMode,
       'searchUseRegex': searchUseRegex,
@@ -665,6 +855,8 @@ class SecuritySettings {
       'rememberVideoPositions': rememberVideoPositions,
       'rememberAudioPositions': rememberAudioPositions,
       'folderSortModes': folderSortModes,
+      'folderBehaviorByPath': folderBehaviorByPath
+          .map((key, value) => MapEntry(key, value.toJson())),
       'showVideoThumbnails': showVideoThumbnails,
       'animateVideoThumbnails': animateVideoThumbnails,
       'showAudioArtwork': showAudioArtwork,
@@ -674,6 +866,7 @@ class SecuritySettings {
       'savedPreviewVisible': savedPreviewVisible,
       'includeFavoritesInPathDropdown': includeFavoritesInPathDropdown,
       'locationSidebarCount': locationSidebarCount,
+      'visibleNavigationSections': visibleNavigationSections,
       'requirePasswordOnAndroidResume': requirePasswordOnAndroidResume,
       'showHiddenFiles': showHiddenFiles,
       'showSystemFiles': showSystemFiles,
@@ -835,6 +1028,41 @@ class SecuritySettingsRepository {
     return next;
   }
 
+  Future<SecuritySettings> setUnknownExtensionMode(
+    SecuritySettings current,
+    String extension,
+    String mode,
+  ) async {
+    var normalized = extension.trim().toLowerCase();
+    if (normalized.isEmpty) return current;
+    if (!normalized.startsWith('.')) normalized = '.$normalized';
+    final nextModes = Map<String, String>.of(current.unknownExtensionModes);
+    if (mode.trim().isEmpty) {
+      nextModes.remove(normalized);
+    } else {
+      nextModes[normalized] = mode.trim();
+    }
+    final next = current.copyWith(unknownExtensionModes: nextModes);
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> setFolderBehavior(
+    SecuritySettings current,
+    String folderPath,
+    FolderBehaviorSettings behavior,
+  ) async {
+    final normalized = folderPath.trim();
+    if (normalized.isEmpty) return current;
+    final nextMap = Map<String, FolderBehaviorSettings>.of(
+      current.folderBehaviorByPath,
+    );
+    nextMap[normalized] = behavior;
+    final next = current.copyWith(folderBehaviorByPath: nextMap);
+    await save(next);
+    return next;
+  }
+
   Future<SecuritySettings> setFolderSortMode(
     SecuritySettings current,
     String folderPath,
@@ -979,7 +1207,9 @@ class SecuritySettingsRepository {
     bool? blockScreenCapture,
     String? languageCode,
     String? customLanguagePath,
+    bool? loggingEnabled,
     Map<String, String>? extensionAssociations,
+    Map<String, String>? unknownExtensionModes,
     bool? rememberRecentFiles,
     int? recentSidebarCount,
     int? recentRememberCount,
@@ -999,10 +1229,12 @@ class SecuritySettingsRepository {
     String? documentExclusions,
     bool? torrentEnabled,
     bool? androidStoragePermissionPromptDismissed,
+    bool? androidWorkProfilePromptDismissed,
     bool? storeSettingsInUserProfile,
     bool? rememberLastFolder,
     String? navigationPolicy,
     double? interfaceTextScale,
+    double? interfaceScale,
     double? toolbarIconScale,
     String? searchMode,
     bool? searchUseRegex,
@@ -1010,6 +1242,8 @@ class SecuritySettingsRepository {
     String? programProxy,
     String? globalPluginProxy,
     Map<String, String>? pluginProxyById,
+    List<String>? visibleNavigationSections,
+    Map<String, FolderBehaviorSettings>? folderBehaviorByPath,
     bool? enableBackgroundVideo,
     bool? enableMiniVideo,
     bool? enableMiniAudio,
@@ -1050,7 +1284,9 @@ class SecuritySettingsRepository {
       blockScreenCapture: blockScreenCapture,
       languageCode: languageCode,
       customLanguagePath: customLanguagePath,
+      loggingEnabled: loggingEnabled,
       extensionAssociations: extensionAssociations,
+      unknownExtensionModes: unknownExtensionModes,
       rememberRecentFiles: rememberRecentFiles,
       recentSidebarCount: recentSidebarCount,
       recentRememberCount: recentRememberCount,
@@ -1071,10 +1307,12 @@ class SecuritySettingsRepository {
       torrentEnabled: torrentEnabled,
       androidStoragePermissionPromptDismissed:
           androidStoragePermissionPromptDismissed,
+      androidWorkProfilePromptDismissed: androidWorkProfilePromptDismissed,
       storeSettingsInUserProfile: storeSettingsInUserProfile,
       rememberLastFolder: rememberLastFolder,
       navigationPolicy: navigationPolicy,
       interfaceTextScale: interfaceTextScale,
+      interfaceScale: interfaceScale,
       toolbarIconScale: toolbarIconScale,
       searchMode: searchMode,
       searchUseRegex: searchUseRegex,
@@ -1088,6 +1326,8 @@ class SecuritySettingsRepository {
       clearGlobalPluginProxy:
           globalPluginProxy != null && globalPluginProxy.isEmpty,
       pluginProxyById: pluginProxyById,
+      visibleNavigationSections: visibleNavigationSections,
+      folderBehaviorByPath: folderBehaviorByPath,
       enableBackgroundVideo: enableBackgroundVideo,
       enableMiniVideo: enableMiniVideo,
       enableMiniAudio: enableMiniAudio,

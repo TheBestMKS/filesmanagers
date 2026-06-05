@@ -65,6 +65,18 @@ class PlatformServices {
     }
   }
 
+  static Future<void> setPrivacyHints({
+    required bool disableCamera,
+    required bool disableMicrophone,
+  }) async {
+    if (Platform.isAndroid) {
+      await _channel.invokeMethod<void>('setPrivacyHints', {
+        'disableCamera': disableCamera,
+        'disableMicrophone': disableMicrophone,
+      });
+    }
+  }
+
   static Future<String?> getInitialOpenPath() async {
     if (Platform.isAndroid) {
       return _channel.invokeMethod<String>('getInitialOpenPath');

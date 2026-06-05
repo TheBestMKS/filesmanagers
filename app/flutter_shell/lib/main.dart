@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -25,11 +25,16 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.8';
+const _appVersion = '0.12.9';
 final _sharedMediaSession = _SharedMediaSession();
 
-void main(List<String> args) {
+Future<void> main(List<String> args) async {
+  WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  final initialSettings = await SecuritySettingsRepository()
+      .load()
+      .catchError((_) => const SecuritySettings());
+  AppLog.enabled = initialSettings.loggingEnabled;
   unawaited(AppLog.write('Application start ${args.join(' ')}'));
   runApp(SecureVaultApp(initialPath: args.isEmpty ? null : args.first));
 }
@@ -257,6 +262,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Map<String, String> _clipboardNames = const <String, String>{};
   bool _clipboardCut = false;
   bool _showingRecent = false;
+  bool _showingLocations = false;
   String _searchQuery = '';
   String _searchMode = 'name';
   bool _searchUseRegex = false;
@@ -309,6 +315,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
 
   Future<void> _boot() async {
     final settings = await _settingsRepo.load();
+    AppLog.enabled = settings.loggingEnabled;
     final language = await AppLanguage.load(settings);
     MediaArtworkService.configure(
       cacheEnabled: settings.cacheThumbnailsInMemory,
@@ -478,6 +485,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   void _openPath(String path, {bool recordHistory = true}) {
     final previousPath = _currentPath;
     unawaited(_rememberOpenedFolder(path));
+    unawaited(_applyFolderRuntimeProtection(path));
     setState(() {
       if (recordHistory &&
           previousPath != null &&
@@ -491,6 +499,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _page = ShellPage.explorer;
       _activePluginMediaSection = null;
       _showingRecent = false;
+      _showingLocations = false;
       _currentPath = path;
       _selected = null;
       _preview = null;
@@ -503,6 +512,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
 
   Future<void> _rememberOpenedFolder(String path) async {
     if (!_settings.rememberLastFolder || path.trim().isEmpty) return;
+    if (!_folderBehaviorFor(path).rememberLocationOnOpen) return;
     final next = await _settingsRepo
         .recordLastOpenedFolder(_settings, path)
         .catchError((_) => _settings);
@@ -522,12 +532,18 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _openPath(path, recordHistory: recordHistory);
       } else {
         _snack(_language.t('path.unavailable'));
+        _openLocationsHome();
       }
       return;
     }
     final type = await FileSystemEntity.type(path, followLinks: false);
     if (type == FileSystemEntityType.directory) {
       _openPath(path, recordHistory: recordHistory);
+      return;
+    }
+    if (type == FileSystemEntityType.notFound) {
+      _snack(_language.t('path.unavailable'));
+      _openLocationsHome();
       return;
     }
     final policy = _settings.navigationPolicy;
@@ -574,6 +590,62 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         filePassword: _activeFilePassword(),
         decryptNames: _settings.decryptNamesInExplorer,
       );
+
+  FolderBehaviorSettings _folderBehaviorFor(String? path) {
+    final normalized = _normalizeSettingPath(path);
+    if (normalized.isEmpty) return const FolderBehaviorSettings();
+    final visited = <String>{};
+    var cursor = normalized;
+    while (cursor.isNotEmpty && visited.add(cursor)) {
+      final behavior = _settings.folderBehaviorByPath[cursor];
+      if (behavior != null && !behavior.inheritParent) return behavior;
+      final parent = _settingParentPath(cursor);
+      if (parent == cursor || parent.isEmpty) break;
+      cursor = parent;
+    }
+    return const FolderBehaviorSettings();
+  }
+
+  String _normalizeSettingPath(String? path) {
+    final value = path?.trim() ?? '';
+    if (value.isEmpty) return '';
+    if (Platform.isWindows && !value.startsWith(RegExp(r'^[a-z]+://'))) {
+      return value.replaceAll('/', r'\').toLowerCase();
+    }
+    return value.replaceAll(RegExp(r'/+$'), '');
+  }
+
+  String _settingParentPath(String path) {
+    if (path.startsWith('remote://')) {
+      return _explorer.parentPathFor(path);
+    }
+    try {
+      return Directory(path).parent.path;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  bool _rememberRecentForEntry(ExplorerEntry entry) {
+    if (!_settings.rememberRecentFiles) return false;
+    final parent =
+        entry.isDirectory ? entry.path : _explorer.parentPathFor(entry.path);
+    return _folderBehaviorFor(parent).rememberRecent;
+  }
+
+  Future<void> _applyFolderRuntimeProtection(String path) async {
+    final behavior = _folderBehaviorFor(path);
+    await PlatformServices.setScreenProtection(
+      _settings.blockScreenCapture || behavior.blockScreenshots,
+    ).catchError((_) {});
+    if (Platform.isAndroid &&
+        (behavior.disableCamera || behavior.disableMicrophone)) {
+      await PlatformServices.setPrivacyHints(
+        disableCamera: behavior.disableCamera,
+        disableMicrophone: behavior.disableMicrophone,
+      ).catchError((_) {});
+    }
+  }
 
   List<CloudPluginDefinition> _enabledPluginDefs([
     List<CloudPluginDefinition>? plugins,
@@ -625,10 +697,40 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         unawaited(_toggleHiddenFiles());
       case _ExplorerMenuAction.toggleSystem:
         unawaited(_toggleSystemFiles());
+      case _ExplorerMenuAction.folderSettings:
+        final path = _currentPath;
+        if (path != null && !_showingRecent && !_showingLocations) {
+          unawaited(_showFolderSettingsDialog(path));
+        }
     }
   }
 
   Future<void> _refresh() async {
+    if (_showingLocations) {
+      final enabledPluginDefs = _enabledPluginDefs();
+      _explorer.configurePlugins(
+          enabledPluginDefs, _settings.connectionProfiles);
+      final locations = await _explorer.loadLocations(
+        enabledPluginDefs,
+        _settings.connectionProfiles,
+      );
+      final extraPaths = <String>[
+        ..._settings.galleryFolders,
+        ..._settings.musicFolders,
+        ..._settings.videoFolders,
+        ..._settings.documentFolders,
+      ];
+      if (!mounted) return;
+      setState(() {
+        _locations = locations;
+        _snapshot = _explorer.snapshotForLocations(
+          _language.t('nav.explorer'),
+          locations,
+          extraPaths: extraPaths,
+        );
+      });
+      return;
+    }
     final pluginSection = _activePluginMediaSection;
     if (pluginSection != null) {
       _openPluginMediaSection(pluginSection);
@@ -930,6 +1032,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _page = ShellPage.explorer;
       _activePluginMediaSection = null;
       _showingRecent = false;
+      _showingLocations = true;
       _selected = null;
       _preview = null;
       _mediaPlaylist = const [];
@@ -1017,6 +1120,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _page = page;
       _activePluginMediaSection = null;
       _showingRecent = false;
+      _showingLocations = false;
       _currentPath = label;
       _selected = null;
       _preview = null;
@@ -1170,6 +1274,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _page = ShellPage.explorer;
       _activePluginMediaSection = null;
       _showingRecent = true;
+      _showingLocations = false;
       _selected = null;
       _preview = null;
       _mediaPlaylist = const [];
@@ -1187,6 +1292,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _page = ShellPage.explorer;
       _activePluginMediaSection = null;
       _showingRecent = false;
+      _showingLocations = false;
       _selected = null;
       _preview = null;
       _mediaPlaylist = const [];
@@ -1334,7 +1440,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       } else if (_isMediaLibraryPage && _isPlayablePreview(preview)) {
         await _playMediaPreviewInSession(preview, playlist);
       }
-      if (_settings.rememberRecentFiles) {
+      if (_rememberRecentForEntry(entry)) {
         final next =
             await _settingsRepo.recordRecentFile(_settings, entry.path);
         if (mounted) setState(() => _settings = next);
@@ -1381,25 +1487,26 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     if (mounted &&
         openedPreview != null &&
         openedPreview.contentKind == FileContentKind.unknown) {
-      final openExternal = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(_language.t('preview.unsupported.title')),
-          content: Text(_language.t('preview.unsupported.body')),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: Text(_language.t('common.cancel')),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: Text(_language.t('preview.external')),
-            ),
-          ],
-        ),
-      );
-      if (openExternal == true) {
-        await _openPreviewExternal(openedPreview);
+      final resolved = await _resolveUnknownPreview(entry, openedPreview);
+      if (resolved == null) return;
+      if (resolved.contentKind != openedPreview.contentKind ||
+          resolved.text != openedPreview.text) {
+        openedPreview = resolved;
+        final playlist = mediaPlaylistOverride?.isNotEmpty == true
+            ? _playlistWithSelectedPreview(
+                resolved,
+                mediaPlaylistOverride!,
+                selectedPath: entry.path,
+              )
+            : await _buildMediaPlaylist(entry, resolved);
+        final imagePlaylist = await _buildImagePlaylist(entry, resolved);
+        if (mounted && _selected?.path == entry.path) {
+          setState(() {
+            _preview = Future<FilePreview>.value(resolved);
+            _mediaPlaylist = playlist;
+            _imagePlaylist = imagePlaylist;
+          });
+        }
       }
     }
     if (mounted &&
@@ -1412,12 +1519,146 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _isPlayablePreview(openedPreview)) {
       await _playMediaPreviewInSession(openedPreview, _mediaPlaylist);
     }
-    if (_settings.rememberRecentFiles) {
+    if (_rememberRecentForEntry(entry)) {
       final next = await _settingsRepo.recordRecentFile(_settings, entry.path);
       if (mounted) {
         setState(() => _settings = next);
       }
     }
+  }
+
+  Future<FilePreview?> _resolveUnknownPreview(
+    ExplorerEntry entry,
+    FilePreview preview,
+  ) async {
+    final extension = FileViewerService.extensionForName(entry.name).isNotEmpty
+        ? FileViewerService.extensionForName(entry.name)
+        : FileViewerService.extensionForName(entry.path);
+    final storedMode = _settings.unknownExtensionModes[extension];
+    final choice = storedMode == null || storedMode.isEmpty
+        ? await _unknownExtensionDialog(extension)
+        : (mode: storedMode, remember: false);
+    if (choice == null) return preview;
+    if (choice.remember && extension.isNotEmpty) {
+      final next = await _settingsRepo.setUnknownExtensionMode(
+        _settings,
+        extension,
+        choice.mode,
+      );
+      if (mounted) setState(() => _settings = next);
+    }
+    if (choice.mode == 'external') {
+      await _openPreviewExternal(preview);
+      return null;
+    }
+    return _coercePreviewKind(preview, choice.mode);
+  }
+
+  Future<({String mode, bool remember})?> _unknownExtensionDialog(
+    String extension,
+  ) async {
+    var remember = extension.isNotEmpty;
+    return showDialog<({String mode, bool remember})>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(_language.t('preview.unsupported.title')),
+          content: SizedBox(
+            width: 460,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(_language.t('preview.unknown.body')),
+              if (extension.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text('${_language.t('common.extension')}: $extension'),
+                CheckboxListTile(
+                  value: remember,
+                  onChanged: (value) =>
+                      setDialogState(() => remember = value ?? false),
+                  title: Text(_language.t('preview.unknown.remember')),
+                ),
+              ],
+            ]),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_language.t('common.cancel')),
+            ),
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(context, (mode: 'text', remember: remember)),
+              child: Text(_language.t('preview.force.text')),
+            ),
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(context, (mode: 'audio', remember: remember)),
+              child: Text(_language.t('preview.force.audio')),
+            ),
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(context, (mode: 'video', remember: remember)),
+              child: Text(_language.t('preview.force.video')),
+            ),
+            TextButton(
+              onPressed: () =>
+                  Navigator.pop(context, (mode: 'image', remember: remember)),
+              child: Text(_language.t('preview.force.image')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                  context, (mode: 'external', remember: remember)),
+              child: Text(_language.t('preview.external')),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<FilePreview> _coercePreviewKind(
+    FilePreview preview,
+    String mode,
+  ) async {
+    final kind = switch (mode) {
+      'text' => FileContentKind.text,
+      'audio' => FileContentKind.audio,
+      'video' => FileContentKind.video,
+      'image' => FileContentKind.image,
+      _ => FileContentKind.unknown,
+    };
+    var bytes = preview.bytes;
+    var text = preview.text;
+    final path = preview.sourcePath;
+    if (bytes == null &&
+        path != null &&
+        !_explorer.isVirtualPath(path) &&
+        !_isHttpMedia(path)) {
+      try {
+        final file = File(path);
+        final stat = await file.stat();
+        final limit = kind == FileContentKind.image
+            ? 25 * 1024 * 1024
+            : kind == FileContentKind.text
+                ? 5 * 1024 * 1024
+                : 80 * 1024 * 1024;
+        if (stat.size <= limit) {
+          bytes = await file.readAsBytes();
+        }
+      } catch (_) {}
+    }
+    if (kind == FileContentKind.text && bytes != null) {
+      text = FileViewerService.bytesToText(bytes);
+    }
+    return FilePreview(
+      title: preview.title,
+      subtitle: '${preview.subtitle}\n${_language.t('preview.forced')}',
+      sourcePath: preview.sourcePath,
+      text: text,
+      bytes: bytes,
+      containerInfo: preview.containerInfo,
+      decrypted: preview.decrypted,
+      contentKind: kind,
+    );
   }
 
   Future<bool> _navigationEntryReturnsToLocations(String? path) async {
@@ -2347,6 +2588,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       case _EntryAction.useAsMusic:
       case _EntryAction.useAsMultimedia:
         await _useFolderAs(entry, action);
+      case _EntryAction.folderSettings:
+        await _showFolderSettingsDialog(entry.path);
+      case _EntryAction.permissions:
+        await _changePermissions(entry);
       case _EntryAction.editConnectionProfile:
         await _editConnectionProfile(entry);
       case _EntryAction.deleteConnectionProfile:
@@ -3174,6 +3419,229 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     );
   }
 
+  Future<void> _changePermissions(ExplorerEntry entry) async {
+    if (!_explorer.supportsPermissions(entry.path)) {
+      _snack(_language.t('permissions.unsupported'));
+      return;
+    }
+    final modeController = TextEditingController(text: '755');
+    var recursive = entry.isDirectory;
+    final result = await showDialog<({int mode, bool recursive})>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(_language.t('permissions.title')),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Text(entry.path),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: modeController,
+                  keyboardType: TextInputType.number,
+                  decoration: InputDecoration(
+                    labelText: _language.t('permissions.mode'),
+                    helperText: '755, 775, 644',
+                  ),
+                ),
+                if (entry.isDirectory)
+                  SwitchListTile(
+                    value: recursive,
+                    onChanged: (value) =>
+                        setDialogState(() => recursive = value),
+                    title: Text(_language.t('permissions.recursive')),
+                  ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_language.t('common.cancel')),
+            ),
+            FilledButton(
+              onPressed: () {
+                final text = modeController.text.trim().replaceFirst(
+                      RegExp(r'^0+'),
+                      '',
+                    );
+                final mode = int.tryParse(text.isEmpty ? '0' : text, radix: 8);
+                if (mode == null || mode < 0 || mode > 0x1FF) {
+                  return;
+                }
+                Navigator.pop(context, (mode: mode, recursive: recursive));
+              },
+              child: Text(_language.t('search.apply')),
+            ),
+          ],
+        ),
+      ),
+    );
+    modeController.dispose();
+    if (result == null) return;
+    try {
+      await _explorer.setPermissions(
+        entry.path,
+        mode: result.mode,
+        recursive: result.recursive,
+      );
+      _snack(_language.t('permissions.changed'));
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _showFolderSettingsDialog(String path) async {
+    final normalized = _normalizeSettingPath(path);
+    if (normalized.isEmpty) return;
+    var behavior = _settings.folderBehaviorByPath[normalized] ??
+        const FolderBehaviorSettings();
+    final result = await showDialog<FolderBehaviorSettings>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          SwitchListTile item(
+            String key,
+            bool value,
+            FolderBehaviorSettings Function(bool) update,
+          ) =>
+              SwitchListTile(
+                dense: true,
+                value: value,
+                onChanged: behavior.inheritParent &&
+                        key != 'folder.settings.inherit'
+                    ? null
+                    : (next) => setDialogState(() => behavior = update(next)),
+                title: Text(_language.t(key)),
+              );
+
+          return AlertDialog(
+            title: Text(_language.t('folder.settings.title')),
+            content: SizedBox(
+              width: 560,
+              child: SingleChildScrollView(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: SelectableText(
+                      path,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  item(
+                    'folder.settings.inherit',
+                    behavior.inheritParent,
+                    (v) => behavior.copyWith(inheritParent: v),
+                  ),
+                  const Divider(),
+                  item(
+                    'folder.settings.remember.open',
+                    behavior.rememberLocationOnOpen,
+                    (v) => behavior.copyWith(rememberLocationOnOpen: v),
+                  ),
+                  item(
+                    'folder.settings.remember.background.collapse',
+                    behavior.rememberLocationOnBackgroundCollapse,
+                    (v) => behavior.copyWith(
+                      rememberLocationOnBackgroundCollapse: v,
+                    ),
+                  ),
+                  item(
+                    'folder.settings.remember.background.video',
+                    behavior.rememberBackgroundVideo,
+                    (v) => behavior.copyWith(rememberBackgroundVideo: v),
+                  ),
+                  item(
+                    'folder.settings.remember.background.audio',
+                    behavior.rememberBackgroundAudio,
+                    (v) => behavior.copyWith(rememberBackgroundAudio: v),
+                  ),
+                  item(
+                    'folder.settings.forbid.background',
+                    behavior.forbidBackgroundPlayback,
+                    (v) => behavior.copyWith(forbidBackgroundPlayback: v),
+                  ),
+                  item(
+                    'folder.settings.forbid.mini',
+                    behavior.forbidMiniPlayback,
+                    (v) => behavior.copyWith(forbidMiniPlayback: v),
+                  ),
+                  item(
+                    'folder.settings.remember.recent',
+                    behavior.rememberRecent,
+                    (v) => behavior.copyWith(rememberRecent: v),
+                  ),
+                  const Divider(),
+                  item(
+                    'folder.settings.show.hidden.files',
+                    behavior.showHiddenFiles,
+                    (v) => behavior.copyWith(showHiddenFiles: v),
+                  ),
+                  item(
+                    'folder.settings.show.hidden.folders',
+                    behavior.showHiddenFolders,
+                    (v) => behavior.copyWith(showHiddenFolders: v),
+                  ),
+                  item(
+                    'folder.settings.show.system.folders',
+                    behavior.showProtectedSystemFolders,
+                    (v) => behavior.copyWith(showProtectedSystemFolders: v),
+                  ),
+                  item(
+                    'folder.settings.show.system.files',
+                    behavior.showProtectedSystemFiles,
+                    (v) => behavior.copyWith(showProtectedSystemFiles: v),
+                  ),
+                  const Divider(),
+                  item(
+                    'folder.settings.block.screenshots',
+                    behavior.blockScreenshots,
+                    (v) => behavior.copyWith(blockScreenshots: v),
+                  ),
+                  item(
+                    'folder.settings.disable.camera',
+                    behavior.disableCamera,
+                    (v) => behavior.copyWith(disableCamera: v),
+                  ),
+                  item(
+                    'folder.settings.disable.microphone',
+                    behavior.disableMicrophone,
+                    (v) => behavior.copyWith(disableMicrophone: v),
+                  ),
+                ]),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(_language.t('common.cancel')),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, behavior),
+                child: Text(_language.t('common.save')),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (result == null) return;
+    final next = await _settingsRepo.setFolderBehavior(
+      _settings,
+      normalized,
+      result,
+    );
+    if (mounted) {
+      setState(() => _settings = next);
+      _snack(_language.t('settings.saved'));
+      unawaited(_applyFolderRuntimeProtection(path));
+      await _refresh();
+    }
+  }
+
   Future<void> _removePathReferences(String path) async {
     var next = _settings;
     if (next.favoritePaths.contains(path)) {
@@ -3701,6 +4169,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     required bool blockScreenCapture,
     required String languageCode,
     required String? customLanguagePath,
+    required bool loggingEnabled,
     required Map<String, String> extensionAssociations,
     required bool rememberRecentFiles,
     required int recentSidebarCount,
@@ -3725,12 +4194,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     required bool rememberLastFolder,
     required String navigationPolicy,
     required double interfaceTextScale,
+    required double interfaceScale,
     required double toolbarIconScale,
     required String searchMode,
     required bool searchUseRegex,
     required bool searchRecursive,
     required String? programProxy,
     required String? globalPluginProxy,
+    required List<String> visibleNavigationSections,
     required bool enableBackgroundVideo,
     required bool enableMiniVideo,
     required bool enableMiniAudio,
@@ -3782,6 +4253,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       blockScreenCapture: blockScreenCapture,
       languageCode: languageCode,
       customLanguagePath: customLanguagePath,
+      loggingEnabled: loggingEnabled,
       extensionAssociations: extensionAssociations,
       rememberRecentFiles: rememberRecentFiles,
       recentSidebarCount: recentSidebarCount,
@@ -3806,12 +4278,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       rememberLastFolder: rememberLastFolder,
       navigationPolicy: navigationPolicy,
       interfaceTextScale: interfaceTextScale,
+      interfaceScale: interfaceScale,
       toolbarIconScale: toolbarIconScale,
       searchMode: searchMode,
       searchUseRegex: searchUseRegex,
       searchRecursive: searchRecursive,
       programProxy: programProxy,
       globalPluginProxy: globalPluginProxy,
+      visibleNavigationSections: visibleNavigationSections,
       enableBackgroundVideo: enableBackgroundVideo,
       enableMiniVideo: enableMiniVideo,
       enableMiniAudio: enableMiniAudio,
@@ -3836,6 +4310,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       rememberVideoPositions: rememberVideoPositions,
       rememberAudioPositions: rememberAudioPositions,
     );
+    AppLog.enabled = next.loggingEnabled;
     MediaArtworkService.configure(
       cacheEnabled: next.cacheThumbnailsInMemory,
       persistentCacheEnabled: true,
@@ -4142,6 +4617,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
           : ShellPage.music;
       _activePluginMediaSection = section;
       _showingRecent = false;
+      _showingLocations = false;
       _currentPath = section.title;
       _selected = null;
       _preview = null;
@@ -4368,8 +4844,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   double _effectiveTextScale(BuildContext context) {
-    final interfaceScale =
-        _settings.interfaceTextScale.clamp(0.55, 2.2).toDouble();
+    final interfaceScale = (_settings.interfaceTextScale *
+            _settings.interfaceScale.clamp(0.55, 2.2))
+        .clamp(0.55, 2.2)
+        .toDouble();
     final dpi = _settings.autoScaleForDpi
         ? (MediaQuery.of(context).devicePixelRatio / 2.5).clamp(0.9, 1.35)
         : 1.0;
@@ -4377,12 +4855,25 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   double _effectiveIconScale(BuildContext context) {
-    final interfaceScale =
-        _settings.interfaceTextScale.clamp(0.55, 2.2).toDouble();
+    final interfaceScale = _settings.interfaceScale.clamp(0.55, 2.2).toDouble();
     final dpi = _settings.autoScaleForDpi
         ? (MediaQuery.of(context).devicePixelRatio / 2.5).clamp(0.9, 1.35)
         : 1.0;
     return (_settings.fileIconScale * dpi * interfaceScale).clamp(0.55, 2.5);
+  }
+
+  bool get _effectiveShowHiddenFiles {
+    final behavior = _folderBehaviorFor(_currentPath);
+    return _settings.showHiddenFiles ||
+        behavior.showHiddenFiles ||
+        behavior.showHiddenFolders;
+  }
+
+  bool get _effectiveShowSystemFiles {
+    final behavior = _folderBehaviorFor(_currentPath);
+    return _settings.showSystemFiles ||
+        behavior.showProtectedSystemFiles ||
+        behavior.showProtectedSystemFolders;
   }
 
   Future<void> _showAbout() async {
@@ -4583,6 +5074,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                     page: _page,
                     pluginMediaSections: _pluginMediaSections,
                     activePluginSectionId: _activePluginMediaSection?.runtimeId,
+                    visibleNavigationSections:
+                        _settings.visibleNavigationSections,
                     showTorrentSection: _settings.torrentEnabled &&
                         _pluginRuntime().hasTorrentPlugin,
                     showMusicSourceAdd:
@@ -4681,7 +5174,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                   language: _language,
                                   currentPath: _showingRecent
                                       ? _language.t('recent.title')
-                                      : _currentPath,
+                                      : _showingLocations
+                                          ? _language.t('nav.explorer')
+                                          : _currentPath,
                                   snapshot: _snapshot,
                                   selected: _selected,
                                   preview: _preview,
@@ -4704,8 +5199,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                       .toDouble(),
                                   showPathToolbar: _page != ShellPage.torrent,
                                   showToolbarActions: !Platform.isAndroid,
-                                  showHiddenFiles: _settings.showHiddenFiles,
-                                  showSystemFiles: _settings.showSystemFiles,
+                                  showHiddenFiles: _effectiveShowHiddenFiles,
+                                  showSystemFiles: _effectiveShowSystemFiles,
                                   onPreviewResize: (delta) => setState(
                                     () => _previewWidth =
                                         (_previewWidth - delta)
@@ -4791,8 +5286,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                               language: _language,
                               sortLabel:
                                   _sortModeForCurrentPath().label(_language),
-                              showHiddenFiles: _settings.showHiddenFiles,
-                              showSystemFiles: _settings.showSystemFiles,
+                              showHiddenFiles: _effectiveShowHiddenFiles,
+                              showSystemFiles: _effectiveShowSystemFiles,
                               iconScale: 1,
                               onSelected: _handleExplorerMenuAction,
                             ),
@@ -4840,7 +5335,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   Widget _scaledInterface(Widget child) {
-    final scale = _settings.interfaceTextScale.clamp(0.55, 2.2).toDouble();
+    final scale = (_settings.interfaceTextScale *
+            _settings.interfaceScale.clamp(0.55, 2.2))
+        .clamp(0.55, 2.2)
+        .toDouble();
     return MediaQuery(
       data:
           MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(scale)),
@@ -5275,6 +5773,8 @@ enum _EntryAction {
   useAsVideo,
   useAsMusic,
   useAsMultimedia,
+  folderSettings,
+  permissions,
   editConnectionProfile,
   deleteConnectionProfile,
 }
@@ -5292,7 +5792,14 @@ enum _PreviewAction {
   hide
 }
 
-enum _ExplorerMenuAction { upload, download, sort, toggleHidden, toggleSystem }
+enum _ExplorerMenuAction {
+  upload,
+  download,
+  sort,
+  toggleHidden,
+  toggleSystem,
+  folderSettings,
+}
 
 class _LockScreen extends StatefulWidget {
   const _LockScreen({
@@ -5403,6 +5910,7 @@ class _Sidebar extends StatelessWidget {
     required this.page,
     required this.pluginMediaSections,
     required this.activePluginSectionId,
+    required this.visibleNavigationSections,
     required this.showTorrentSection,
     required this.showMusicSourceAdd,
     required this.onLocation,
@@ -5433,6 +5941,7 @@ class _Sidebar extends StatelessWidget {
   final ShellPage page;
   final List<PluginMediaSection> pluginMediaSections;
   final String? activePluginSectionId;
+  final List<String> visibleNavigationSections;
   final bool showTorrentSection;
   final bool showMusicSourceAdd;
   final ValueChanged<ExplorerLocation> onLocation;
@@ -5464,6 +5973,9 @@ class _Sidebar extends StatelessWidget {
       callback();
     }
 
+    final visible = visibleNavigationSections.toSet();
+    bool sectionVisible(String id) => visible.contains(id);
+
     return Material(
       color: const Color(0xFFEDF3FA),
       child: ListView(padding: const EdgeInsets.all(14), children: [
@@ -5490,34 +6002,39 @@ class _Sidebar extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 14),
-        _nav(
-          Icons.folder_open,
-          language.t('nav.explorer'),
-          page == ShellPage.explorer,
-          () => activate(onExplorer),
-        ),
-        _nav(
-          Icons.photo_library_outlined,
-          language.t('nav.gallery'),
-          page == ShellPage.gallery,
-          () => activate(() => onMediaSection(MediaSection.gallery)),
-        ),
-        _musicNav(
-          selected: page == ShellPage.music && activePluginSectionId == null,
-          activate: activate,
-        ),
-        _nav(
-          Icons.movie_outlined,
-          language.t('nav.video'),
-          page == ShellPage.video,
-          () => activate(() => onMediaSection(MediaSection.video)),
-        ),
-        _nav(
-          Icons.description_outlined,
-          language.t('nav.documents'),
-          page == ShellPage.documents,
-          () => activate(() => onMediaSection(MediaSection.documents)),
-        ),
+        if (sectionVisible('explorer'))
+          _nav(
+            Icons.folder_open,
+            language.t('nav.explorer'),
+            page == ShellPage.explorer,
+            () => activate(onExplorer),
+          ),
+        if (sectionVisible('gallery'))
+          _nav(
+            Icons.photo_library_outlined,
+            language.t('nav.gallery'),
+            page == ShellPage.gallery,
+            () => activate(() => onMediaSection(MediaSection.gallery)),
+          ),
+        if (sectionVisible('music'))
+          _musicNav(
+            selected: page == ShellPage.music && activePluginSectionId == null,
+            activate: activate,
+          ),
+        if (sectionVisible('video'))
+          _nav(
+            Icons.movie_outlined,
+            language.t('nav.video'),
+            page == ShellPage.video,
+            () => activate(() => onMediaSection(MediaSection.video)),
+          ),
+        if (sectionVisible('documents'))
+          _nav(
+            Icons.description_outlined,
+            language.t('nav.documents'),
+            page == ShellPage.documents,
+            () => activate(() => onMediaSection(MediaSection.documents)),
+          ),
         if (showTorrentSection)
           _nav(
             Icons.hub_outlined,
@@ -5532,12 +6049,6 @@ class _Sidebar extends StatelessWidget {
             activePluginSectionId == section.runtimeId,
             () => activate(() => onPluginMediaSection(section)),
           ),
-        _nav(
-          Icons.tune,
-          language.t('nav.settings'),
-          page == ShellPage.settings,
-          () => activate(onSettings),
-        ),
         const SizedBox(height: 12),
         if (recentPaths.isNotEmpty) ...[
           _sectionTitle(language.t('recent.title')),
@@ -5661,6 +6172,13 @@ class _Sidebar extends StatelessWidget {
             title: Text(language.t('locations.open.all')),
             onTap: () => activate(onAllLocations),
           ),
+        const SizedBox(height: 8),
+        _nav(
+          Icons.tune,
+          language.t('nav.settings'),
+          page == ShellPage.settings,
+          () => activate(onSettings),
+        ),
       ]),
     );
   }
@@ -5798,6 +6316,7 @@ class _Sidebar extends StatelessWidget {
         ExplorerLocationKind.local => Icons.storage,
         ExplorerLocationKind.appHidden => Icons.lock_outline,
         ExplorerLocationKind.phoneFiles => Icons.phone_android,
+        ExplorerLocationKind.mtp => Icons.usb_outlined,
         ExplorerLocationKind.network => Icons.lan_outlined,
         ExplorerLocationKind.cloudPlugin => Icons.cloud_queue,
       };
@@ -6922,6 +7441,10 @@ class _ExplorerOverflowMenu extends StatelessWidget {
           value: _ExplorerMenuAction.sort,
           child: Text(sortLabel),
         ),
+        PopupMenuItem(
+          value: _ExplorerMenuAction.folderSettings,
+          child: Text(language.t('folder.settings.title')),
+        ),
         const PopupMenuDivider(),
         CheckedPopupMenuItem(
           value: _ExplorerMenuAction.toggleHidden,
@@ -7379,6 +7902,7 @@ class _EntryList extends StatelessWidget {
     final isRecent = recentPaths.contains(entry.path);
     final isVirtual =
         entry.path.startsWith('zip://') || entry.path.startsWith('rar://');
+    final isRemote = entry.path.startsWith('remote://');
     final isProfileLocation = entry.connectionProfileId != null;
     if (entry.isNavigationEntry) {
       return [
@@ -7511,6 +8035,12 @@ class _EntryList extends StatelessWidget {
         value: _EntryAction.properties,
         child: Text(language.t('explorer.properties')),
       ),
+      if (isRemote)
+        PopupMenuItem(
+          value: _EntryAction.permissions,
+          enabled: entry.exists,
+          child: Text(language.t('permissions.title')),
+        ),
       if (entry.connectionProfileId != null) const PopupMenuDivider(),
       if (entry.connectionProfileId != null)
         PopupMenuItem(
@@ -7547,6 +8077,13 @@ class _EntryList extends StatelessWidget {
           value: _EntryAction.decrypt,
           enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('decrypt.action')),
+        ),
+      if (entry.isDirectory) const PopupMenuDivider(),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.folderSettings,
+          enabled: entry.exists,
+          child: Text(language.t('folder.settings.title')),
         ),
       if (entry.isDirectory) const PopupMenuDivider(),
       if (entry.isDirectory)
@@ -7643,6 +8180,8 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.useAsVideo:
       case _EntryAction.useAsMusic:
       case _EntryAction.useAsMultimedia:
+      case _EntryAction.folderSettings:
+      case _EntryAction.permissions:
       case _EntryAction.editConnectionProfile:
       case _EntryAction.deleteConnectionProfile:
         onEntryAction(entry, action);
@@ -8255,6 +8794,14 @@ class _PreviewContent extends StatelessWidget {
       );
     }
 
+    if (preview.contentKind == FileContentKind.html) {
+      return _HtmlPreview(preview: preview, language: language);
+    }
+
+    if (preview.contentKind == FileContentKind.flash) {
+      return _SwfPreview(preview: preview, language: language);
+    }
+
     if (preview.text != null && preview.text!.isNotEmpty) {
       final extension = FileViewerService.extensionForName(preview.title);
       if (extension == '.csv' || extension == '.tsv') {
@@ -8288,6 +8835,166 @@ class _PreviewContent extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Text(preview.subtitle),
+      ),
+    );
+  }
+}
+
+class _HtmlPreview extends StatelessWidget {
+  const _HtmlPreview({required this.preview, required this.language});
+
+  final FilePreview preview;
+  final AppLanguage language;
+
+  @override
+  Widget build(BuildContext context) {
+    final html = preview.bytes == null
+        ? (preview.text ?? '')
+        : FileViewerService.bytesToText(preview.bytes!);
+    final title = _title(html).isEmpty ? preview.title : _title(html);
+    final body = _readableText(html);
+    final assets = _assetRefs(html).take(24).toList();
+    return Card(
+      elevation: 0,
+      clipBehavior: Clip.antiAlias,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Container(
+          padding: const EdgeInsets.all(10),
+          color: const Color(0xFFEAF1F8),
+          child: Row(children: [
+            const Icon(Icons.public),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                preview.sourcePath ?? preview.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ]),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(18),
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, style: Theme.of(context).textTheme.headlineSmall),
+              const SizedBox(height: 12),
+              SelectableText(
+                body.isEmpty ? preview.subtitle : body,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      height: 1.45,
+                    ),
+              ),
+              if (assets.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Text(
+                  language.t('preview.html.assets'),
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 8),
+                for (final asset in assets)
+                  Chip(
+                    avatar: const Icon(Icons.link, size: 16),
+                    label: Text(asset, overflow: TextOverflow.ellipsis),
+                  ),
+              ],
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  String _title(String html) {
+    final match = RegExp(
+      r'<title[^>]*>(.*?)</title>',
+      caseSensitive: false,
+      dotAll: true,
+    ).firstMatch(html);
+    return _decodeEntities(match?.group(1) ?? '').trim();
+  }
+
+  String _readableText(String html) {
+    var text = html
+        .replaceAll(
+            RegExp(r'<script\b[^>]*>.*?</script>',
+                caseSensitive: false, dotAll: true),
+            ' ')
+        .replaceAll(
+            RegExp(r'<style\b[^>]*>.*?</style>',
+                caseSensitive: false, dotAll: true),
+            ' ')
+        .replaceAll(
+            RegExp(r'</(p|div|h[1-6]|li|tr|section|article)>',
+                caseSensitive: false),
+            '\n')
+        .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+        .replaceAll(RegExp(r'<[^>]+>'), ' ');
+    text = _decodeEntities(text).replaceAll(RegExp(r'[ \t]+'), ' ');
+    return text
+        .split(RegExp(r'\n+'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .join('\n\n');
+  }
+
+  List<String> _assetRefs(String html) {
+    final refs = <String>{};
+    for (final match in RegExp(
+      r'''(?:src|href)\s*=\s*["']([^"']+)["']''',
+      caseSensitive: false,
+    ).allMatches(html)) {
+      final value = match.group(1)?.trim();
+      if (value == null || value.isEmpty || value.startsWith('#')) continue;
+      refs.add(_decodeEntities(value));
+    }
+    return refs.toList();
+  }
+
+  String _decodeEntities(String value) => value
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'");
+}
+
+class _SwfPreview extends StatelessWidget {
+  const _SwfPreview({required this.preview, required this.language});
+
+  final FilePreview preview;
+  final AppLanguage language;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Card(
+        elevation: 0,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.extension_outlined, size: 48),
+              const SizedBox(height: 12),
+              Text(
+                language.t('preview.swf.title'),
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                language.t('preview.swf.body'),
+                textAlign: TextAlign.center,
+              ),
+              if (preview.text != null && preview.text!.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                SelectableText(preview.text!),
+              ],
+            ]),
+          ),
+        ),
       ),
     );
   }
@@ -9398,7 +10105,9 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
 
         final size = MediaQuery.sizeOf(context);
         final width = isVideo && !widget.session.collapsed ? 340.0 : 320.0;
-        final height = isVideo && !widget.session.collapsed ? 236.0 : 92.0;
+        final videoHeight = math.min(190.0, size.height * 0.32);
+        final height =
+            isVideo && !widget.session.collapsed ? videoHeight + 58.0 : 92.0;
         final left = _offset.dx
             .clamp(8.0, math.max(8.0, size.width - width - 8))
             .toDouble();
@@ -9420,8 +10129,12 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
               color: Theme.of(context).colorScheme.surface,
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 if (isVideo && !widget.session.collapsed)
-                  _AdaptiveVideoSurface(
-                    controller: widget.session.controller,
+                  SizedBox(
+                    height: videoHeight,
+                    width: double.infinity,
+                    child: _AdaptiveVideoSurface(
+                      controller: widget.session.controller,
+                    ),
                   )
                 else
                   _MiniAudioHeader(item: item),
@@ -12441,6 +13154,7 @@ class _SettingsView extends StatefulWidget {
     required bool blockScreenCapture,
     required String languageCode,
     required String? customLanguagePath,
+    required bool loggingEnabled,
     required Map<String, String> extensionAssociations,
     required bool rememberRecentFiles,
     required int recentSidebarCount,
@@ -12465,12 +13179,14 @@ class _SettingsView extends StatefulWidget {
     required bool rememberLastFolder,
     required String navigationPolicy,
     required double interfaceTextScale,
+    required double interfaceScale,
     required double toolbarIconScale,
     required String searchMode,
     required bool searchUseRegex,
     required bool searchRecursive,
     required String? programProxy,
     required String? globalPluginProxy,
+    required List<String> visibleNavigationSections,
     required bool enableBackgroundVideo,
     required bool enableMiniVideo,
     required bool enableMiniAudio,
@@ -12531,6 +13247,7 @@ class _SettingsViewState extends State<_SettingsView> {
   late final TextEditingController _fileTextScale;
   late final TextEditingController _fileIconScale;
   late final TextEditingController _interfaceTextScale;
+  late final TextEditingController _interfaceScale;
   late final TextEditingController _toolbarIconScale;
   late final TextEditingController _programProxy;
   late final TextEditingController _globalPluginProxy;
@@ -12549,6 +13266,7 @@ class _SettingsViewState extends State<_SettingsView> {
   late bool _remember;
   late bool _wipe;
   late bool _rememberRecent;
+  late bool _loggingEnabled;
   late bool _decryptNamesInExplorer;
   late bool _openFullscreenOnHiddenPreviewTap;
   late bool _autoScaleForDpi;
@@ -12580,6 +13298,7 @@ class _SettingsViewState extends State<_SettingsView> {
   late bool _encryptResumePositions;
   late bool _rememberVideoPositions;
   late bool _rememberAudioPositions;
+  late Set<String> _visibleNavigationSections;
   late String _languageCode;
   late String _commonAlgorithm;
   late String _navigationPolicy;
@@ -12596,6 +13315,7 @@ class _SettingsViewState extends State<_SettingsView> {
     _remember = widget.settings.rememberFilePasswords;
     _wipe = widget.settings.wipeSavedPasswordsOnFailedLogin;
     _rememberRecent = widget.settings.rememberRecentFiles;
+    _loggingEnabled = widget.settings.loggingEnabled;
     _decryptNamesInExplorer = widget.settings.decryptNamesInExplorer;
     _openFullscreenOnHiddenPreviewTap =
         widget.settings.openFullscreenOnHiddenPreviewTap;
@@ -12632,6 +13352,8 @@ class _SettingsViewState extends State<_SettingsView> {
     _encryptResumePositions = widget.settings.encryptResumePositions;
     _rememberVideoPositions = widget.settings.rememberVideoPositions;
     _rememberAudioPositions = widget.settings.rememberAudioPositions;
+    _visibleNavigationSections =
+        widget.settings.visibleNavigationSections.toSet();
     _commonAlgorithm = widget.settings.commonEncryptionAlgorithm;
     _navigationPolicy = widget.settings.navigationPolicy;
     _searchMode = widget.settings.searchMode;
@@ -12661,6 +13383,9 @@ class _SettingsViewState extends State<_SettingsView> {
     );
     _interfaceTextScale = TextEditingController(
       text: widget.settings.interfaceTextScale.toStringAsFixed(2),
+    );
+    _interfaceScale = TextEditingController(
+      text: widget.settings.interfaceScale.toStringAsFixed(2),
     );
     _toolbarIconScale = TextEditingController(
       text: widget.settings.toolbarIconScale.toStringAsFixed(2),
@@ -12715,6 +13440,7 @@ class _SettingsViewState extends State<_SettingsView> {
       _fileTextScale,
       _fileIconScale,
       _interfaceTextScale,
+      _interfaceScale,
       _toolbarIconScale,
       _programProxy,
       _globalPluginProxy,
@@ -12752,6 +13478,7 @@ class _SettingsViewState extends State<_SettingsView> {
     _fileTextScale.dispose();
     _fileIconScale.dispose();
     _interfaceTextScale.dispose();
+    _interfaceScale.dispose();
     _toolbarIconScale.dispose();
     _programProxy.dispose();
     _globalPluginProxy.dispose();
@@ -12811,6 +13538,12 @@ class _SettingsViewState extends State<_SettingsView> {
           value: _rememberLastFolder,
           onChanged: (v) => setState(() => _rememberLastFolder = v),
           title: Text(language.t('settings.remember.last.folder')),
+        ),
+        SwitchListTile(
+          value: _loggingEnabled,
+          onChanged: (v) => setState(() => _loggingEnabled = v),
+          title: Text(language.t('settings.logging.enabled')),
+          subtitle: Text(language.t('settings.logging.note')),
         ),
         DropdownButtonFormField<String>(
           initialValue: _navigationPolicy,
@@ -13114,6 +13847,14 @@ class _SettingsViewState extends State<_SettingsView> {
           ),
         ),
         TextField(
+          controller: _interfaceScale,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.interface.scale'),
+            helperText: language.t('settings.interface.scale.note'),
+          ),
+        ),
+        TextField(
           controller: _toolbarIconScale,
           keyboardType: TextInputType.number,
           decoration: InputDecoration(
@@ -13150,6 +13891,27 @@ class _SettingsViewState extends State<_SettingsView> {
           onChanged: (v) => setState(() => _searchRecursive = v),
           title: Text(language.t('search.recursive')),
         ),
+      ]),
+      const SizedBox(height: 12),
+      _settingsCard(context, language.t('settings.navigation.sections'), [
+        for (final section in const [
+          'explorer',
+          'gallery',
+          'music',
+          'video',
+          'documents'
+        ])
+          CheckboxListTile(
+            value: _visibleNavigationSections.contains(section),
+            onChanged: (value) => setState(() {
+              if (value ?? false) {
+                _visibleNavigationSections.add(section);
+              } else {
+                _visibleNavigationSections.remove(section);
+              }
+            }),
+            title: Text(language.t('nav.$section')),
+          ),
       ]),
       const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.media.sections'), [
@@ -13430,6 +14192,7 @@ class _SettingsViewState extends State<_SettingsView> {
         customLanguagePath: _languagePath.text.trim().isEmpty
             ? null
             : _languagePath.text.trim(),
+        loggingEnabled: _loggingEnabled,
         extensionAssociations: _parseAssociations(_associations.text),
         rememberRecentFiles: _rememberRecent,
         recentSidebarCount: int.tryParse(_recentSidebarCount.text.trim()) ?? 5,
@@ -13458,6 +14221,7 @@ class _SettingsViewState extends State<_SettingsView> {
         navigationPolicy: _navigationPolicy,
         interfaceTextScale:
             double.tryParse(_interfaceTextScale.text.trim()) ?? 1.0,
+        interfaceScale: double.tryParse(_interfaceScale.text.trim()) ?? 1.0,
         toolbarIconScale: double.tryParse(_toolbarIconScale.text.trim()) ?? 1.0,
         searchMode: _searchMode,
         searchUseRegex: _searchUseRegex,
@@ -13468,6 +14232,7 @@ class _SettingsViewState extends State<_SettingsView> {
         globalPluginProxy: _globalPluginProxy.text.trim().isEmpty
             ? null
             : _globalPluginProxy.text.trim(),
+        visibleNavigationSections: _visibleNavigationSections.toList(),
         enableBackgroundVideo: _enableBackgroundVideo,
         enableMiniVideo: _enableMiniVideo,
         enableMiniAudio: _enableMiniAudio,

@@ -126,6 +126,7 @@ class FileExplorerRepository {
           );
         }
       }
+      locations.addAll(await _windowsMtpLocations());
     } else if (Platform.isAndroid) {
       locations.addAll(<ExplorerLocation>[
         const ExplorerLocation(
@@ -144,6 +145,7 @@ class FileExplorerRepository {
           description: 'Стандартная пользовательская область Android',
         ),
       ]);
+      locations.addAll(await _androidWorkProfileLocations());
     } else {
       locations.addAll(<ExplorerLocation>[
         const ExplorerLocation(
@@ -202,6 +204,84 @@ class FileExplorerRepository {
     }
 
     return locations;
+  }
+
+  Future<List<ExplorerLocation>> _androidWorkProfileLocations() async {
+    if (!Platform.isAndroid) return const <ExplorerLocation>[];
+    final locations = <ExplorerLocation>[];
+    final base = Directory('/storage/emulated');
+    try {
+      if (await base.exists()) {
+        await for (final entity in base.list(followLinks: false)) {
+          if (entity is! Directory) continue;
+          final id = basename(entity.path);
+          if (id == '0' || id.startsWith('.')) continue;
+          locations.add(
+            ExplorerLocation(
+              id: 'android-work-profile-$id',
+              name: 'Рабочий профиль Android $id',
+              kind: ExplorerLocationKind.phoneFiles,
+              path: entity.path,
+              description:
+                  'Файловая область рабочего профиля Android, если доступ разрешен системой',
+            ),
+          );
+        }
+      }
+    } catch (_) {}
+    for (final candidate in const [
+      '/storage/emulated/10',
+      '/mnt/user/10/primary',
+    ]) {
+      if (locations.any((item) => item.path == candidate)) continue;
+      try {
+        if (await Directory(candidate).exists()) {
+          locations.add(
+            ExplorerLocation(
+              id: 'android-work-files-${candidate.hashCode}',
+              name: 'Рабочие файлы Android',
+              kind: ExplorerLocationKind.phoneFiles,
+              path: candidate,
+              description: 'Стандартная файловая область рабочего профиля',
+            ),
+          );
+        }
+      } catch (_) {}
+    }
+    return locations;
+  }
+
+  Future<List<ExplorerLocation>> _windowsMtpLocations() async {
+    if (!Platform.isWindows) return const <ExplorerLocation>[];
+    const script = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+Get-PnpDevice -Class WPD -Status OK |
+  Where-Object { $_.FriendlyName -and $_.FriendlyName.Trim().Length -gt 0 } |
+  Select-Object -ExpandProperty FriendlyName
+''';
+    try {
+      final result = await Process.run(
+        'powershell',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+        runInShell: false,
+      ).timeout(const Duration(seconds: 4));
+      if (result.exitCode != 0) return const <ExplorerLocation>[];
+      final seen = <String>{};
+      return [
+        for (final raw in result.stdout.toString().split(RegExp(r'\r?\n')))
+          if (raw.trim().isNotEmpty && seen.add(raw.trim().toLowerCase()))
+            ExplorerLocation(
+              id: 'mtp-${raw.trim().hashCode}',
+              name: raw.trim(),
+              kind: ExplorerLocationKind.mtp,
+              path: 'mtp://${Uri.encodeComponent(raw.trim())}',
+              description:
+                  'Подключенное MTP/WPD-устройство. Если Windows назначит устройству букву диска, используйте ее для полноценной работы с файлами.',
+            ),
+      ];
+    } catch (_) {
+      return const <ExplorerLocation>[];
+    }
   }
 
   List<CloudPluginDefinition> _runtimePlugins(
@@ -1281,6 +1361,29 @@ class FileExplorerRepository {
       index++;
     }
     return candidatePath;
+  }
+
+  bool supportsPermissions(String path) {
+    final remote = _RemoteVirtualPath.tryParse(path);
+    return remote != null &&
+        _remote.clientFor(remote.pluginId).supportsPermissions;
+  }
+
+  Future<void> setPermissions(
+    String path, {
+    required int mode,
+    required bool recursive,
+  }) async {
+    final remote = _RemoteVirtualPath.tryParse(path);
+    if (remote == null) {
+      throw UnsupportedError(
+          'Permission changes are available for remote SSH/SFTP locations.');
+    }
+    await _remote.clientFor(remote.pluginId).setPermissions(
+          remote.innerPath,
+          mode: mode,
+          recursive: recursive,
+        );
   }
 
   Future<FileSystemEntity> renameEntity(String path, String newName) async {
@@ -2600,6 +2703,11 @@ class FileExplorerRepository {
         return text != null && matcher.matches(text);
       }
       final kind = FileViewerService.kindForName(entry.path);
+      final extension = FileViewerService.extensionForName(entry.path);
+      if (kind == FileContentKind.image) {
+        final ocrText = await _ocrTextForFile(File(entry.path));
+        if (ocrText != null && matcher.matches(ocrText)) return true;
+      }
       if (kind != FileContentKind.text &&
           kind != FileContentKind.html &&
           kind != FileContentKind.ebook &&
@@ -2620,10 +2728,88 @@ class FileExplorerRepository {
       }
       final preview = await FileViewerService.previewPlainFile(file);
       final text = preview.text;
-      return text != null && matcher.matches(text);
+      if (text != null && matcher.matches(text)) return true;
+      if (extension == '.pdf') {
+        final ocrText = await _ocrTextForFile(file);
+        return ocrText != null && matcher.matches(ocrText);
+      }
+      return false;
     } catch (_) {
       return false;
     }
+  }
+
+  Future<String?> _ocrTextForFile(File file) async {
+    final binary = await _findTesseractBinary();
+    if (binary == null) return null;
+    final extension = FileViewerService.extensionForName(file.path);
+    var inputPath = file.path;
+    Directory? tempDir;
+    try {
+      if (extension == '.pdf') {
+        tempDir = await Directory.systemTemp.createTemp('securevault_ocr_');
+        final image = await _renderPdfFirstPage(file, tempDir);
+        if (image == null) return null;
+        inputPath = image.path;
+      }
+      final result = await Process.run(
+        binary,
+        [inputPath, 'stdout', '-l', 'rus+eng'],
+        runInShell: Platform.isWindows && !File(binary).existsSync(),
+      ).timeout(const Duration(seconds: 25));
+      if (result.exitCode != 0) return null;
+      final text = result.stdout.toString().trim();
+      return text.isEmpty ? null : text;
+    } catch (_) {
+      return null;
+    } finally {
+      if (tempDir != null) {
+        try {
+          await tempDir.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<File?> _renderPdfFirstPage(File pdf, Directory tempDir) async {
+    final outBase = '${tempDir.path}${Platform.pathSeparator}page';
+    try {
+      final result = await Process.run(
+        'pdftoppm',
+        ['-f', '1', '-singlefile', '-png', pdf.path, outBase],
+        runInShell: Platform.isWindows,
+      ).timeout(const Duration(seconds: 20));
+      final image = File('$outBase.png');
+      if (result.exitCode == 0 && await image.exists()) return image;
+    } catch (_) {}
+    try {
+      final image = File('${tempDir.path}${Platform.pathSeparator}page.png');
+      final result = await Process.run(
+        'magick',
+        ['${pdf.path}[0]', image.path],
+        runInShell: Platform.isWindows,
+      ).timeout(const Duration(seconds: 20));
+      if (result.exitCode == 0 && await image.exists()) return image;
+    } catch (_) {}
+    return null;
+  }
+
+  Future<String?> _findTesseractBinary() async {
+    final plugins = await AppPaths.pluginsDirectory();
+    final candidates = <String>[
+      '${plugins.path}${Platform.pathSeparator}tesseract_ocr_search'
+          '${Platform.pathSeparator}components${Platform.pathSeparator}tesseract'
+          '${Platform.pathSeparator}${Platform.isWindows ? 'windows-x64${Platform.pathSeparator}tesseract.exe' : Platform.isAndroid ? 'android-arm64${Platform.pathSeparator}tesseract' : 'linux-x64${Platform.pathSeparator}tesseract'}',
+      Platform.isWindows ? 'tesseract.exe' : 'tesseract',
+    ];
+    for (final candidate in candidates) {
+      if (candidate.contains(Platform.pathSeparator) &&
+          await File(candidate).exists()) {
+        return candidate;
+      }
+      if (!candidate.contains(Platform.pathSeparator)) return candidate;
+    }
+    return null;
   }
 
   String _normalizePath(String path) {
