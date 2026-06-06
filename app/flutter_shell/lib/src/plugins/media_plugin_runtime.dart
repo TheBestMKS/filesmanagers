@@ -164,7 +164,7 @@ class WebMusicPluginService {
     for (final uri in _candidateUris(section, query)) {
       try {
         final html = await _readHtml(uri);
-        final entries = await _entriesFromHtml(html, uri, section);
+        final entries = await _entriesFromHtml(html, uri, section, query);
         if (entries.isNotEmpty &&
             (query.trim().isEmpty || _htmlMentionsQuery(html, query))) {
           return DirectorySnapshot(path: section.runtimeId, entries: entries);
@@ -183,7 +183,11 @@ class WebMusicPluginService {
     );
   }
 
-  Future<File> download(ExplorerEntry entry, Directory targetDirectory) async {
+  Future<File> download(
+    ExplorerEntry entry,
+    Directory targetDirectory, {
+    void Function(int receivedBytes, int? totalBytes)? onProgress,
+  }) async {
     final uri = Uri.parse(entry.path);
     final safeName = _safeFileName(entry.name);
     final target = File('${targetDirectory.path}${Platform.pathSeparator}'
@@ -198,7 +202,18 @@ class WebMusicPluginService {
       if (response.statusCode >= 400) {
         throw HttpException('HTTP ${response.statusCode}', uri: uri);
       }
-      await response.pipe(target.openWrite());
+      final total = response.contentLength > 0 ? response.contentLength : null;
+      var received = 0;
+      final sink = target.openWrite();
+      try {
+        await for (final chunk in response) {
+          received += chunk.length;
+          sink.add(chunk);
+          onProgress?.call(received, total);
+        }
+      } finally {
+        await sink.close();
+      }
       return target;
     } finally {
       client.close(force: true);
@@ -327,6 +342,7 @@ class WebMusicPluginService {
     String html,
     Uri pageUri,
     PluginMediaSection section,
+    String query,
   ) async {
     final parsed = <_ParsedAudioEntry>[];
     parsed.addAll(_parseJsonAudioEntries(html, pageUri));
@@ -354,7 +370,7 @@ class WebMusicPluginService {
       }
     }
 
-    return _dedupe(parsed)
+    final tracks = _dedupe(parsed)
         .take(200)
         .map((entry) => ExplorerEntry(
               name: _ensureAudioExtension(entry.bestTitle),
@@ -364,6 +380,64 @@ class WebMusicPluginService {
               modifiedAt: DateTime.now(),
             ))
         .toList();
+    if (query.trim().isNotEmpty) return tracks;
+    final genres = _parseGenreLinks(html, pageUri)
+        .take(80)
+        .map((genre) => ExplorerEntry(
+              name: genre.title,
+              path: genre.uri.toString(),
+              kind: ExplorerEntryKind.directory,
+              sizeBytes: 0,
+              modifiedAt: DateTime.now(),
+            ))
+        .toList();
+    return [...genres, ...tracks];
+  }
+
+  Iterable<_TrackPageLink> _parseGenreLinks(String html, Uri pageUri) sync* {
+    final scope = _popularGenresScope(html);
+    final seen = <String>{};
+    final source = scope.isEmpty ? html : scope;
+    for (final match in _anchorTextPattern.allMatches(source)) {
+      final raw = match.group(1);
+      final text = match.group(2);
+      if (raw == null || text == null) continue;
+      final title = _cleanTitle(_stripTags(text));
+      if (!_isGoodTitle(title) || _isGenericTitle(title)) continue;
+      final decoded = _decodeHtml(raw.trim());
+      if (!_looksLikeGenreReference(decoded, title)) continue;
+      final uri = _resolveReference(pageUri, decoded);
+      if (uri == null) continue;
+      if (uri.host.isNotEmpty && uri.host != pageUri.host) continue;
+      final normalized = uri.removeFragment().toString();
+      if (!seen.add(normalized)) continue;
+      yield _TrackPageLink(uri: uri, title: title);
+    }
+  }
+
+  String _popularGenresScope(String html) {
+    final lower = html.toLowerCase();
+    final markers = [
+      _ru('043f 043e 043f 0443 043b 044f 0440 043d 044b 0435 0020 0436 0430 043d 0440 044b'),
+      'popular genres',
+      'sidebar-genres',
+    ];
+    var index = -1;
+    for (final marker in markers) {
+      index = lower.indexOf(marker.toLowerCase());
+      if (index >= 0) break;
+    }
+    if (index < 0) return '';
+    final endCandidates = <int>[
+      lower.indexOf('</ul>', index),
+      lower.indexOf('</aside>', index),
+      lower.indexOf('sidebar-item-title', index + 20),
+    ].where((value) => value > index).toList()
+      ..sort();
+    final end = endCandidates.isEmpty
+        ? (index + 12000).clamp(0, html.length).toInt()
+        : endCandidates.first.clamp(0, html.length).toInt();
+    return html.substring(index, end);
   }
 
   Iterable<_ParsedAudioEntry> _parseJsonAudioEntries(
@@ -672,6 +746,31 @@ class WebMusicPluginService {
         (lower.contains('/pages/') && lower.endsWith('.shtml'));
   }
 
+  bool _looksLikeGenreReference(String value, String title) {
+    final lower = value.toLowerCase();
+    if (lower.startsWith('#') ||
+        lower.startsWith('mailto:') ||
+        lower.startsWith('javascript:') ||
+        lower.contains('/static/') ||
+        lower.contains('/assets/') ||
+        lower.contains('.css') ||
+        lower.contains('.js') ||
+        lower.contains('/artist') ||
+        lower.contains('/track') ||
+        lower.contains('/song/') ||
+        lower.contains('/download/')) {
+      return false;
+    }
+    if (lower.contains('/genre/')) return true;
+    if (lower.contains('/genres/')) return true;
+    if (lower.contains('/songs/') &&
+        !lower.contains('/top-') &&
+        title.length <= 60) {
+      return true;
+    }
+    return false;
+  }
+
   String _mediaKey(Uri uri) {
     final normalizedPath = uri.path
         .replaceAll(RegExp(r'_b\d+f\d+', caseSensitive: false), '')
@@ -861,6 +960,11 @@ final _jsonTextFieldPattern = RegExp(
 
 final _anchorPattern = RegExp(
   r'''<a\b[^>]*href=["']([^"']+)["'][\s\S]*?</a>''',
+  caseSensitive: false,
+);
+
+final _anchorTextPattern = RegExp(
+  r'''<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)</a>''',
   caseSensitive: false,
 );
 

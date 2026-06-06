@@ -25,6 +25,11 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  void AddTrayIcon();
+  void RemoveTrayIcon();
+  void RestoreFromTray();
+  void ShowTrayMenu();
+
   // The project to run.
   flutter::DartProject project_;
 
@@ -32,6 +37,9 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       window_channel_;
+  bool minimize_to_tray_on_close_ = true;
+  bool tray_icon_added_ = false;
+  bool exiting_from_tray_ = false;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

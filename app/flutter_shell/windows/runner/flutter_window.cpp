@@ -1,16 +1,21 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <shellapi.h>
 #include <string>
 #include <variant>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "resource.h"
 #include <flutter/standard_method_codec.h>
 
 namespace {
 
 constexpr wchar_t kWindowRegistryPath[] =
     L"Software\\SecureVault\\FileManager";
+constexpr UINT kTrayMessage = WM_APP + 42;
+constexpr UINT_PTR kTrayIconId = 1001;
+constexpr UINT kTrayExitCommand = 40001;
 
 std::wstring Utf8ToWide(const std::string& value) {
   if (value.empty()) {
@@ -101,6 +106,16 @@ bool FlutterWindow::OnCreate() {
           result->Success();
           return;
         }
+        if (call.method_name() == "setMinimizeToTrayOnClose") {
+          const auto* enabled = std::get_if<bool>(call.arguments());
+          if (enabled == nullptr) {
+            result->Error("bad_args", "Expected boolean tray flag.");
+            return;
+          }
+          minimize_to_tray_on_close_ = *enabled;
+          result->Success();
+          return;
+        }
         if (call.method_name() != "setTitle") {
           result->NotImplemented();
           return;
@@ -129,12 +144,68 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   SaveWindowPlacement(GetHandle());
+  RemoveTrayIcon();
   if (flutter_controller_) {
     window_channel_ = nullptr;
     flutter_controller_ = nullptr;
   }
 
   Win32Window::OnDestroy();
+}
+
+void FlutterWindow::AddTrayIcon() {
+  if (tray_icon_added_) {
+    return;
+  }
+  NOTIFYICONDATAW nid{};
+  nid.cbSize = sizeof(nid);
+  nid.hWnd = GetHandle();
+  nid.uID = kTrayIconId;
+  nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+  nid.uCallbackMessage = kTrayMessage;
+  nid.hIcon = LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON));
+  wcscpy_s(nid.szTip, L"File Manager");
+  if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+    tray_icon_added_ = true;
+  }
+}
+
+void FlutterWindow::RemoveTrayIcon() {
+  if (!tray_icon_added_) {
+    return;
+  }
+  NOTIFYICONDATAW nid{};
+  nid.cbSize = sizeof(nid);
+  nid.hWnd = GetHandle();
+  nid.uID = kTrayIconId;
+  Shell_NotifyIconW(NIM_DELETE, &nid);
+  tray_icon_added_ = false;
+}
+
+void FlutterWindow::RestoreFromTray() {
+  RemoveTrayIcon();
+  ShowWindow(GetHandle(), SW_SHOWNORMAL);
+  SetForegroundWindow(GetHandle());
+}
+
+void FlutterWindow::ShowTrayMenu() {
+  POINT point{};
+  GetCursorPos(&point);
+  HMENU menu = CreatePopupMenu();
+  if (menu == nullptr) {
+    return;
+  }
+  AppendMenuW(menu, MF_STRING, kTrayExitCommand, L"Exit");
+  SetForegroundWindow(GetHandle());
+  const UINT command = TrackPopupMenu(
+      menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x, point.y, 0,
+      GetHandle(), nullptr);
+  DestroyMenu(menu);
+  if (command == kTrayExitCommand) {
+    exiting_from_tray_ = true;
+    RemoveTrayIcon();
+    DestroyWindow(GetHandle());
+  }
 }
 
 LRESULT
@@ -152,6 +223,24 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   switch (message) {
+    case WM_CLOSE:
+      if (minimize_to_tray_on_close_ && !exiting_from_tray_) {
+        SaveWindowPlacement(hwnd);
+        AddTrayIcon();
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+      }
+      break;
+    case kTrayMessage:
+      if (lparam == WM_LBUTTONDBLCLK || lparam == WM_LBUTTONUP) {
+        RestoreFromTray();
+        return 0;
+      }
+      if (lparam == WM_RBUTTONUP || lparam == WM_CONTEXTMENU) {
+        ShowTrayMenu();
+        return 0;
+      }
+      break;
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;

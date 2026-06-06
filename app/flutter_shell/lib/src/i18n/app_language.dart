@@ -553,6 +553,18 @@ class AppLanguage {
     'plugin.music.unavailable':
         'Universal Web Music Parser plugin is not installed.',
     'plugin.media.download': 'Download track',
+    'plugin.media.download.selected': 'Download selected tracks',
+    'plugin.ytdlp.download.url': 'Download file by URL',
+    'plugin.ytdlp.url': 'Media page URL',
+    'plugin.ytdlp.video.quality': 'Preferred video quality',
+    'plugin.ytdlp.audio.quality': 'Preferred audio quality',
+    'plugin.ytdlp.threads': 'Download threads',
+    'plugin.ytdlp.version': 'yt-dlp version',
+    'plugin.ytdlp.update': 'Update yt-dlp',
+    'plugin.ytdlp.unavailable': 'yt-dlp plugin is disabled or unavailable.',
+    'plugin.ytdlp.invalid.url': 'Enter a valid URL.',
+    'plugin.ytdlp.update.windows.only':
+        'Automatic yt-dlp update is currently available for Windows builds.',
     'transfer.done': 'Done:',
     'explorer.show.hidden': 'Show hidden files and folders',
     'explorer.show.system': 'Show system files and folders',
@@ -561,6 +573,7 @@ class AppLanguage {
     'settings.thumbnails.cache.encrypted': 'Encrypt persistent thumbnail cache',
     'settings.background.external.overlay':
         'Allow system floating player when supported by the OS',
+    'settings.window.minimize.tray': 'Minimize to tray when closing the window',
     'settings.android.media.notifications':
         'Android media notification controls',
     'settings.media.headset.controls': 'Headset media controls',
@@ -1233,6 +1246,18 @@ class AppLanguage {
     'plugin.music.unavailable':
         'Плагин Universal Web Music Parser не установлен.',
     'plugin.media.download': 'Скачать трек',
+    'plugin.media.download.selected': 'Скачать выбранные треки',
+    'plugin.ytdlp.download.url': 'Загрузить файл по URL',
+    'plugin.ytdlp.url': 'URL страницы с медиа',
+    'plugin.ytdlp.video.quality': 'Приоритетное качество видео',
+    'plugin.ytdlp.audio.quality': 'Приоритетное качество аудио',
+    'plugin.ytdlp.threads': 'Количество потоков скачивания',
+    'plugin.ytdlp.version': 'Версия yt-dlp',
+    'plugin.ytdlp.update': 'Обновить yt-dlp',
+    'plugin.ytdlp.unavailable': 'Плагин yt-dlp отключен или недоступен.',
+    'plugin.ytdlp.invalid.url': 'Укажите корректный URL.',
+    'plugin.ytdlp.update.windows.only':
+        'Автоматическое обновление yt-dlp сейчас доступно для Windows-сборок.',
     'transfer.done': 'Готово:',
     'explorer.show.hidden': 'Показывать скрытые файлы и папки',
     'explorer.show.system': 'Показывать системные файлы и папки',
@@ -1241,6 +1266,7 @@ class AppLanguage {
     'settings.thumbnails.cache.encrypted': 'Шифровать постоянный кэш миниатюр',
     'settings.background.external.overlay':
         'Разрешить системный плавающий плеер, если ОС это поддерживает',
+    'settings.window.minimize.tray': 'Сворачивать в трей при закрытии окна',
     'settings.android.media.notifications':
         'Управление медиа из Android-уведомлений',
     'settings.media.headset.controls': 'Управление с гарнитуры',

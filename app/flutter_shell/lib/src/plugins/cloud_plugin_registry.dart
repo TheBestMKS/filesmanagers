@@ -783,7 +783,7 @@ class CloudPluginRegistry {
         'settings': <String, Object?>{
           'baseUrl': <String, Object?>{
             'label': 'Hitmoz base URL',
-            'default': 'https://eu.hitmoz.com/',
+            'default': 'https://eu.hitmoz.com/songs/top-today',
           },
         },
         'components': <String, Object?>{'executor': 'web-music-parser'},
@@ -808,7 +808,7 @@ class CloudPluginRegistry {
             <String, Object?>{
               'id': 'hitmoz',
               'title': 'Hitmoz',
-              'baseUrl': 'https://eu.hitmoz.com/',
+              'baseUrl': 'https://eu.hitmoz.com/songs/top-today',
               'searchPath': '/search?q={query}',
               'parser': 'generic-audio-html',
             }
@@ -1210,6 +1210,87 @@ class CloudPluginRegistry {
             'mode': 'syntax-highlight',
           }
         ],
+      },
+    );
+
+    await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'yt_dlp_downloader',
+      manifest: <String, Object?>{
+        'id': 'yt-dlp-downloader',
+        'name': 'yt-dlp URL Downloader',
+        'version': '1.0.0',
+        'pluginType': 'download-extension',
+        'description':
+            'Adds a context-menu action to download media by URL through yt-dlp with configurable quality, thread count, self-update and SecureVault background progress reporting.',
+        'authType': 'none',
+        'repositoryUrl': 'https://github.com/yt-dlp/yt-dlp',
+        'updateUrl':
+            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe',
+        'capabilities': [
+          'contextMenuActions',
+          'urlDownload',
+          'mediaDownload',
+          'backgroundProgress',
+          'selfUpdate'
+        ],
+        'settings': <String, Object?>{
+          'videoQuality': <String, Object?>{
+            'label': 'Preferred video quality',
+            'default': 'best',
+          },
+          'audioQuality': <String, Object?>{
+            'label': 'Preferred audio quality',
+            'default': 'best',
+          },
+          'threads': <String, Object?>{
+            'label': 'Download threads',
+            'default': '4',
+          },
+        },
+        'contextMenuActions': [
+          <String, Object?>{
+            'id': 'download-url',
+            'titleKey': 'plugin.ytdlp.download.url',
+            'target': 'folder',
+          }
+        ],
+        'components': <String, Object?>{
+          'executor': 'yt-dlp',
+          'engine': 'process',
+        },
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{
+            'executor': 'yt-dlp',
+            'binary': 'components/yt-dlp/windows-x64/yt-dlp.exe',
+            'updateUrl':
+                'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe',
+          },
+          'windows-arm64': <String, Object?>{
+            'executor': 'yt-dlp',
+            'binary': 'components/yt-dlp/windows-arm64/yt-dlp.exe',
+            'updateUrl':
+                'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe',
+          },
+          'android-arm': <String, Object?>{
+            'executor': 'yt-dlp',
+            'engine': 'embedded-python-or-system',
+          },
+          'android-arm64': <String, Object?>{
+            'executor': 'yt-dlp',
+            'engine': 'embedded-python-or-system',
+          },
+          'android-x64': <String, Object?>{
+            'executor': 'yt-dlp',
+            'engine': 'embedded-python-or-system',
+          },
+          'linux-x64': <String, Object?>{
+            'executor': 'yt-dlp',
+            'binary': 'components/yt-dlp/linux-x64/yt-dlp',
+          },
+          'fallback': <String, Object?>{'executor': 'yt-dlp'},
+        },
       },
     );
   }

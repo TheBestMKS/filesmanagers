@@ -30,7 +30,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.14';
+const _appVersion = '0.12.15';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -321,6 +321,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   final List<_BackgroundJob> _backgroundJobs = <_BackgroundJob>[];
   _ReadingSession? _readingSession;
   Timer? _readingTimer;
+  Timer? _locationsRefreshTimer;
 
   @override
   void initState() {
@@ -338,6 +339,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _readingTimer?.cancel();
+    _locationsRefreshTimer?.cancel();
     unawaited(PlatformServices.stopSpeaking());
     super.dispose();
   }
@@ -378,6 +380,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
             .catchError((_) => null)
         : null;
     await PlatformServices.setScreenProtection(settings.blockScreenCapture);
+    await PlatformServices.setMinimizeToTrayOnClose(
+      settings.minimizeToTrayOnClose,
+    ).catchError((_) {});
     final runtime = await _bindings.getRuntimeInfo();
     final pluginDefs = await _plugins.loadPlugins();
     final enabledPluginDefs = _enabledPluginDefs(pluginDefs, settings);
@@ -444,7 +449,65 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_maybeRequestAndroidStorageAccess());
     });
+    _startLocationsAutoRefresh();
   }
+
+  void _startLocationsAutoRefresh() {
+    _locationsRefreshTimer?.cancel();
+    _locationsRefreshTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => unawaited(_refreshLocationsSilently()),
+    );
+  }
+
+  Future<void> _refreshLocationsSilently() async {
+    if (_loading || _locked) return;
+    try {
+      final pluginDefs = await _plugins.loadPlugins();
+      final enabledPluginDefs = _enabledPluginDefs(pluginDefs, _settings);
+      _explorer.configurePlugins(
+        enabledPluginDefs,
+        _settings.connectionProfiles,
+      );
+      final locations = await _explorer.loadLocations(
+        enabledPluginDefs,
+        _settings.connectionProfiles,
+      );
+      final pluginMediaSections =
+          PluginRuntime(enabledPluginDefs, _settings.pluginSettingsById)
+              .mediaSections();
+      if (!mounted) return;
+      final locationsChanged =
+          _locationsSignature(locations) != _locationsSignature(_locations);
+      final pluginsChanged = _pluginDefs.map((item) => item.id).join('|') !=
+          pluginDefs.map((item) => item.id).join('|');
+      if (!locationsChanged && !pluginsChanged) return;
+      setState(() {
+        _pluginDefs = pluginDefs;
+        _pluginMediaSections = pluginMediaSections;
+        _locations = locations;
+        if (_showingLocations) {
+          _snapshot = _explorer.snapshotForLocations(
+            _language.t('nav.explorer'),
+            locations,
+            extraPaths: [
+              ..._settings.galleryFolders,
+              ..._settings.musicFolders,
+              ..._settings.videoFolders,
+              ..._settings.documentFolders,
+            ],
+          );
+        }
+      });
+    } catch (_) {
+      // Location refresh is opportunistic; user-initiated refresh still reports errors.
+    }
+  }
+
+  String _locationsSignature(List<ExplorerLocation> locations) => locations
+      .map((item) =>
+          '${item.id}\u001f${item.name}\u001f${item.path}\u001f${item.enabled}')
+      .join('\u001e');
 
   Future<void> _maybeRequestAndroidStorageAccess() async {
     if (!Platform.isAndroid ||
@@ -1433,6 +1496,22 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     }
     if (!entry.exists) {
       await _offerRemoveMissingRecent(entry.path);
+      return;
+    }
+    final activePluginSection = _activePluginMediaSection;
+    if (entry.isDirectory &&
+        activePluginSection != null &&
+        _isHttpMedia(entry.path)) {
+      _openPluginMediaSection(PluginMediaSection(
+        pluginId: activePluginSection.pluginId,
+        sectionId: activePluginSection.sectionId,
+        siteId: '${activePluginSection.siteId ?? activePluginSection.sectionId}'
+            ':${entry.path}',
+        title: entry.name,
+        kind: activePluginSection.kind,
+        baseUrl: entry.path,
+        searchPath: activePluginSection.searchPath,
+      ));
       return;
     }
     if (entry.isDirectory) {
@@ -2907,6 +2986,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         await _extractOcrText(entry);
       case _EntryAction.openSwf:
         await _openSwfEntry(entry);
+      case _EntryAction.downloadUrl:
+        await _showYtDlpDownloadDialog(
+            entry.isDirectory ? entry.path : _currentPath);
       case _EntryAction.editConnectionProfile:
         await _editConnectionProfile(entry);
       case _EntryAction.deleteConnectionProfile:
@@ -4744,6 +4826,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
           preview: preview,
           language: _language,
           currentDirectory: _currentPath,
+          defaultOutputPath: _defaultEditedOutputPath(
+            preview,
+            FileViewerService.extensionForName(preview.title),
+          ),
+          onSaveBytes: _explorer.writeFile,
         ),
       );
       if (savedPath != null) {
@@ -4761,6 +4848,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
           preview: preview,
           language: _language,
           currentDirectory: _currentPath,
+          defaultOutputPath: _defaultEditedOutputPath(preview, '.png'),
+          onSaveBytes: _explorer.writeFile,
         ),
       );
       if (savedPath != null) {
@@ -5173,6 +5262,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     required bool androidMediaNotificationControls,
     required bool headsetMediaControls,
     required bool externalFloatingPlayer,
+    required bool minimizeToTrayOnClose,
     required bool encryptThumbnailCache,
     required bool encryptResumePositions,
     required int progressAutoCollapseSeconds,
@@ -5259,6 +5349,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       androidMediaNotificationControls: androidMediaNotificationControls,
       headsetMediaControls: headsetMediaControls,
       externalFloatingPlayer: externalFloatingPlayer,
+      minimizeToTrayOnClose: minimizeToTrayOnClose,
       encryptThumbnailCache: encryptThumbnailCache,
       encryptResumePositions: encryptResumePositions,
       progressAutoCollapseSeconds: progressAutoCollapseSeconds,
@@ -5272,6 +5363,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       encryptPersistentCache: next.encryptThumbnailCache,
     );
     await PlatformServices.setScreenProtection(next.blockScreenCapture);
+    await PlatformServices.setMinimizeToTrayOnClose(next.minimizeToTrayOnClose)
+        .catchError((_) {});
     final language = await AppLanguage.load(next);
     await PlatformServices.setWindowTitle(language.appTitle).catchError((_) {});
     setState(() {
@@ -5713,7 +5806,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   Future<void> _downloadPluginMediaEntry(ExplorerEntry entry) async {
-    if (!_isHttpMedia(entry.path)) return;
+    await _downloadPluginMediaEntries([entry]);
+  }
+
+  Future<void> _downloadPluginMediaEntries(List<ExplorerEntry> entries) async {
+    final downloadable = entries
+        .where((entry) => !entry.isDirectory && _isHttpMedia(entry.path))
+        .toList();
+    if (downloadable.isEmpty) return;
     final targetController = TextEditingController(
       text: _standardMediaRoots(MediaSection.music).firstOrNull ??
           (Platform.environment['USERPROFILE'] ??
@@ -5746,14 +5846,400 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     );
     targetController.dispose();
     if (targetPath == null || targetPath.trim().isEmpty) return;
+    final job = _startBackgroundJob(
+      downloadable.length == 1
+          ? '${_language.t('plugin.media.download')}: ${downloadable.first.name}'
+          : '${_language.t('plugin.media.download.selected')}: ${downloadable.length}',
+      total: 100,
+    );
     try {
-      final file = await _webMusicPlugins.download(
-        entry,
-        Directory(_expandPathVariables(targetPath.trim())),
+      final targetDir = Directory(_expandPathVariables(targetPath.trim()));
+      File? lastFile;
+      for (var i = 0; i < downloadable.length; i++) {
+        final entry = downloadable[i];
+        lastFile = await _webMusicPlugins.download(
+          entry,
+          targetDir,
+          onProgress: (received, total) {
+            final itemPercent = total == null || total <= 0
+                ? math.min(99, (received / 1024 / 1024).floor())
+                : ((received / total) * 100).floor();
+            final overall =
+                (((i + itemPercent / 100) / downloadable.length) * 100).floor();
+            _updateBackgroundJob(
+              job,
+              completed: overall.clamp(0, 99).toInt(),
+              status:
+                  '${entry.name}: ${_formatBytes(received)}${total == null ? '' : ' / ${_formatBytes(total)}'}',
+            );
+          },
+        );
+      }
+      _updateBackgroundJob(
+        job,
+        completed: 100,
+        status: lastFile?.path ?? targetDir.path,
+        done: true,
       );
-      _snack('${_language.t('transfer.done')} ${file.path}');
+      _snack('${_language.t('transfer.done')} ${targetDir.path}');
     } catch (error) {
+      _updateBackgroundJob(job, status: '$error', failed: true);
       _snack('$error');
+    }
+  }
+
+  Future<void> _showYtDlpDownloadDialog(String? targetDirectory) async {
+    final pluginId = 'yt-dlp-downloader';
+    final plugin = _pluginDefs.where((item) => item.id == pluginId).firstOrNull;
+    if (plugin == null || _settings.disabledPluginIds.contains(pluginId)) {
+      _snack(_language.t('plugin.ytdlp.unavailable'));
+      return;
+    }
+    final settings =
+        _settings.pluginSettingsById[pluginId] ?? const <String, String>{};
+    final urlController = TextEditingController(text: 'https://');
+    final targetController = TextEditingController(
+      text: targetDirectory ??
+          (Platform.environment['USERPROFILE'] ??
+              Platform.environment['HOME'] ??
+              Directory.current.path),
+    );
+    final threadsController =
+        TextEditingController(text: settings['threads'] ?? '4');
+    var videoQuality = settings['videoQuality'] ?? 'best';
+    var audioQuality = settings['audioQuality'] ?? 'best';
+    final version = await _ytDlpVersion().catchError((_) => 'not installed');
+    if (!mounted) return;
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(_language.t('plugin.ytdlp.download.url')),
+          content: SizedBox(
+            width: 560,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                TextField(
+                  controller: urlController,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    labelText: _language.t('plugin.ytdlp.url'),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _PathTextField(
+                  controller: targetController,
+                  label: _language.t('common.target.folder'),
+                  pickDirectory: true,
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: videoQuality,
+                  decoration: InputDecoration(
+                    labelText: _language.t('plugin.ytdlp.video.quality'),
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 'best', child: Text('best')),
+                    DropdownMenuItem(value: '2160', child: Text('2160p')),
+                    DropdownMenuItem(value: '1440', child: Text('1440p')),
+                    DropdownMenuItem(value: '1080', child: Text('1080p')),
+                    DropdownMenuItem(value: '720', child: Text('720p')),
+                    DropdownMenuItem(value: '480', child: Text('480p')),
+                    DropdownMenuItem(value: 'audio', child: Text('audio only')),
+                  ],
+                  onChanged: (value) =>
+                      setDialogState(() => videoQuality = value ?? 'best'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: audioQuality,
+                  decoration: InputDecoration(
+                    labelText: _language.t('plugin.ytdlp.audio.quality'),
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 'best', child: Text('best')),
+                    DropdownMenuItem(value: '320', child: Text('320 kbps')),
+                    DropdownMenuItem(value: '192', child: Text('192 kbps')),
+                    DropdownMenuItem(value: '128', child: Text('128 kbps')),
+                  ],
+                  onChanged: (value) =>
+                      setDialogState(() => audioQuality = value ?? 'best'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: threadsController,
+                  keyboardType: TextInputType.number,
+                  decoration: InputDecoration(
+                    labelText: _language.t('plugin.ytdlp.threads'),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child:
+                      Text('${_language.t('plugin.ytdlp.version')}: $version'),
+                ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_language.t('common.cancel')),
+            ),
+            OutlinedButton.icon(
+              onPressed: () async {
+                Navigator.pop(context);
+                await _updateYtDlpForCurrentSystem(plugin);
+              },
+              icon: const Icon(Icons.system_update_alt),
+              label: Text(_language.t('plugin.ytdlp.update')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, {
+                'url': urlController.text.trim(),
+                'target': targetController.text.trim(),
+                'videoQuality': videoQuality,
+                'audioQuality': audioQuality,
+                'threads': threadsController.text.trim(),
+              }),
+              child: Text(_language.t('common.download')),
+            ),
+          ],
+        ),
+      ),
+    );
+    urlController.dispose();
+    targetController.dispose();
+    threadsController.dispose();
+    if (result == null) return;
+    await _savePluginSettings(pluginId, {
+      ...settings,
+      'videoQuality': result['videoQuality'] ?? 'best',
+      'audioQuality': result['audioQuality'] ?? 'best',
+      'threads': result['threads'] ?? '4',
+    });
+    await _runYtDlpDownload(
+      url: result['url'] ?? '',
+      targetDirectory: result['target'] ?? '',
+      videoQuality: result['videoQuality'] ?? 'best',
+      audioQuality: result['audioQuality'] ?? 'best',
+      threads: int.tryParse(result['threads'] ?? '4') ?? 4,
+    );
+  }
+
+  Future<void> _runYtDlpDownload({
+    required String url,
+    required String targetDirectory,
+    required String videoQuality,
+    required String audioQuality,
+    required int threads,
+  }) async {
+    if (url.trim().isEmpty || Uri.tryParse(url)?.hasScheme != true) {
+      _snack(_language.t('plugin.ytdlp.invalid.url'));
+      return;
+    }
+    final executable = await _ytDlpExecutablePath();
+    final isVirtualTarget = _explorer.isVirtualPath(targetDirectory);
+    final localTarget = isVirtualTarget
+        ? await Directory.systemTemp.createTemp('securevault_ytdlp_')
+        : Directory(_expandPathVariables(targetDirectory));
+    await localTarget.create(recursive: true);
+    final before = await _safeDirectoryFiles(localTarget);
+    final job = _startBackgroundJob('yt-dlp: $url', total: 100);
+    try {
+      final args = <String>[
+        '--newline',
+        '--no-color',
+        '-P',
+        localTarget.path,
+        '-N',
+        threads.clamp(1, 32).toString(),
+        '-f',
+        _ytDlpFormat(videoQuality),
+        if (videoQuality == 'audio') ...[
+          '-x',
+          '--audio-format',
+          'mp3',
+          if (audioQuality != 'best') ...['--audio-quality', audioQuality],
+        ],
+        url,
+      ];
+      final process = await Process.start(
+        executable,
+        args,
+        runInShell: executable == 'yt-dlp' || executable == 'yt-dlp.exe',
+      );
+      void handleLine(String line) {
+        final match = RegExp(r'(\d+(?:\.\d+)?)%').firstMatch(line);
+        if (match != null) {
+          final percent = double.tryParse(match.group(1) ?? '') ?? 0;
+          _updateBackgroundJob(
+            job,
+            completed: percent.floor().clamp(0, 99).toInt(),
+            status: line.trim(),
+          );
+        } else if (line.trim().isNotEmpty) {
+          _updateBackgroundJob(job, status: line.trim());
+        }
+        if (job.cancelled) process.kill();
+      }
+
+      process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(handleLine);
+      process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(handleLine);
+      final exitCode = await process.exitCode;
+      if (job.cancelled) throw StateError('Cancelled');
+      if (exitCode != 0) throw ProcessException(executable, args, '', exitCode);
+      final after = await _safeDirectoryFiles(localTarget);
+      final created = after
+          .where((file) => !before.any((old) => old.path == file.path))
+          .toList();
+      if (isVirtualTarget) {
+        for (final file in created) {
+          await _explorer.createFile(
+            targetDirectory,
+            basename(file.path),
+            await file.readAsBytes(),
+          );
+        }
+      }
+      _updateBackgroundJob(
+        job,
+        completed: 100,
+        status: _language.t('transfer.done'),
+        done: true,
+      );
+      _snack(_language.t('transfer.done'));
+      await _refresh();
+    } catch (error) {
+      _updateBackgroundJob(job, status: '$error', failed: true);
+      _snack('${_language.t('snack.operation.error')} $error');
+    } finally {
+      if (isVirtualTarget) {
+        try {
+          await localTarget.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<List<File>> _safeDirectoryFiles(Directory directory) async {
+    if (!await directory.exists()) return const <File>[];
+    final files = <File>[];
+    await for (final entity in directory.list(recursive: true)) {
+      if (entity is File) files.add(entity);
+    }
+    return files;
+  }
+
+  String _ytDlpFormat(String videoQuality) {
+    if (videoQuality == 'audio') return 'bestaudio/best';
+    if (videoQuality == 'best') return 'bestvideo+bestaudio/best';
+    final height = int.tryParse(videoQuality) ?? 1080;
+    return 'bestvideo[height<=$height]+bestaudio/best[height<=$height]';
+  }
+
+  Future<String> _ytDlpExecutablePath() async {
+    final plugin =
+        _pluginDefs.where((item) => item.id == 'yt-dlp-downloader').firstOrNull;
+    if (plugin != null) {
+      final component = Platform.isWindows
+          ? '${plugin.rootPath}${Platform.pathSeparator}components${Platform.pathSeparator}yt-dlp${Platform.pathSeparator}windows-x64${Platform.pathSeparator}yt-dlp.exe'
+          : '${plugin.rootPath}${Platform.pathSeparator}components${Platform.pathSeparator}yt-dlp${Platform.pathSeparator}linux-x64${Platform.pathSeparator}yt-dlp';
+      if (await File(component).exists()) return component;
+    }
+    return Platform.isWindows ? 'yt-dlp.exe' : 'yt-dlp';
+  }
+
+  Future<String> _ytDlpVersion() async {
+    final executable = await _ytDlpExecutablePath();
+    final result = await Process.run(
+      executable,
+      ['--version'],
+      runInShell: executable == 'yt-dlp' || executable == 'yt-dlp.exe',
+      stdoutEncoding: utf8,
+      stderrEncoding: utf8,
+    ).timeout(const Duration(seconds: 4));
+    if (result.exitCode != 0) throw StateError(result.stderr.toString());
+    return result.stdout.toString().trim();
+  }
+
+  Future<void> _updateYtDlpForCurrentSystem(
+    CloudPluginDefinition plugin,
+  ) async {
+    if (!Platform.isWindows) {
+      _snack(_language.t('plugin.ytdlp.update.windows.only'));
+      return;
+    }
+    final target = File(
+      '${plugin.rootPath}${Platform.pathSeparator}components${Platform.pathSeparator}yt-dlp${Platform.pathSeparator}windows-x64${Platform.pathSeparator}yt-dlp.exe',
+    );
+    final job =
+        _startBackgroundJob(_language.t('plugin.ytdlp.update'), total: 100);
+    try {
+      await target.parent.create(recursive: true);
+      await _downloadUriToFile(
+        Uri.parse(
+          'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe',
+        ),
+        target,
+        job,
+      );
+      _updateBackgroundJob(
+        job,
+        completed: 100,
+        status: target.path,
+        done: true,
+      );
+      _snack('${_language.t('settings.saved')} ${target.path}');
+    } catch (error) {
+      _updateBackgroundJob(job, status: '$error', failed: true);
+      _snack('$error');
+    }
+  }
+
+  Future<void> _downloadUriToFile(
+    Uri uri,
+    File target,
+    _BackgroundJob job,
+  ) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20);
+    try {
+      final request = await client.getUrl(uri);
+      final response = await request.close();
+      if (response.statusCode >= 400) {
+        throw HttpException('HTTP ${response.statusCode}', uri: uri);
+      }
+      final total = response.contentLength > 0 ? response.contentLength : null;
+      var received = 0;
+      final sink = target.openWrite();
+      try {
+        await for (final chunk in response) {
+          if (job.cancelled) throw StateError('Cancelled');
+          received += chunk.length;
+          sink.add(chunk);
+          final percent = total == null || total <= 0
+              ? math.min(99, (received / 1024 / 1024).floor())
+              : ((received / total) * 100).floor();
+          _updateBackgroundJob(
+            job,
+            completed: percent.clamp(0, 99).toInt(),
+            status:
+                '${_formatBytes(received)}${total == null ? '' : ' / ${_formatBytes(total)}'}',
+          );
+        }
+      } finally {
+        await sink.close();
+      }
+    } finally {
+      client.close(force: true);
     }
   }
 
@@ -6135,6 +6621,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                   onEntry: _openEntry,
                                   onEntryPlaylist: _openMediaEntryFromList,
                                   onDownloadEntry: _downloadPluginMediaEntry,
+                                  onDownloadEntries:
+                                      _downloadPluginMediaEntries,
                                   showFilters:
                                       _activePluginMediaSection == null,
                                 )
@@ -6170,6 +6658,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                   showToolbarActions: !Platform.isAndroid,
                                   showHiddenFiles: _effectiveShowHiddenFiles,
                                   showSystemFiles: _effectiveShowSystemFiles,
+                                  ytDlpEnabled: _pluginRuntime().plugins.any(
+                                        (plugin) =>
+                                            plugin.id == 'yt-dlp-downloader',
+                                      ),
                                   onPreviewResize: (delta) => setState(
                                     () => _previewWidth =
                                         (_previewWidth - delta)
@@ -6718,6 +7210,31 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _filePasswordValidUntil = DateTime.now().add(Duration(seconds: ttl));
   }
 
+  String _defaultEditedOutputPath(FilePreview preview, String extension) {
+    final filename =
+        '${_fileNameWithoutExtension(preview.title)}_edited$extension';
+    final directory = _currentPath ??
+        (preview.sourcePath == null
+            ? Directory.current.path
+            : File(preview.sourcePath!).parent.path);
+    try {
+      return _explorer.joinChildPath(directory, filename);
+    } catch (_) {
+      return '$directory${Platform.pathSeparator}$filename';
+    }
+  }
+
+  String _formatBytes(int value) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var size = value.toDouble();
+    var unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+      size /= 1024;
+      unit++;
+    }
+    return '${size.toStringAsFixed(size >= 10 || unit == 0 ? 0 : 1)} ${units[unit]}';
+  }
+
   void _snack(String text) {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
@@ -6778,6 +7295,7 @@ enum _EntryAction {
   permissions,
   ocrExtract,
   openSwf,
+  downloadUrl,
   editConnectionProfile,
   deleteConnectionProfile,
 }
@@ -6848,6 +7366,17 @@ Future<_EntryAction?> _showCascadingContextMenu({
   );
 }
 
+Offset _globalAnchorFor(BuildContext context, {bool trailing = false}) {
+  final renderObject = context.findRenderObject();
+  if (renderObject is RenderBox && renderObject.hasSize) {
+    final origin = renderObject.localToGlobal(Offset.zero);
+    return origin +
+        Offset(
+            trailing ? renderObject.size.width : 0, renderObject.size.height);
+  }
+  return Offset.zero;
+}
+
 class _CascadingContextMenu extends StatefulWidget {
   const _CascadingContextMenu({
     required this.anchor,
@@ -6865,6 +7394,7 @@ class _CascadingContextMenuState extends State<_CascadingContextMenu> {
   static const _menuWidth = 292.0;
   static const _itemHeight = 42.0;
   static const _dividerHeight = 8.0;
+  static const _menuMargin = 8.0;
   int? _activeIndex;
 
   @override
@@ -6872,26 +7402,46 @@ class _CascadingContextMenuState extends State<_CascadingContextMenu> {
     return Material(
       type: MaterialType.transparency,
       child: LayoutBuilder(builder: (context, constraints) {
+        final menuWidth = math
+            .min(_menuWidth, math.max(176.0, constraints.maxWidth - 16))
+            .toDouble();
+        final rootPlacement = _verticalPlacement(
+          anchorY: widget.anchor.dy,
+          contentHeight: _contentHeight(widget.items),
+          viewportHeight: constraints.maxHeight,
+        );
         final left = widget.anchor.dx
-            .clamp(8.0, math.max(8.0, constraints.maxWidth - _menuWidth - 8))
+            .clamp(_menuMargin,
+                math.max(_menuMargin, constraints.maxWidth - menuWidth - 8))
             .toDouble();
-        final top = widget.anchor.dy
-            .clamp(8.0, math.max(8.0, constraints.maxHeight - 64))
-            .toDouble();
+        final top = rootPlacement.top;
         final active =
             _activeIndex == null ? null : widget.items[_activeIndex!];
         final childItems = active != null && active.enabled
             ? active.children
             : const <_ContextMenuSpec>[];
-        final childTop = active == null
-            ? top
-            : (top + _rowOffset(_activeIndex!))
-                .clamp(8.0, math.max(8.0, constraints.maxHeight - 64))
-                .toDouble();
-        final opensRight = left + _menuWidth * 2 + 18 <= constraints.maxWidth;
+        final childPlacement = active == null
+            ? rootPlacement
+            : _verticalPlacement(
+                anchorY: top + _rowOffset(_activeIndex!),
+                contentHeight: _contentHeight(childItems),
+                viewportHeight: constraints.maxHeight,
+              );
+        final rightSpace =
+            constraints.maxWidth - (left + menuWidth + 6) - _menuMargin;
+        final leftSpace = left - 6 - _menuMargin;
+        final opensRight = rightSpace >= menuWidth || rightSpace >= leftSpace;
+        final availableSide = opensRight ? rightSpace : leftSpace;
+        final childWidth = math
+            .max(148.0, math.min(menuWidth, math.max(0.0, availableSide)))
+            .clamp(96.0, menuWidth)
+            .toDouble();
         final childLeft = opensRight
-            ? left + _menuWidth + 6
-            : math.max(8.0, left - _menuWidth - 6);
+            ? math.min(
+                constraints.maxWidth - childWidth - _menuMargin,
+                left + menuWidth + 6,
+              )
+            : math.max(_menuMargin, left - childWidth - 6);
         return Stack(children: [
           Positioned.fill(
             child: GestureDetector(
@@ -6903,23 +7453,31 @@ class _CascadingContextMenuState extends State<_CascadingContextMenu> {
           Positioned(
             left: left,
             top: top,
-            width: _menuWidth,
-            child: _menu(widget.items, root: true),
+            width: menuWidth,
+            child: _menu(
+              widget.items,
+              maxHeight: rootPlacement.maxHeight,
+              root: true,
+            ),
           ),
           if (childItems.isNotEmpty)
             Positioned(
               left: childLeft,
-              top: childTop,
-              width: _menuWidth,
-              child: _menu(childItems),
+              top: childPlacement.top,
+              width: childWidth,
+              child: _menu(childItems, maxHeight: childPlacement.maxHeight),
             ),
         ]);
       }),
     );
   }
 
-  Widget _menu(List<_ContextMenuSpec> items, {bool root = false}) {
-    final maxHeight = MediaQuery.sizeOf(context).height - 24;
+  Widget _menu(
+    List<_ContextMenuSpec> items, {
+    required double maxHeight,
+    bool root = false,
+  }) {
+    final needsScroll = _contentHeight(items) > maxHeight;
     return Material(
       elevation: 12,
       borderRadius: BorderRadius.circular(12),
@@ -6927,11 +7485,14 @@ class _CascadingContextMenuState extends State<_CascadingContextMenu> {
       color: Theme.of(context).colorScheme.surface,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxHeight: maxHeight),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            for (var i = 0; i < items.length; i++) _row(items[i], i, root),
-          ]),
+        child: Scrollbar(
+          thumbVisibility: needsScroll,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              for (var i = 0; i < items.length; i++) _row(items[i], i, root),
+            ]),
+          ),
         ),
       ),
     );
@@ -6949,27 +7510,31 @@ class _CascadingContextMenuState extends State<_CascadingContextMenu> {
       },
       child: InkWell(
         onTap: item.enabled ? () => _activate(item, root, index) : null,
-        child: Container(
-          height: _itemHeight,
-          color: active
-              ? colorScheme.primaryContainer.withValues(alpha: .55)
-              : null,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          child: Row(children: [
-            Expanded(
-              child: Text(
-                item.label ?? '',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: item.enabled
-                      ? colorScheme.onSurface
-                      : colorScheme.onSurface.withValues(alpha: .38),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: _itemHeight),
+          child: Container(
+            color: active
+                ? colorScheme.primaryContainer.withValues(alpha: .55)
+                : null,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child:
+                Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+              Expanded(
+                child: Text(
+                  item.label ?? '',
+                  maxLines: 3,
+                  softWrap: true,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: item.enabled
+                        ? colorScheme.onSurface
+                        : colorScheme.onSurface.withValues(alpha: .38),
+                  ),
                 ),
               ),
-            ),
-            if (item.hasChildren) const Icon(Icons.chevron_right, size: 18),
-          ]),
+              if (item.hasChildren) const Icon(Icons.chevron_right, size: 18),
+            ]),
+          ),
         ),
       ),
     );
@@ -6992,6 +7557,57 @@ class _CascadingContextMenuState extends State<_CascadingContextMenu> {
     }
     return offset;
   }
+
+  double _contentHeight(List<_ContextMenuSpec> items) {
+    return 12 +
+        items.fold<double>(
+          0,
+          (height, item) => height + (item.divider ? _dividerHeight : 48),
+        );
+  }
+
+  _MenuPlacement _verticalPlacement({
+    required double anchorY,
+    required double contentHeight,
+    required double viewportHeight,
+  }) {
+    final safeHeight = math.max(80.0, viewportHeight - _menuMargin * 2);
+    final downSpace = math.max(0.0, viewportHeight - anchorY - _menuMargin);
+    final upSpace = math.max(0.0, anchorY - _menuMargin);
+    if (contentHeight <= downSpace || downSpace >= upSpace) {
+      final maxHeight = contentHeight <= downSpace
+          ? contentHeight
+          : math.max(80.0, downSpace).clamp(80.0, safeHeight).toDouble();
+      return _MenuPlacement(
+        top: anchorY
+            .clamp(
+              _menuMargin,
+              math.max(_menuMargin, viewportHeight - maxHeight - _menuMargin),
+            )
+            .toDouble(),
+        maxHeight: maxHeight,
+      );
+    }
+    final maxHeight = contentHeight <= upSpace
+        ? contentHeight
+        : math.max(80.0, upSpace).clamp(80.0, safeHeight).toDouble();
+    return _MenuPlacement(
+      top: (anchorY - maxHeight)
+          .clamp(
+            _menuMargin,
+            math.max(_menuMargin, viewportHeight - maxHeight - _menuMargin),
+          )
+          .toDouble(),
+      maxHeight: maxHeight,
+    );
+  }
+}
+
+class _MenuPlacement {
+  const _MenuPlacement({required this.top, required this.maxHeight});
+
+  final double top;
+  final double maxHeight;
 }
 
 class _LockScreen extends StatefulWidget {
@@ -7842,6 +8458,7 @@ class _MediaOnlyView extends StatelessWidget {
     required this.onEntry,
     required this.onEntryPlaylist,
     required this.onDownloadEntry,
+    required this.onDownloadEntries,
     this.showFilters = true,
   });
 
@@ -7868,6 +8485,7 @@ class _MediaOnlyView extends StatelessWidget {
   final Future<void> Function(ExplorerEntry, List<ExplorerEntry>)
       onEntryPlaylist;
   final Future<void> Function(ExplorerEntry) onDownloadEntry;
+  final Future<void> Function(List<ExplorerEntry>) onDownloadEntries;
   final bool showFilters;
 
   @override
@@ -7908,6 +8526,7 @@ class _MediaOnlyView extends StatelessWidget {
               onEntry: onEntry,
               onEntryPlaylist: onEntryPlaylist,
               onDownloadEntry: onDownloadEntry,
+              onDownloadEntries: onDownloadEntries,
             );
           },
         ),
@@ -7926,6 +8545,7 @@ class _MediaLibraryBrowser extends StatelessWidget {
     required this.onEntry,
     required this.onEntryPlaylist,
     required this.onDownloadEntry,
+    required this.onDownloadEntries,
   });
 
   final AppLanguage language;
@@ -7937,6 +8557,7 @@ class _MediaLibraryBrowser extends StatelessWidget {
   final Future<void> Function(ExplorerEntry, List<ExplorerEntry>)
       onEntryPlaylist;
   final Future<void> Function(ExplorerEntry) onDownloadEntry;
+  final Future<void> Function(List<ExplorerEntry>) onDownloadEntries;
 
   @override
   Widget build(BuildContext context) {
@@ -7947,6 +8568,10 @@ class _MediaLibraryBrowser extends StatelessWidget {
             (FileViewerService.kindForName(entry.name) == kind ||
                 FileViewerService.kindForName(entry.path) == kind))
         .toList();
+    final directoryEntries = entries
+        .where((entry) => entry.isDirectory)
+        .toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     final recent = mediaEntries
         .where((entry) => mediaResumePositions.containsKey(entry.path))
         .toList()
@@ -7981,12 +8606,14 @@ class _MediaLibraryBrowser extends StatelessWidget {
               emptyText: language.t('media.choose.to.play'),
               onEntry: (entry) => onEntryPlaylist(entry, currentEntries),
               onDownloadEntry: onDownloadEntry,
+              onDownloadEntries: onDownloadEntries,
             ),
             _MediaEntryList(
               language: language,
-              entries: mediaEntries,
+              entries: [...directoryEntries, ...mediaEntries],
               onEntry: onEntry,
               onDownloadEntry: onDownloadEntry,
+              onDownloadEntries: onDownloadEntries,
             ),
             _MediaGroupList(
               language: language,
@@ -8023,6 +8650,7 @@ class _MediaLibraryBrowser extends StatelessWidget {
               entries: recent,
               onEntry: onEntry,
               onDownloadEntry: onDownloadEntry,
+              onDownloadEntries: onDownloadEntries,
             ),
           ]),
         ),
@@ -8091,12 +8719,13 @@ class _MediaLibraryBrowser extends StatelessWidget {
   }
 }
 
-class _MediaEntryList extends StatelessWidget {
+class _MediaEntryList extends StatefulWidget {
   const _MediaEntryList({
     required this.language,
     required this.entries,
     required this.onEntry,
     required this.onDownloadEntry,
+    required this.onDownloadEntries,
     this.emptyText,
   });
 
@@ -8105,40 +8734,124 @@ class _MediaEntryList extends StatelessWidget {
   final String? emptyText;
   final Future<void> Function(ExplorerEntry) onEntry;
   final Future<void> Function(ExplorerEntry) onDownloadEntry;
+  final Future<void> Function(List<ExplorerEntry>) onDownloadEntries;
+
+  @override
+  State<_MediaEntryList> createState() => _MediaEntryListState();
+}
+
+class _MediaEntryListState extends State<_MediaEntryList> {
+  final Set<String> _selectedPaths = <String>{};
+
+  @override
+  void didUpdateWidget(covariant _MediaEntryList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final currentPaths = widget.entries.map((entry) => entry.path).toSet();
+    _selectedPaths.removeWhere((path) => !currentPaths.contains(path));
+  }
+
+  void _toggleSelection(ExplorerEntry entry) {
+    if (!_downloadable(entry)) return;
+    setState(() {
+      if (!_selectedPaths.remove(entry.path)) {
+        _selectedPaths.add(entry.path);
+      }
+    });
+  }
+
+  bool _downloadable(ExplorerEntry entry) =>
+      !entry.isDirectory && _isHttpMedia(entry.path);
+
+  List<ExplorerEntry> get _selectedEntries => widget.entries
+      .where((entry) => _selectedPaths.contains(entry.path))
+      .toList();
 
   @override
   Widget build(BuildContext context) {
-    if (entries.isEmpty) {
-      return Center(child: Text(emptyText ?? language.t('explorer.empty')));
+    if (widget.entries.isEmpty) {
+      return Center(
+          child: Text(widget.emptyText ?? widget.language.t('explorer.empty')));
     }
-    return ListView.separated(
+    final list = ListView.separated(
       padding: const EdgeInsets.all(14),
-      itemCount: entries.length,
+      itemCount: widget.entries.length,
       separatorBuilder: (_, __) => const Divider(height: 1),
       itemBuilder: (context, index) {
-        final entry = entries[index];
+        final entry = widget.entries[index];
         final kind = FileViewerService.kindForName(entry.name);
+        final selectionMode = _selectedPaths.isNotEmpty;
+        final selected = _selectedPaths.contains(entry.path);
+        final downloadable = _downloadable(entry);
         return ListTile(
-          leading: Icon(kind == FileContentKind.video
-              ? Icons.movie_outlined
-              : Icons.audiotrack_outlined),
+          leading: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onLongPress: downloadable ? () => _toggleSelection(entry) : null,
+            onTap: selectionMode && downloadable
+                ? () => _toggleSelection(entry)
+                : null,
+            child: selectionMode && downloadable
+                ? Checkbox(
+                    value: selected,
+                    onChanged: (_) => _toggleSelection(entry),
+                  )
+                : Icon(entry.isDirectory
+                    ? Icons.folder_outlined
+                    : kind == FileContentKind.video
+                        ? Icons.movie_outlined
+                        : Icons.audiotrack_outlined),
+          ),
           title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
           subtitle: Text('${_size(entry)} - ${_date(entry.modifiedAt)}'),
-          trailing: _isHttpMedia(entry.path)
+          selected: selected,
+          trailing: downloadable
               ? IconButton(
-                  tooltip: language.t('plugin.media.download'),
+                  tooltip: widget.language.t('plugin.media.download'),
                   icon: const Icon(Icons.download_outlined),
-                  onPressed: () => unawaited(onDownloadEntry(entry)),
+                  onPressed: () => unawaited(widget.onDownloadEntry(entry)),
                 )
               : null,
-          onTap: () => unawaited(onEntry(entry)),
+          onTap: selectionMode && downloadable
+              ? () => _toggleSelection(entry)
+              : () => unawaited(widget.onEntry(entry)),
         );
       },
     );
+    if (_selectedPaths.isEmpty) return list;
+    return Column(children: [
+      Material(
+        color: Theme.of(context).colorScheme.primaryContainer,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(children: [
+            Expanded(
+              child: Text(
+                '${widget.language.t('selection.count')}: ${_selectedPaths.length}',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            IconButton(
+              tooltip: widget.language.t('plugin.media.download.selected'),
+              onPressed: () {
+                final selected = _selectedEntries;
+                setState(() => _selectedPaths.clear());
+                unawaited(widget.onDownloadEntries(selected));
+              },
+              icon: const Icon(Icons.download_outlined),
+            ),
+            IconButton(
+              tooltip: widget.language.t('selection.clear'),
+              onPressed: () => setState(_selectedPaths.clear),
+              icon: const Icon(Icons.close),
+            ),
+          ]),
+        ),
+      ),
+      Expanded(child: list),
+    ]);
   }
 
   String _size(ExplorerEntry entry) {
-    if (entry.isDirectory) return language.t('explorer.folder');
+    if (entry.isDirectory) return widget.language.t('explorer.folder');
     final size = entry.sizeBytes;
     if (size < 1024) return '$size B';
     if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)} KB';
@@ -8342,6 +9055,7 @@ class _ExplorerView extends StatelessWidget {
     required this.showToolbarActions,
     required this.showHiddenFiles,
     required this.showSystemFiles,
+    required this.ytDlpEnabled,
     required this.onPreviewResize,
     required this.onTogglePreview,
     required this.onOpenPassword,
@@ -8408,6 +9122,7 @@ class _ExplorerView extends StatelessWidget {
   final bool showToolbarActions;
   final bool showHiddenFiles;
   final bool showSystemFiles;
+  final bool ytDlpEnabled;
   final ValueChanged<double> onPreviewResize;
   final VoidCallback onTogglePreview;
   final VoidCallback onOpenPassword;
@@ -8555,6 +9270,7 @@ class _ExplorerView extends StatelessWidget {
             localSearchEnabled: localSearchEnabled,
             showHiddenFiles: showHiddenFiles,
             showSystemFiles: showSystemFiles,
+            ytDlpEnabled: ytDlpEnabled,
             showVideoThumbnails: showVideoThumbnails,
             animateVideoThumbnails: animateVideoThumbnails,
             showAudioArtwork: showAudioArtwork,
@@ -8872,6 +9588,7 @@ class _EntryList extends StatelessWidget {
     required this.localSearchEnabled,
     required this.showHiddenFiles,
     required this.showSystemFiles,
+    required this.ytDlpEnabled,
     required this.showVideoThumbnails,
     required this.animateVideoThumbnails,
     required this.showAudioArtwork,
@@ -8905,6 +9622,7 @@ class _EntryList extends StatelessWidget {
   final bool localSearchEnabled;
   final bool showHiddenFiles;
   final bool showSystemFiles;
+  final bool ytDlpEnabled;
   final bool showVideoThumbnails;
   final bool animateVideoThumbnails;
   final bool showAudioArtwork;
@@ -8954,6 +9672,7 @@ class _EntryList extends StatelessWidget {
             language: language,
             currentPath: currentPath,
             canPaste: canPaste,
+            ytDlpEnabled: ytDlpEnabled,
             onAction: onEmptyAreaAction,
             child: Center(child: Text(language.t('explorer.empty'))),
           );
@@ -8968,6 +9687,7 @@ class _EntryList extends StatelessWidget {
                 language: language,
                 currentPath: currentPath,
                 canPaste: canPaste,
+                ytDlpEnabled: ytDlpEnabled,
                 onAction: onEmptyAreaAction,
                 child: const SizedBox(height: 240),
               );
@@ -8978,7 +9698,8 @@ class _EntryList extends StatelessWidget {
             return GestureDetector(
               onSecondaryTapDown: (details) =>
                   _showEntryContextMenu(context, entry, details.globalPosition),
-              onLongPress: () => _showEntryContextMenu(context, entry, null),
+              onLongPressStart: (details) =>
+                  _showEntryContextMenu(context, entry, details.globalPosition),
               onDoubleTap: entry.isDirectory
                   ? null
                   : () => unawaited(onEntryFullscreen(entry)),
@@ -9039,10 +9760,16 @@ class _EntryList extends StatelessWidget {
                   if (entry.containerInfo?.isOk == true)
                     const Icon(Icons.verified_outlined,
                         color: Color(0xFF2B7A4B)),
-                  IconButton(
-                    icon: const Icon(Icons.more_vert),
-                    onPressed: () => unawaited(
-                      _showEntryContextMenu(context, entry, null),
+                  Builder(
+                    builder: (buttonContext) => IconButton(
+                      icon: const Icon(Icons.more_vert),
+                      onPressed: () => unawaited(
+                        _showEntryContextMenu(
+                          context,
+                          entry,
+                          _globalAnchorFor(buttonContext, trailing: true),
+                        ),
+                      ),
                     ),
                   ),
                 ]),
@@ -9242,6 +9969,12 @@ class _EntryList extends StatelessWidget {
           enabled: canChangeFile,
           children: _createSubmenuSpecs(),
         ),
+      if (entry.isDirectory && ytDlpEnabled)
+        _menuItem(
+          _EntryAction.downloadUrl,
+          language.t('plugin.ytdlp.download.url'),
+          enabled: canChangeFile,
+        ),
       if (!entry.isDirectory)
         _parentItem(
           _EntryAction.openAs,
@@ -9438,6 +10171,7 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.permissions:
       case _EntryAction.ocrExtract:
       case _EntryAction.openSwf:
+      case _EntryAction.downloadUrl:
       case _EntryAction.editConnectionProfile:
       case _EntryAction.deleteConnectionProfile:
         onEntryAction(entry, action);
@@ -9752,6 +10486,7 @@ class _EmptyExplorerArea extends StatelessWidget {
     required this.language,
     required this.currentPath,
     required this.canPaste,
+    required this.ytDlpEnabled,
     required this.onAction,
     required this.child,
   });
@@ -9759,6 +10494,7 @@ class _EmptyExplorerArea extends StatelessWidget {
   final AppLanguage language;
   final String? currentPath;
   final bool canPaste;
+  final bool ytDlpEnabled;
   final Future<void> Function(String, _EntryAction) onAction;
   final Widget child;
 
@@ -9768,7 +10504,7 @@ class _EmptyExplorerArea extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       onSecondaryTapDown: (details) =>
           _showMenu(context, details.globalPosition),
-      onLongPress: () => _showMenu(context, null),
+      onLongPressStart: (details) => _showMenu(context, details.globalPosition),
       child: child,
     );
   }
@@ -9791,6 +10527,12 @@ class _EmptyExplorerArea extends StatelessWidget {
           label: language.t('explorer.create'),
           children: _createSubmenuSpecs(),
         ),
+        if (ytDlpEnabled) const _ContextMenuSpec.divider(),
+        if (ytDlpEnabled)
+          _ContextMenuSpec(
+            action: _EntryAction.downloadUrl,
+            label: language.t('plugin.ytdlp.download.url'),
+          ),
       ],
     );
     if (selected != null && selected != _EntryAction.create) {
@@ -13651,11 +14393,15 @@ class _TextBinaryEditorDialog extends StatefulWidget {
     required this.preview,
     required this.language,
     required this.currentDirectory,
+    required this.defaultOutputPath,
+    required this.onSaveBytes,
   });
 
   final FilePreview preview;
   final AppLanguage language;
   final String? currentDirectory;
+  final String defaultOutputPath;
+  final Future<String> Function(String path, List<int> bytes) onSaveBytes;
 
   @override
   State<_TextBinaryEditorDialog> createState() =>
@@ -13681,14 +14427,7 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
     _controller = TextEditingController();
     _searchController = TextEditingController();
     _editorScrollController = ScrollController();
-    final directory = widget.currentDirectory ??
-        (widget.preview.sourcePath == null
-            ? Directory.current.path
-            : File(widget.preview.sourcePath!).parent.path);
-    _outputController = TextEditingController(
-      text:
-          '$directory${Platform.pathSeparator}${_fileNameWithoutExtension(widget.preview.title)}_edited${FileViewerService.extensionForName(widget.preview.title)}',
-    );
+    _outputController = TextEditingController(text: widget.defaultOutputPath);
     _rebuildEditorText();
   }
 
@@ -13901,10 +14640,8 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
       _syncBytesFromEditor();
       final path = _outputController.text.trim();
       if (path.isEmpty) throw const FormatException('Output path is empty.');
-      final file = File(path);
-      await file.parent.create(recursive: true);
-      await file.writeAsBytes(_bytes, flush: true);
-      if (mounted) Navigator.pop(context, file.path);
+      final savedPath = await widget.onSaveBytes(path, _bytes);
+      if (mounted) Navigator.pop(context, savedPath);
     } catch (error) {
       if (mounted) {
         setState(() => _status = '${widget.language.t('editor.error')} $error');
@@ -14075,11 +14812,15 @@ class _ImageEditorDialog extends StatefulWidget {
     required this.preview,
     required this.language,
     required this.currentDirectory,
+    required this.defaultOutputPath,
+    required this.onSaveBytes,
   });
 
   final FilePreview preview;
   final AppLanguage language;
   final String? currentDirectory;
+  final String defaultOutputPath;
+  final Future<String> Function(String path, List<int> bytes) onSaveBytes;
 
   @override
   State<_ImageEditorDialog> createState() => _ImageEditorDialogState();
@@ -14102,14 +14843,7 @@ class _ImageEditorDialogState extends State<_ImageEditorDialog> {
     final decoded = img.decodeImage(Uint8List.fromList(widget.preview.bytes!));
     _image = decoded ?? img.Image(width: 1024, height: 1024);
     _baseBytes = Uint8List.fromList(img.encodePng(_image));
-    final directory = widget.currentDirectory ??
-        (widget.preview.sourcePath == null
-            ? Directory.current.path
-            : File(widget.preview.sourcePath!).parent.path);
-    _outputController = TextEditingController(
-      text:
-          '$directory${Platform.pathSeparator}${_fileNameWithoutExtension(widget.preview.title)}_edited.png',
-    );
+    _outputController = TextEditingController(text: widget.defaultOutputPath);
   }
 
   @override
@@ -14354,8 +15088,8 @@ class _ImageEditorDialogState extends State<_ImageEditorDialog> {
         'bmp' => img.encodeBmp(output),
         _ => img.encodePng(output),
       };
-      await File(path).writeAsBytes(bytes, flush: true);
-      if (mounted) Navigator.pop(context, path);
+      final savedPath = await widget.onSaveBytes(path, bytes);
+      if (mounted) Navigator.pop(context, savedPath);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -15933,6 +16667,7 @@ class _SettingsView extends StatefulWidget {
     required bool androidMediaNotificationControls,
     required bool headsetMediaControls,
     required bool externalFloatingPlayer,
+    required bool minimizeToTrayOnClose,
     required bool encryptThumbnailCache,
     required bool encryptResumePositions,
     required int progressAutoCollapseSeconds,
@@ -16024,6 +16759,7 @@ class _SettingsViewState extends State<_SettingsView> {
   late bool _androidMediaNotificationControls;
   late bool _headsetMediaControls;
   late bool _externalFloatingPlayer;
+  late bool _minimizeToTrayOnClose;
   late bool _encryptThumbnailCache;
   late bool _encryptResumePositions;
   late bool _rememberVideoPositions;
@@ -16078,6 +16814,7 @@ class _SettingsViewState extends State<_SettingsView> {
         widget.settings.androidMediaNotificationControls;
     _headsetMediaControls = widget.settings.headsetMediaControls;
     _externalFloatingPlayer = widget.settings.externalFloatingPlayer;
+    _minimizeToTrayOnClose = widget.settings.minimizeToTrayOnClose;
     _encryptThumbnailCache = widget.settings.encryptThumbnailCache;
     _encryptResumePositions = widget.settings.encryptResumePositions;
     _rememberVideoPositions = widget.settings.rememberVideoPositions;
@@ -16696,6 +17433,13 @@ class _SettingsViewState extends State<_SettingsView> {
           title: Text(language.t('settings.background.external.overlay')),
         ),
         SwitchListTile(
+          value: _minimizeToTrayOnClose,
+          onChanged: Platform.isWindows
+              ? (v) => setState(() => _minimizeToTrayOnClose = v)
+              : null,
+          title: Text(language.t('settings.window.minimize.tray')),
+        ),
+        SwitchListTile(
           value: _androidMediaNotificationControls,
           onChanged: Platform.isAndroid
               ? (v) => setState(() => _androidMediaNotificationControls = v)
@@ -16996,6 +17740,7 @@ class _SettingsViewState extends State<_SettingsView> {
         androidMediaNotificationControls: _androidMediaNotificationControls,
         headsetMediaControls: _headsetMediaControls,
         externalFloatingPlayer: _externalFloatingPlayer,
+        minimizeToTrayOnClose: _minimizeToTrayOnClose,
         encryptThumbnailCache: _encryptThumbnailCache,
         encryptResumePositions: _encryptResumePositions,
         progressAutoCollapseSeconds:

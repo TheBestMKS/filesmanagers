@@ -36,6 +36,7 @@ class FileExplorerRepository {
   static const String _rarScheme = 'rar://';
   static const String _remoteScheme = 'remote://';
   static const String _torrentScheme = 'torrent://';
+  static const String _mtpScheme = 'mtp://';
   static const String _folderMetaFileName = '.folder.cryptmeta';
 
   void configurePlugins(
@@ -52,7 +53,8 @@ class FileExplorerRepository {
       _ZipVirtualPath.tryParse(path) != null ||
       _RarVirtualPath.tryParse(path) != null ||
       _RemoteVirtualPath.tryParse(path) != null ||
-      _TorrentVirtualPath.tryParse(path) != null;
+      _TorrentVirtualPath.tryParse(path) != null ||
+      _MtpVirtualPath.tryParse(path) != null;
 
   String zipRootPath(String archivePath) => _ZipVirtualPath.build(archivePath);
 
@@ -101,6 +103,14 @@ class FileExplorerRepository {
       return _TorrentVirtualPath.build(
         torrent.torrentPath,
         _zipParent(torrent.innerPath),
+      );
+    }
+    final mtp = _MtpVirtualPath.tryParse(path);
+    if (mtp != null) {
+      if (mtp.segments.isEmpty) return mtp.fullPath;
+      return _MtpVirtualPath.build(
+        mtp.deviceName,
+        mtp.segments.take(mtp.segments.length - 1).toList(),
       );
     }
     return File(path).parent.path;
@@ -324,6 +334,10 @@ Get-PnpDevice -Class WPD -Status OK |
     if (torrentPath != null) {
       return _listTorrentDirectory(torrentPath);
     }
+    final mtpPath = _MtpVirtualPath.tryParse(path);
+    if (mtpPath != null) {
+      return _listMtpDirectory(mtpPath);
+    }
 
     final directory = Directory(path);
     if (!await directory.exists()) {
@@ -513,6 +527,10 @@ Get-PnpDevice -Class WPD -Status OK |
     if (torrentPath != null) {
       return _entryForTorrentPath(torrentPath);
     }
+    final mtpPath = _MtpVirtualPath.tryParse(path);
+    if (mtpPath != null) {
+      return _entryForMtpPath(mtpPath);
+    }
 
     final type = await FileSystemEntity.type(path, followLinks: false);
     if (type == FileSystemEntityType.notFound) {
@@ -583,6 +601,10 @@ Get-PnpDevice -Class WPD -Status OK |
     if (zip != null) return _zipBasename(zip.innerPath);
     final rar = _RarVirtualPath.tryParse(path);
     if (rar != null) return _zipBasename(rar.innerPath);
+    final mtp = _MtpVirtualPath.tryParse(path);
+    if (mtp != null) {
+      return mtp.segments.isEmpty ? mtp.deviceName : mtp.segments.last;
+    }
     try {
       return Uri.decodeComponent(basename(path));
     } catch (_) {
@@ -761,6 +783,15 @@ Get-PnpDevice -Class WPD -Status OK |
     final torrentPath = _TorrentVirtualPath.tryParse(path);
     if (torrentPath != null) {
       return _previewTorrentFile(torrentPath);
+    }
+    final mtpPath = _MtpVirtualPath.tryParse(path);
+    if (mtpPath != null) {
+      return FilePreview(
+        title: _displayNameForPath(path),
+        subtitle:
+            'MTP files are browsed through the Windows device bridge. Copy the file locally or open it externally to preview it.',
+        contentKind: FileContentKind.unknown,
+      );
     }
 
     final file = File(path);
@@ -1362,6 +1393,50 @@ Get-PnpDevice -Class WPD -Status OK |
     return target.path;
   }
 
+  String joinChildPath(String parentPath, String name) {
+    final normalized = name.trim();
+    if (normalized.isEmpty ||
+        normalized.contains('/') ||
+        normalized.contains('\\')) {
+      throw ArgumentError('Invalid file name.');
+    }
+    final remote = _RemoteVirtualPath.tryParse(parentPath);
+    if (remote != null) {
+      return _RemoteVirtualPath.build(
+        remote.pluginId,
+        _remoteJoin(remote.innerPath, normalized),
+      );
+    }
+    if (parentPath.endsWith(Platform.pathSeparator) ||
+        (Platform.isWindows && RegExp(r'^[a-zA-Z]:\\$').hasMatch(parentPath))) {
+      return '$parentPath$normalized';
+    }
+    return '$parentPath${Platform.pathSeparator}$normalized';
+  }
+
+  Future<String> writeFile(String targetPath, List<int> bytes) async {
+    final remote = _RemoteVirtualPath.tryParse(targetPath);
+    if (remote != null) {
+      if (remote.innerPath == '/') {
+        throw ArgumentError('Remote file path is required.');
+      }
+      await _remote
+          .clientFor(remote.pluginId)
+          .writeBytes(remote.innerPath, bytes);
+      return remote.fullPath;
+    }
+    if (_ZipVirtualPath.tryParse(targetPath) != null ||
+        _RarVirtualPath.tryParse(targetPath) != null ||
+        _TorrentVirtualPath.tryParse(targetPath) != null ||
+        _MtpVirtualPath.tryParse(targetPath) != null) {
+      throw UnsupportedError('This virtual location is read-only.');
+    }
+    final file = File(targetPath);
+    await file.parent.create(recursive: true);
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
+  }
+
   Future<String> _availableRemoteFile(
     RemoteFileSystemClient client,
     String parentPath,
@@ -1525,6 +1600,153 @@ Get-PnpDevice -Class WPD -Status OK |
       bytes: bytes,
       sourcePath: remote.fullPath,
     );
+  }
+
+  Future<DirectorySnapshot> _listMtpDirectory(_MtpVirtualPath mtp) async {
+    if (!Platform.isWindows) {
+      return DirectorySnapshot(
+        path: mtp.fullPath,
+        entries: const <ExplorerEntry>[],
+        error: 'MTP browsing is available through the Windows WPD bridge.',
+      );
+    }
+    const script = r'''
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$deviceName = $env:SV_MTP_DEVICE
+$segmentsJson = $env:SV_MTP_SEGMENTS
+$segments = @()
+if ($segmentsJson -and $segmentsJson.Trim().Length -gt 0) {
+  $decoded = ConvertFrom-Json -InputObject $segmentsJson
+  if ($decoded -is [array]) { $segments = @($decoded) } else { $segments = @($decoded) }
+}
+$shell = New-Object -ComObject Shell.Application
+$root = $shell.NameSpace(17)
+if (-not $root) { throw 'Windows portable devices namespace is unavailable.' }
+$device = $root.Items() | Where-Object { $_.Name -eq $deviceName } | Select-Object -First 1
+if (-not $device) { throw "MTP device not found: $deviceName" }
+$folder = $device.GetFolder
+foreach ($segment in $segments) {
+  $child = $folder.Items() | Where-Object { $_.Name -eq [string]$segment } | Select-Object -First 1
+  if (-not $child) { throw "MTP folder not found: $segment" }
+  if (-not $child.IsFolder) { throw "MTP item is not a folder: $segment" }
+  $folder = $child.GetFolder
+}
+$items = @()
+foreach ($item in $folder.Items()) {
+  $size = 0
+  try { $size = [int64]$item.Size } catch {}
+  $modified = ''
+  try {
+    if ($item.ModifyDate) {
+      $modified = ([datetime]$item.ModifyDate).ToUniversalTime().ToString('o')
+    }
+  } catch {}
+  $items += [pscustomobject]@{
+    name = [string]$item.Name
+    isDirectory = [bool]$item.IsFolder
+    sizeBytes = $size
+    modifiedAt = $modified
+  }
+}
+$items | ConvertTo-Json -Compress -Depth 4
+''';
+    try {
+      final result = await Process.run(
+        'powershell',
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+        environment: <String, String>{
+          'SV_MTP_DEVICE': mtp.deviceName,
+          'SV_MTP_SEGMENTS': jsonEncode(mtp.segments),
+        },
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
+        runInShell: false,
+      ).timeout(const Duration(seconds: 12));
+      if (result.exitCode != 0) {
+        throw ProcessException(
+          'powershell',
+          const <String>[],
+          result.stderr.toString(),
+          result.exitCode,
+        );
+      }
+      final raw = result.stdout.toString().trim();
+      final decoded = raw.isEmpty ? const <Object?>[] : jsonDecode(raw);
+      final rows = decoded is List ? decoded : <Object?>[decoded];
+      final entries = <ExplorerEntry>[
+        if (mtp.segments.isNotEmpty)
+          ExplorerEntry(
+            name: '...',
+            path: _MtpVirtualPath.build(
+              mtp.deviceName,
+              mtp.segments.take(mtp.segments.length - 1).toList(),
+            ),
+            kind: ExplorerEntryKind.directory,
+            sizeBytes: 0,
+            modifiedAt: DateTime.now(),
+            isNavigationEntry: true,
+          ),
+      ];
+      for (final row in rows.whereType<Map>()) {
+        final name = row['name']?.toString().trim() ?? '';
+        if (name.isEmpty) continue;
+        final isDirectory = row['isDirectory'] == true;
+        final modified =
+            DateTime.tryParse(row['modifiedAt']?.toString() ?? '')?.toLocal() ??
+                DateTime.now();
+        entries.add(
+          ExplorerEntry(
+            name: name,
+            path: _MtpVirtualPath.build(
+              mtp.deviceName,
+              <String>[...mtp.segments, name],
+            ),
+            kind:
+                isDirectory ? ExplorerEntryKind.directory : _kindForFile(name),
+            sizeBytes: int.tryParse(row['sizeBytes']?.toString() ?? '') ?? 0,
+            modifiedAt: modified,
+          ),
+        );
+      }
+      entries.sort((a, b) {
+        if (a.isNavigationEntry != b.isNavigationEntry) {
+          return a.isNavigationEntry ? -1 : 1;
+        }
+        if (a.isDirectory != b.isDirectory) {
+          return a.isDirectory ? -1 : 1;
+        }
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+      return DirectorySnapshot(path: mtp.fullPath, entries: entries);
+    } catch (error) {
+      return DirectorySnapshot(
+        path: mtp.fullPath,
+        entries: const <ExplorerEntry>[],
+        error: 'MTP device could not be opened: $error',
+      );
+    }
+  }
+
+  Future<ExplorerEntry?> _entryForMtpPath(_MtpVirtualPath mtp) async {
+    if (!Platform.isWindows) return null;
+    if (mtp.segments.isEmpty) {
+      return ExplorerEntry(
+        name: mtp.deviceName,
+        path: mtp.fullPath,
+        kind: ExplorerEntryKind.directory,
+        sizeBytes: 0,
+        modifiedAt: DateTime.now(),
+      );
+    }
+    final parent = _MtpVirtualPath.build(
+      mtp.deviceName,
+      mtp.segments.take(mtp.segments.length - 1).toList(),
+    );
+    final snapshot = await _listMtpDirectory(_MtpVirtualPath.tryParse(parent)!);
+    return snapshot.entries
+        .where((entry) => entry.name == mtp.segments.last)
+        .firstOrNull;
   }
 
   Future<DirectorySnapshot> _listTorrentDirectory(
@@ -3286,6 +3508,49 @@ String _remoteBasename(String path) {
   final normalized = _normalizeRemotePath(path);
   if (normalized == '/') return '/';
   return normalized.split('/').last;
+}
+
+class _MtpVirtualPath {
+  const _MtpVirtualPath({
+    required this.deviceName,
+    required this.segments,
+    required this.fullPath,
+  });
+
+  final String deviceName;
+  final List<String> segments;
+  final String fullPath;
+
+  static _MtpVirtualPath? tryParse(String path) {
+    if (!path.startsWith(FileExplorerRepository._mtpScheme)) return null;
+    final rest = path.substring(FileExplorerRepository._mtpScheme.length);
+    if (rest.trim().isEmpty) return null;
+    final parts = rest.split('/');
+    final deviceName = Uri.decodeComponent(parts.first);
+    if (deviceName.trim().isEmpty) return null;
+    final segments = [
+      for (final part in parts.skip(1))
+        if (part.trim().isNotEmpty) Uri.decodeComponent(part),
+    ];
+    return _MtpVirtualPath(
+      deviceName: deviceName,
+      segments: segments,
+      fullPath: build(deviceName, segments),
+    );
+  }
+
+  static String build(String deviceName, [List<String> segments = const []]) {
+    final encodedDevice = Uri.encodeComponent(deviceName);
+    final encodedSegments = [
+      for (final segment in segments)
+        if (segment.trim().isNotEmpty && segment.trim() != '..')
+          Uri.encodeComponent(segment.trim()),
+    ];
+    if (encodedSegments.isEmpty) {
+      return '${FileExplorerRepository._mtpScheme}$encodedDevice';
+    }
+    return '${FileExplorerRepository._mtpScheme}$encodedDevice/${encodedSegments.join('/')}';
+  }
 }
 
 class _TorrentVirtualPath {

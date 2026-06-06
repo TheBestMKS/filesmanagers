@@ -221,6 +221,7 @@ class SecuritySettings {
     this.androidMediaNotificationControls = true,
     this.headsetMediaControls = true,
     this.externalFloatingPlayer = false,
+    this.minimizeToTrayOnClose = true,
     this.encryptThumbnailCache = false,
     this.encryptResumePositions = false,
     this.progressAutoCollapseSeconds = 3,
@@ -315,6 +316,7 @@ class SecuritySettings {
   final bool androidMediaNotificationControls;
   final bool headsetMediaControls;
   final bool externalFloatingPlayer;
+  final bool minimizeToTrayOnClose;
   final bool encryptThumbnailCache;
   final bool encryptResumePositions;
   final int progressAutoCollapseSeconds;
@@ -425,6 +427,7 @@ class SecuritySettings {
     bool? androidMediaNotificationControls,
     bool? headsetMediaControls,
     bool? externalFloatingPlayer,
+    bool? minimizeToTrayOnClose,
     bool? encryptThumbnailCache,
     bool? encryptResumePositions,
     int? progressAutoCollapseSeconds,
@@ -569,6 +572,8 @@ class SecuritySettings {
       headsetMediaControls: headsetMediaControls ?? this.headsetMediaControls,
       externalFloatingPlayer:
           externalFloatingPlayer ?? this.externalFloatingPlayer,
+      minimizeToTrayOnClose:
+          minimizeToTrayOnClose ?? this.minimizeToTrayOnClose,
       encryptThumbnailCache:
           encryptThumbnailCache ?? this.encryptThumbnailCache,
       encryptResumePositions:
@@ -767,6 +772,7 @@ class SecuritySettings {
           json['androidMediaNotificationControls'] as bool? ?? true,
       headsetMediaControls: json['headsetMediaControls'] as bool? ?? true,
       externalFloatingPlayer: json['externalFloatingPlayer'] as bool? ?? false,
+      minimizeToTrayOnClose: json['minimizeToTrayOnClose'] as bool? ?? true,
       encryptThumbnailCache: json['encryptThumbnailCache'] as bool? ?? false,
       encryptResumePositions: json['encryptResumePositions'] as bool? ?? false,
       progressAutoCollapseSeconds:
@@ -880,6 +886,7 @@ class SecuritySettings {
       'androidMediaNotificationControls': androidMediaNotificationControls,
       'headsetMediaControls': headsetMediaControls,
       'externalFloatingPlayer': externalFloatingPlayer,
+      'minimizeToTrayOnClose': minimizeToTrayOnClose,
       'encryptThumbnailCache': encryptThumbnailCache,
       'encryptResumePositions': encryptResumePositions,
       'progressAutoCollapseSeconds': progressAutoCollapseSeconds,
@@ -1272,6 +1279,7 @@ class SecuritySettingsRepository {
     bool? androidMediaNotificationControls,
     bool? headsetMediaControls,
     bool? externalFloatingPlayer,
+    bool? minimizeToTrayOnClose,
     bool? encryptThumbnailCache,
     bool? encryptResumePositions,
     int? progressAutoCollapseSeconds,
@@ -1357,6 +1365,7 @@ class SecuritySettingsRepository {
       androidMediaNotificationControls: androidMediaNotificationControls,
       headsetMediaControls: headsetMediaControls,
       externalFloatingPlayer: externalFloatingPlayer,
+      minimizeToTrayOnClose: minimizeToTrayOnClose,
       encryptThumbnailCache: encryptThumbnailCache,
       encryptResumePositions: encryptResumePositions,
       progressAutoCollapseSeconds: progressAutoCollapseSeconds,
