@@ -223,6 +223,7 @@ class SecuritySettings {
     this.externalFloatingPlayer = false,
     this.encryptThumbnailCache = false,
     this.encryptResumePositions = false,
+    this.progressAutoCollapseSeconds = 3,
     this.audioEqualizerPreset = 'flat',
     this.videoEqualizerPreset = 'flat',
     this.perFileEqualizerPresets = const <String, String>{},
@@ -316,6 +317,7 @@ class SecuritySettings {
   final bool externalFloatingPlayer;
   final bool encryptThumbnailCache;
   final bool encryptResumePositions;
+  final int progressAutoCollapseSeconds;
   final String audioEqualizerPreset;
   final String videoEqualizerPreset;
   final Map<String, String> perFileEqualizerPresets;
@@ -425,6 +427,7 @@ class SecuritySettings {
     bool? externalFloatingPlayer,
     bool? encryptThumbnailCache,
     bool? encryptResumePositions,
+    int? progressAutoCollapseSeconds,
     String? audioEqualizerPreset,
     String? videoEqualizerPreset,
     Map<String, String>? perFileEqualizerPresets,
@@ -570,6 +573,8 @@ class SecuritySettings {
           encryptThumbnailCache ?? this.encryptThumbnailCache,
       encryptResumePositions:
           encryptResumePositions ?? this.encryptResumePositions,
+      progressAutoCollapseSeconds:
+          progressAutoCollapseSeconds ?? this.progressAutoCollapseSeconds,
       audioEqualizerPreset: audioEqualizerPreset ?? this.audioEqualizerPreset,
       videoEqualizerPreset: videoEqualizerPreset ?? this.videoEqualizerPreset,
       perFileEqualizerPresets:
@@ -764,6 +769,8 @@ class SecuritySettings {
       externalFloatingPlayer: json['externalFloatingPlayer'] as bool? ?? false,
       encryptThumbnailCache: json['encryptThumbnailCache'] as bool? ?? false,
       encryptResumePositions: json['encryptResumePositions'] as bool? ?? false,
+      progressAutoCollapseSeconds:
+          json['progressAutoCollapseSeconds'] as int? ?? 3,
       audioEqualizerPreset: json['audioEqualizerPreset'] as String? ?? 'flat',
       videoEqualizerPreset: json['videoEqualizerPreset'] as String? ?? 'flat',
       perFileEqualizerPresets: perFileEqualizer is Map
@@ -875,6 +882,7 @@ class SecuritySettings {
       'externalFloatingPlayer': externalFloatingPlayer,
       'encryptThumbnailCache': encryptThumbnailCache,
       'encryptResumePositions': encryptResumePositions,
+      'progressAutoCollapseSeconds': progressAutoCollapseSeconds,
       'audioEqualizerPreset': audioEqualizerPreset,
       'videoEqualizerPreset': videoEqualizerPreset,
       'perFileEqualizerPresets': perFileEqualizerPresets,
@@ -1266,6 +1274,7 @@ class SecuritySettingsRepository {
     bool? externalFloatingPlayer,
     bool? encryptThumbnailCache,
     bool? encryptResumePositions,
+    int? progressAutoCollapseSeconds,
     bool? rememberVideoPositions,
     bool? rememberAudioPositions,
   }) async {
@@ -1350,6 +1359,7 @@ class SecuritySettingsRepository {
       externalFloatingPlayer: externalFloatingPlayer,
       encryptThumbnailCache: encryptThumbnailCache,
       encryptResumePositions: encryptResumePositions,
+      progressAutoCollapseSeconds: progressAutoCollapseSeconds,
       rememberVideoPositions: rememberVideoPositions,
       rememberAudioPositions: rememberAudioPositions,
       recentFilePaths: rememberRecentFiles == false

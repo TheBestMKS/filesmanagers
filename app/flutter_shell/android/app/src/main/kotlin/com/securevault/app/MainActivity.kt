@@ -1,6 +1,7 @@
 ﻿package com.securevault.app
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -12,6 +13,7 @@ import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.graphics.pdf.PdfRenderer
 import android.provider.OpenableColumns
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.view.WindowManager
@@ -21,6 +23,7 @@ import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.MethodChannel.Result
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -31,6 +34,8 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "secure_vault/platform"
         private const val STORAGE_PERMISSION_REQUEST = 7301
+        private const val PICK_FILE_REQUEST = 7401
+        private const val PICK_DIRECTORY_REQUEST = 7402
 
         init {
             System.loadLibrary("crypt_core")
@@ -38,6 +43,8 @@ class MainActivity : FlutterActivity() {
     }
 
     private var textToSpeech: TextToSpeech? = null
+    private var pendingPickFileResult: Result? = null
+    private var pendingPickDirectoryResult: Result? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -72,6 +79,8 @@ class MainActivity : FlutterActivity() {
                     requestStorageAccess()
                     result.success(null)
                 }
+                "pickFile" -> pickFile(result)
+                "pickDirectory" -> pickDirectory(result)
                 "readMediaArtwork" -> {
                     val path = call.arguments as? String
                     result.success(if (path.isNullOrBlank()) null else readMediaArtwork(path))
@@ -92,6 +101,10 @@ class MainActivity : FlutterActivity() {
                         speakText(text)
                         result.success(null)
                     }
+                }
+                "stopSpeaking" -> {
+                    textToSpeech?.stop()
+                    result.success(null)
                 }
                 "openExternal" -> {
                     val path = call.arguments as? String
@@ -140,6 +153,43 @@ class MainActivity : FlutterActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+    }
+
+    @Deprecated("Deprecated in Android API, still used for ACTION_OPEN_DOCUMENT compatibility.")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        when (requestCode) {
+            PICK_FILE_REQUEST -> {
+                val pending = pendingPickFileResult ?: return
+                pendingPickFileResult = null
+                if (resultCode != Activity.RESULT_OK) {
+                    pending.success(null)
+                    return
+                }
+                val uri = data?.data
+                if (uri == null) {
+                    pending.success(null)
+                    return
+                }
+                tryTakePersistablePermission(uri, data.flags)
+                pending.success(copyContentUri(uri))
+            }
+            PICK_DIRECTORY_REQUEST -> {
+                val pending = pendingPickDirectoryResult ?: return
+                pendingPickDirectoryResult = null
+                if (resultCode != Activity.RESULT_OK) {
+                    pending.success(null)
+                    return
+                }
+                val uri = data?.data
+                if (uri == null) {
+                    pending.success(null)
+                    return
+                }
+                tryTakePersistablePermission(uri, data.flags)
+                pending.success(resolveTreeUriToPath(uri) ?: uri.toString())
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -220,6 +270,46 @@ class MainActivity : FlutterActivity() {
             } catch (_: Exception) {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }
+        }
+    }
+
+    private fun pickFile(result: Result) {
+        if (pendingPickFileResult != null || pendingPickDirectoryResult != null) {
+            result.error("picker_busy", "Another Android picker is already open.", null)
+            return
+        }
+        pendingPickFileResult = result
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+            startActivityForResult(intent, PICK_FILE_REQUEST)
+        } catch (error: Exception) {
+            pendingPickFileResult = null
+            result.error("pick_file_failed", error.message, null)
+        }
+    }
+
+    private fun pickDirectory(result: Result) {
+        if (pendingPickFileResult != null || pendingPickDirectoryResult != null) {
+            result.error("picker_busy", "Another Android picker is already open.", null)
+            return
+        }
+        pendingPickDirectoryResult = result
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+            }
+            startActivityForResult(intent, PICK_DIRECTORY_REQUEST)
+        } catch (error: Exception) {
+            pendingPickDirectoryResult = null
+            result.error("pick_directory_failed", error.message, null)
         }
     }
 
@@ -319,6 +409,34 @@ class MainActivity : FlutterActivity() {
             }
         }
         return target.absolutePath
+    }
+
+    private fun tryTakePersistablePermission(uri: Uri, flags: Int) {
+        try {
+            val takeFlags = flags and (
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            contentResolver.takePersistableUriPermission(uri, takeFlags)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun resolveTreeUriToPath(uri: Uri): String? {
+        return try {
+            val documentId = DocumentsContract.getTreeDocumentId(uri)
+            val separator = documentId.indexOf(':')
+            val volume = if (separator >= 0) documentId.substring(0, separator) else documentId
+            val relative = if (separator >= 0) documentId.substring(separator + 1) else ""
+            if (volume.equals("primary", ignoreCase = true)) {
+                val base = Environment.getExternalStorageDirectory().absolutePath
+                if (relative.isEmpty()) base else "$base/$relative"
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun safeDisplayName(uri: Uri): String? {

@@ -817,6 +817,65 @@ class CloudPluginRegistry {
       },
     );
 
+    await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'zvooq_music',
+      manifest: <String, Object?>{
+        'id': 'zvooq-music',
+        'name': 'Zvooq / i.zvooq.net',
+        'version': '1.0.0',
+        'pluginType': 'media-source',
+        'description':
+            'Parses i.zvooq.net-compatible online music pages, adds the Zvooq section, supports search, streaming and user-requested downloads through the universal HTML audio parser.',
+        'authType': 'none',
+        'capabilities': [
+          'section',
+          'musicSearch',
+          'musicGenres',
+          'musicPlaylists',
+          'mediaStreaming',
+          'mediaDownload'
+        ],
+        'settings': <String, Object?>{
+          'baseUrl': <String, Object?>{
+            'label': 'Zvooq base URL',
+            'default': 'https://i.zvooq.net/',
+          },
+        },
+        'components': <String, Object?>{'executor': 'web-music-parser'},
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{'executor': 'web-music-parser'},
+          'windows-arm64': <String, Object?>{'executor': 'web-music-parser'},
+          'android-arm': <String, Object?>{'executor': 'web-music-parser'},
+          'android-arm64': <String, Object?>{'executor': 'web-music-parser'},
+          'android-x64': <String, Object?>{'executor': 'web-music-parser'},
+          'fallback': <String, Object?>{'executor': 'web-music-parser'},
+        },
+        'sections': [
+          <String, Object?>{
+            'id': 'zvooq',
+            'title': 'Zvooq',
+            'kind': 'music',
+            'icon': 'library_music',
+            'executor': 'web-music-parser',
+          }
+        ],
+        'mediaCatalog': <String, Object?>{
+          'executor': 'web-music-parser',
+          'sites': [
+            <String, Object?>{
+              'id': 'zvooq',
+              'title': 'Zvooq',
+              'baseUrl': 'https://i.zvooq.net/',
+              'searchPath': '/search?q={query}',
+              'parser': 'generic-audio-html',
+            }
+          ],
+        },
+      },
+    );
+
     final rarDir = await _writeTemplate(
       pluginsDir,
       deleted: deleted,

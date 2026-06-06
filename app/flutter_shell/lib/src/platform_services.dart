@@ -446,15 +446,24 @@ class PlatformServices {
       return;
     }
     if (Platform.isWindows) {
+      _windowsTtsProcess?.kill();
       const script = r'''
-param([string]$Text)
+$Text = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[0]))
 Add-Type -AssemblyName System.Speech
 $speaker = New-Object System.Speech.Synthesis.SpeechSynthesizer
 $speaker.Speak($Text)
 ''';
-      await Process.start(
+      _windowsTtsProcess = await Process.start(
         'powershell',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script, value],
+        [
+          '-NoProfile',
+          '-STA',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          script,
+          base64.encode(utf8.encode(value)),
+        ],
         mode: ProcessStartMode.detached,
         runInShell: false,
       );
@@ -472,15 +481,41 @@ $speaker.Speak($Text)
     }
   }
 
+  static Process? _windowsTtsProcess;
+
+  static Future<void> stopSpeaking() async {
+    if (Platform.isAndroid) {
+      await _channel.invokeMethod<void>('stopSpeaking');
+      return;
+    }
+    if (Platform.isWindows) {
+      _windowsTtsProcess?.kill();
+      _windowsTtsProcess = null;
+      return;
+    }
+    if (Platform.isLinux) {
+      try {
+        await Process.run('spd-say', ['--cancel']);
+      } catch (_) {}
+    }
+  }
+
   static Future<String?> pickFile() async {
+    if (Platform.isAndroid) {
+      return _channel.invokeMethod<String>('pickFile');
+    }
     if (Platform.isWindows) {
       return _runPowerShellPicker(r'''
 Add-Type -AssemblyName System.Windows.Forms
+function Write-SecureVaultPath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return }
+  [Console]::OutputEncoding = [System.Text.Encoding]::ASCII
+  [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Path))
+}
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
 $dialog.Multiselect = $false
 if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-  Write-Output $dialog.FileName
+  Write-SecureVaultPath $dialog.FileName
 }
 ''');
     }
@@ -493,13 +528,20 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
   }
 
   static Future<String?> pickDirectory() async {
+    if (Platform.isAndroid) {
+      return _channel.invokeMethod<String>('pickDirectory');
+    }
     if (Platform.isWindows) {
       return _runPowerShellPicker(r'''
 Add-Type -AssemblyName System.Windows.Forms
+function Write-SecureVaultPath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return }
+  [Console]::OutputEncoding = [System.Text.Encoding]::ASCII
+  [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Path))
+}
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-  Write-Output $dialog.SelectedPath
+  Write-SecureVaultPath $dialog.SelectedPath
 }
 ''');
     }
@@ -528,7 +570,15 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
       runInShell: false,
     );
     if (result.exitCode != 0) return null;
-    final value = result.stdout.toString().trim();
-    return value.isEmpty ? null : value;
+    final raw = result.stdout.toString();
+    final value = raw
+        .split(RegExp(r'\r?\n'))
+        .map((line) => line.trim())
+        .firstWhere((line) => line.isNotEmpty, orElse: () => '');
+    if (value.isEmpty) return null;
+    try {
+      return utf8.decode(base64.decode(value));
+    } catch (_) {}
+    return value;
   }
 }

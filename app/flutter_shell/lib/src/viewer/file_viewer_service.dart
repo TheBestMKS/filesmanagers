@@ -442,10 +442,22 @@ class FileViewerService {
           .join(' ');
       return 'Binary file. First bytes:\n$sample';
     }
-    if (!trim) return text;
-    return text.length > 12000
-        ? '${text.substring(0, 12000)}\n\n...trimmed...'
-        : text;
+    final normalized = normalizeReadableText(text);
+    if (!trim) return normalized;
+    return normalized.length > 12000
+        ? '${normalized.substring(0, 12000)}\n\n...trimmed...'
+        : normalized;
+  }
+
+  static String normalizeReadableText(String value) {
+    return _decodeHtmlEntities(value)
+        .replaceAll('\uFEFF', '')
+        .replaceAll(RegExp(r'[\u200B-\u200D\u2060]'), '')
+        .replaceAll(RegExp(r'[\u0000-\u0008\u000B\u000C\u000E-\u001F]'), ' ')
+        .replaceAll(RegExp(r'\uFFFD+'), ' ')
+        .replaceAll(RegExp(r'[ \t]+\n'), '\n')
+        .replaceAll(RegExp(r'\n{4,}'), '\n\n\n')
+        .trim();
   }
 
   static Uint8List encodeText(String text, {String encoding = 'utf-8'}) {
@@ -572,8 +584,13 @@ class FileViewerService {
       if (!file.isFile ||
           !(name.endsWith('.xhtml') ||
               name.endsWith('.html') ||
-              name.endsWith('.htm') ||
-              name.endsWith('.xml'))) {
+              name.endsWith('.htm'))) {
+        continue;
+      }
+      if (name.endsWith('.opf') ||
+          name.endsWith('.ncx') ||
+          name.endsWith('container.xml') ||
+          name.contains('/meta-inf/')) {
         continue;
       }
       final html = utf8.decode(file.content as List<int>, allowMalformed: true);
@@ -585,7 +602,18 @@ class FileViewerService {
 
   static String _extractFb2Text(List<int> bytes) {
     final xmlText = bytesToText(bytes, encoding: 'auto');
-    return _trimText(_stripMarkup(xmlText));
+    try {
+      final parsed = XmlDocument.parse(xmlText);
+      final bodyTexts = parsed
+          .findAllElements('body')
+          .expand((node) => node.descendants.whereType<XmlText>())
+          .map((node) => node.value.trim())
+          .where((text) => text.isNotEmpty)
+          .join('\n\n');
+      return _trimText(bodyTexts.isEmpty ? _stripMarkup(xmlText) : bodyTexts);
+    } catch (_) {
+      return _trimText(_stripMarkup(xmlText));
+    }
   }
 
   static String _extractPdfText(List<int> bytes) {
@@ -661,25 +689,40 @@ class FileViewerService {
   }
 
   static String _trimText(String text) {
-    final normalized = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final normalized = normalizeReadableText(text)
+        .replaceAll(RegExp(r'[ \t]{2,}'), ' ')
+        .trim();
     return normalized.length > 12000
         ? '${normalized.substring(0, 12000)}\n\n...trimmed...'
         : normalized;
   }
 
   static String _stripMarkup(String value) {
-    return value
+    return _decodeHtmlEntities(value)
         .replaceAll(
             RegExp(r'<script[\s\S]*?</script>', caseSensitive: false), ' ')
         .replaceAll(
             RegExp(r'<style[\s\S]*?</style>', caseSensitive: false), ' ')
         .replaceAll(RegExp(r'<[^>]+>'), ' ')
-        .replaceAll(RegExp(r'&nbsp;'), ' ')
-        .replaceAll(RegExp(r'&amp;'), '&')
-        .replaceAll(RegExp(r'&lt;'), '<')
-        .replaceAll(RegExp(r'&gt;'), '>')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
+  }
+
+  static String _decodeHtmlEntities(String value) {
+    return value
+        .replaceAll(RegExp(r'&nbsp;|&#160;', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'&amp;', caseSensitive: false), '&')
+        .replaceAll(RegExp(r'&lt;', caseSensitive: false), '<')
+        .replaceAll(RegExp(r'&gt;', caseSensitive: false), '>')
+        .replaceAll(RegExp(r'&quot;', caseSensitive: false), '"')
+        .replaceAll(RegExp(r'&apos;', caseSensitive: false), "'")
+        .replaceAllMapped(RegExp(r'&#(\d+);'), (match) {
+      final value = int.tryParse(match.group(1)!);
+      return value == null ? match.group(0)! : String.fromCharCode(value);
+    }).replaceAllMapped(RegExp(r'&#x([0-9a-fA-F]+);'), (match) {
+      final value = int.tryParse(match.group(1)!, radix: 16);
+      return value == null ? match.group(0)! : String.fromCharCode(value);
+    });
   }
 
   static String _decodeAuto(List<int> bytes) {

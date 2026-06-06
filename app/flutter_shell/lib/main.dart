@@ -10,6 +10,8 @@ import 'package:flutter_html/flutter_html.dart' as flutter_html;
 import 'package:image/image.dart' as img;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart'
+    as syncfusion_pdfviewer;
 import 'package:webview_flutter/webview_flutter.dart' as android_webview;
 import 'package:webview_windows/webview_windows.dart' as windows_webview;
 
@@ -28,7 +30,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.11';
+const _appVersion = '0.12.12';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -222,6 +224,45 @@ class _BackgroundJob {
   double get progress => total <= 0 ? 0 : completed / total;
 }
 
+class _ReadingSession {
+  _ReadingSession({
+    required this.title,
+    required this.key,
+    required this.chunks,
+    required this.paths,
+    required this.pathIndex,
+    required this.chunkIndex,
+    this.playing = true,
+  });
+
+  final String title;
+  final String key;
+  final List<String> chunks;
+  final List<String> paths;
+  final int pathIndex;
+  final int chunkIndex;
+  final bool playing;
+
+  _ReadingSession copyWith({
+    String? title,
+    String? key,
+    List<String>? chunks,
+    List<String>? paths,
+    int? pathIndex,
+    int? chunkIndex,
+    bool? playing,
+  }) =>
+      _ReadingSession(
+        title: title ?? this.title,
+        key: key ?? this.key,
+        chunks: chunks ?? this.chunks,
+        paths: paths ?? this.paths,
+        pathIndex: pathIndex ?? this.pathIndex,
+        chunkIndex: chunkIndex ?? this.chunkIndex,
+        playing: playing ?? this.playing,
+      );
+}
+
 class VaultHomeScreen extends StatefulWidget {
   const VaultHomeScreen({super.key, this.initialOpenPath});
 
@@ -258,6 +299,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Future<FilePreview>? _preview;
   List<MediaPreviewItem> _mediaPlaylist = const [];
   List<MediaPreviewItem> _imagePlaylist = const [];
+  List<MediaPreviewItem> _flashPlaylist = const [];
   double _sidebarWidth = 290;
   double _previewWidth = 420;
   bool _previewVisible = false;
@@ -277,6 +319,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Set<String> _selectedPaths = const <String>{};
   bool _lockOnNextResume = false;
   final List<_BackgroundJob> _backgroundJobs = <_BackgroundJob>[];
+  _ReadingSession? _readingSession;
+  Timer? _readingTimer;
 
   @override
   void initState() {
@@ -293,6 +337,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _readingTimer?.cancel();
+    unawaited(PlatformServices.stopSpeaking());
     super.dispose();
   }
 
@@ -634,6 +680,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     final parent =
         entry.isDirectory ? entry.path : _explorer.parentPathFor(entry.path);
     return _folderBehaviorFor(parent).rememberRecent;
+  }
+
+  bool _isMiniPlaybackAllowedForPath(String? path) {
+    if (path == null || path.trim().isEmpty) return true;
+    final parent = _explorer.parentPathFor(path);
+    final behavior = _folderBehaviorFor(parent);
+    return !behavior.forbidMiniPlayback && !behavior.forbidBackgroundPlayback;
   }
 
   Future<void> _applyFolderRuntimeProtection(String path) async {
@@ -1436,6 +1489,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _preview = previewFuture;
         _mediaPlaylist = playlist;
         _imagePlaylist = const [];
+        _flashPlaylist = const [];
       });
       if (_shouldOpenMediaFullscreen(preview, forceFullScreen)) {
         _showPreviewWindow(preview);
@@ -1460,6 +1514,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _preview = previewFuture;
       _mediaPlaylist = const [];
       _imagePlaylist = const [];
+      _flashPlaylist = const [];
     });
     FilePreview? openedPreview;
     try {
@@ -1473,10 +1528,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
             )
           : await _buildMediaPlaylist(entry, preview);
       final imagePlaylist = await _buildImagePlaylist(entry, preview);
+      final flashPlaylist = await _buildFlashPlaylist(entry, preview);
       if (mounted && _selected?.path == entry.path) {
         setState(() {
           _mediaPlaylist = playlist;
           _imagePlaylist = imagePlaylist;
+          _flashPlaylist = flashPlaylist;
         });
       }
     } catch (_) {
@@ -1484,6 +1541,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         setState(() {
           _mediaPlaylist = const [];
           _imagePlaylist = const [];
+          _flashPlaylist = const [];
         });
       }
     }
@@ -1503,11 +1561,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
               )
             : await _buildMediaPlaylist(entry, resolved);
         final imagePlaylist = await _buildImagePlaylist(entry, resolved);
+        final flashPlaylist = await _buildFlashPlaylist(entry, resolved);
         if (mounted && _selected?.path == entry.path) {
           setState(() {
             _preview = Future<FilePreview>.value(resolved);
             _mediaPlaylist = playlist;
             _imagePlaylist = imagePlaylist;
+            _flashPlaylist = flashPlaylist;
           });
         }
       }
@@ -1759,12 +1819,100 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _selected = entry;
       _preview = previewFuture;
       _mediaPlaylist = const [];
+      _flashPlaylist = const [];
     });
     try {
       final preview = await previewFuture;
       final imagePlaylist = await _buildImagePlaylist(entry, preview);
       if (mounted && _selected?.path == entry.path) {
         setState(() => _imagePlaylist = imagePlaylist);
+      }
+      return preview;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<List<MediaPreviewItem>> _buildFlashPlaylist(
+    ExplorerEntry selected,
+    FilePreview selectedPreview,
+  ) async {
+    if (selectedPreview.contentKind != FileContentKind.flash) {
+      return const [];
+    }
+    final selectedItem = MediaPreviewItem(
+      title: selectedPreview.title,
+      kind: FileContentKind.flash,
+      path: selected.path,
+      bytes: selectedPreview.decrypted && selectedPreview.bytes != null
+          ? Uint8List.fromList(selectedPreview.bytes!)
+          : null,
+      encrypted: selectedPreview.decrypted,
+    );
+    final parent = _explorer.parentPathFor(selected.path);
+    final DirectorySnapshot snapshot;
+    try {
+      snapshot = await _explorer.listDirectory(
+        parent,
+        commonPassword: _commonEncryptionPassword,
+        filePassword: _activeFilePassword(),
+        decryptNames: _settings.decryptNamesInExplorer,
+      );
+    } catch (_) {
+      return [selectedItem];
+    }
+    final items = <MediaPreviewItem>[];
+    for (final entry in snapshot.entries) {
+      if (!entry.exists || entry.isDirectory) continue;
+      final displayedKind = FileViewerService.kindForName(entry.name);
+      final pathKind = FileViewerService.kindForName(entry.path);
+      if (entry.path == selected.path) {
+        items.add(selectedItem);
+      } else if (displayedKind == FileContentKind.flash ||
+          pathKind == FileContentKind.flash) {
+        items.add(MediaPreviewItem(
+          title: entry.name,
+          kind: FileContentKind.flash,
+          path: entry.path,
+          encrypted: entry.isEncrypted,
+        ));
+      }
+    }
+    if (!items.any((item) => item.path == selectedItem.path)) {
+      items.insert(0, selectedItem);
+    }
+    return items;
+  }
+
+  Future<FilePreview?> _navigateFlash(int delta) async {
+    final selectedPath = _selected?.path;
+    if (selectedPath == null || _flashPlaylist.isEmpty) return null;
+    var index = _flashPlaylist.indexWhere((item) => item.path == selectedPath);
+    if (index < 0) index = 0;
+    final nextIndex = (index + delta) % _flashPlaylist.length;
+    final normalizedIndex =
+        nextIndex < 0 ? nextIndex + _flashPlaylist.length : nextIndex;
+    final item = _flashPlaylist[normalizedIndex];
+    final path = item.path;
+    if (path == null || path.isEmpty) return null;
+    final entry = await _explorer.entryForPath(path);
+    if (entry == null) return null;
+    final previewFuture = _explorer.previewFile(
+      entry.path,
+      password: _activeFilePassword(),
+      commonPassword: _commonEncryptionPassword,
+    );
+    setState(() {
+      _selected = entry;
+      _preview = previewFuture;
+      _mediaPlaylist = const [];
+      _imagePlaylist = const [];
+    });
+    try {
+      final preview = await previewFuture;
+      final flashPlaylist = await _buildFlashPlaylist(entry, preview);
+      if (mounted && _selected?.path == entry.path) {
+        setState(() => _flashPlaylist = flashPlaylist);
       }
       return preview;
     } catch (_) {
@@ -1875,6 +2023,77 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       items.insert(0, selectedItem);
     }
     return items;
+  }
+
+  Future<void> _openFolderMediaRecursive(
+    ExplorerEntry folder,
+    FileContentKind kind,
+  ) async {
+    if (!folder.isDirectory || !folder.exists) return;
+    final matches = <ExplorerEntry>[];
+    final stack = <String>[folder.path];
+    final visited = <String>{};
+    while (stack.isNotEmpty && matches.length < 5000) {
+      final path = stack.removeLast();
+      if (!visited.add(path)) continue;
+      DirectorySnapshot snapshot;
+      try {
+        snapshot = await _explorer.listDirectory(
+          path,
+          commonPassword: _commonEncryptionPassword,
+          filePassword: _activeFilePassword(),
+          decryptNames: _settings.decryptNamesInExplorer,
+        );
+      } catch (_) {
+        continue;
+      }
+      for (final entry in snapshot.entries) {
+        if (!entry.exists || entry.isNavigationEntry) continue;
+        if (entry.isDirectory) {
+          stack.add(entry.path);
+          continue;
+        }
+        final displayedKind = FileViewerService.kindForName(entry.name);
+        final pathKind = FileViewerService.kindForName(entry.path);
+        if (displayedKind == kind || pathKind == kind) {
+          matches.add(entry);
+        }
+      }
+    }
+    if (matches.isEmpty) {
+      _snack(_language.t('explorer.open.all.none'));
+      return;
+    }
+    matches
+        .sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+    final first = matches.first;
+    if (kind == FileContentKind.image) {
+      final previewFuture = _explorer.previewFile(
+        first.path,
+        password: _activeFilePassword(),
+        commonPassword: _commonEncryptionPassword,
+      );
+      setState(() {
+        _selected = first;
+        _preview = previewFuture;
+        _mediaPlaylist = const [];
+        _flashPlaylist = const [];
+        _imagePlaylist = [
+          for (final entry in matches)
+            MediaPreviewItem(
+              title: entry.name,
+              kind: FileContentKind.image,
+              path: entry.path,
+              encrypted: entry.isEncrypted,
+            ),
+        ];
+      });
+      final preview = await previewFuture;
+      _showPreviewWindow(preview);
+      return;
+    }
+    final playlist = _mediaItemsFromEntries(matches, kind);
+    await _openEntry(first, mediaPlaylistOverride: playlist);
   }
 
   void _goUp() {
@@ -2593,6 +2812,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         await _useFolderAs(entry, action);
       case _EntryAction.folderSettings:
         await _showFolderSettingsDialog(entry.path);
+      case _EntryAction.openAllImages:
+        await _openFolderMediaRecursive(entry, FileContentKind.image);
+      case _EntryAction.openAllVideos:
+        await _openFolderMediaRecursive(entry, FileContentKind.video);
+      case _EntryAction.openAllAudio:
+        await _openFolderMediaRecursive(entry, FileContentKind.audio);
       case _EntryAction.permissions:
         await _changePermissions(entry);
       case _EntryAction.ocrExtract:
@@ -2626,6 +2851,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       if (done != null) job.done = done;
       if (failed != null) job.failed = failed;
     });
+    if (done == true || failed == true) {
+      Timer(const Duration(seconds: 3), () {
+        if (!mounted || !_backgroundJobs.contains(job)) return;
+        if (job.done || job.failed) {
+          setState(() => _backgroundJobs.remove(job));
+        }
+      });
+    }
   }
 
   void _cancelBackgroundJob(_BackgroundJob job) {
@@ -3434,8 +3667,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         commonPassword: _commonEncryptionPassword,
         filePassword: _activeFilePassword(),
       );
+      final normalized =
+          text == null ? null : FileViewerService.normalizeReadableText(text);
       if (!mounted) return;
-      if (text == null || text.trim().isEmpty) {
+      if (normalized == null || normalized.trim().isEmpty) {
         _snack(_language.t('ocr.empty'));
         return;
       }
@@ -3450,7 +3685,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
               thumbVisibility: true,
               child: SingleChildScrollView(
                 child: SelectableText(
-                  text,
+                  normalized,
                   style: const TextStyle(fontFamily: 'Consolas', height: 1.35),
                 ),
               ),
@@ -3459,7 +3694,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
           actions: [
             TextButton(
               onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: text));
+                await Clipboard.setData(ClipboardData(text: normalized));
                 if (context.mounted) Navigator.pop(context);
                 _snack(_language.t('ocr.copied'));
               },
@@ -3488,11 +3723,15 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _snack(_language.t('preview.swf.not_file'));
         return;
       }
-      await PlatformServices.openSwfWithRuffle(
-        title: preview.title,
-        sourcePath: preview.sourcePath,
-        bytes: preview.bytes,
-      );
+      final flashPlaylist = await _buildFlashPlaylist(entry, preview);
+      if (mounted) {
+        setState(() {
+          _selected = entry;
+          _preview = Future<FilePreview>.value(preview);
+          _flashPlaylist = flashPlaylist;
+        });
+      }
+      _showPreviewWindow(preview);
     } catch (error) {
       _snack('${_language.t('preview.swf.open.error')} $error');
     }
@@ -4012,11 +4251,26 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                       case _PreviewAction.window:
                         break;
                       case _PreviewAction.edit:
-                        _openEditor(currentPreview);
+                        unawaited(() async {
+                          final savedPath = await _openEditor(currentPreview);
+                          if (savedPath == null) return;
+                          final entry = await _explorer.entryForPath(savedPath);
+                          if (entry == null) return;
+                          final fresh = await _explorer.previewFile(
+                            entry.path,
+                            password: _activeFilePassword(),
+                            commonPassword: _commonEncryptionPassword,
+                          );
+                          if (mounted) {
+                            setState(() {
+                              _selected = entry;
+                              _preview = Future<FilePreview>.value(fresh);
+                            });
+                            setDialogState(() => currentPreview = fresh);
+                          }
+                        }());
                       case _PreviewAction.speak:
-                        unawaited(PlatformServices.speakText(
-                          currentPreview.text ?? currentPreview.subtitle,
-                        ));
+                        _startReadingPreview(currentPreview);
                       case _PreviewAction.ocrExtract:
                         if (_selected != null) {
                           _handleEntryAction(
@@ -4121,12 +4375,20 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
               language: _language,
               mediaPlaylist: mediaPlaylistOverride ?? _mediaPlaylist,
               imagePlaylist: _imagePlaylist,
+              flashPlaylist: _flashPlaylist,
               mediaResumePositions: _settings.mediaResumePositions,
               onRememberMediaPosition: _rememberMediaPosition,
               fillAvailable: true,
+              allowMiniDock: _isMiniPlaybackAllowedForPath(_selected?.path),
               videoRotationTurns: videoRotationTurns,
               onImageNavigate: (delta) async {
                 final next = await _navigateImage(delta);
+                if (next != null) {
+                  setDialogState(() => currentPreview = next);
+                }
+              },
+              onFlashNavigate: (delta) async {
+                final next = await _navigateFlash(delta);
                 if (next != null) {
                   setDialogState(() => currentPreview = next);
                 }
@@ -4138,7 +4400,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     );
   }
 
-  Future<void> _openEditor(FilePreview preview) async {
+  Future<String?> _openEditor(FilePreview preview) async {
     if (preview.bytes != null &&
         (preview.contentKind == FileContentKind.text ||
             preview.contentKind == FileContentKind.html ||
@@ -4156,8 +4418,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       if (savedPath != null) {
         _snack('${_language.t('editor.saved')} $savedPath');
         await _refresh();
+        await _refreshPreviewAfterEditorSave(savedPath);
       }
-      return;
+      return savedPath;
     }
 
     if (preview.contentKind == FileContentKind.image && preview.bytes != null) {
@@ -4172,8 +4435,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       if (savedPath != null) {
         _snack('${_language.t('editor.saved')} $savedPath');
         await _refresh();
+        await _refreshPreviewAfterEditorSave(savedPath);
       }
-      return;
+      return savedPath;
     }
 
     if (preview.contentKind == FileContentKind.audio ||
@@ -4189,11 +4453,38 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       if (savedPath != null) {
         _snack('${_language.t('editor.saved')} $savedPath');
         await _refresh();
+        await _refreshPreviewAfterEditorSave(savedPath);
       }
-      return;
+      return savedPath;
     }
 
     _snack(_language.t('editor.unsupported'));
+    return null;
+  }
+
+  Future<void> _refreshPreviewAfterEditorSave(String savedPath) async {
+    final entry = await _explorer.entryForPath(savedPath);
+    if (entry == null || !mounted) return;
+    final previewFuture = _explorer.previewFile(
+      entry.path,
+      password: _activeFilePassword(),
+      commonPassword: _commonEncryptionPassword,
+    );
+    setState(() {
+      _selected = entry;
+      _preview = previewFuture;
+    });
+    try {
+      final preview = await previewFuture;
+      final mediaPlaylist = await _buildMediaPlaylist(entry, preview);
+      final imagePlaylist = await _buildImagePlaylist(entry, preview);
+      if (mounted && _selected?.path == entry.path) {
+        setState(() {
+          _mediaPlaylist = mediaPlaylist;
+          _imagePlaylist = imagePlaylist;
+        });
+      }
+    } catch (_) {}
   }
 
   Future<void> _editEntry(ExplorerEntry entry) async {
@@ -4229,6 +4520,221 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         next.mediaResumePositions != _settings.mediaResumePositions) {
       setState(() => _settings = next);
     }
+  }
+
+  Future<void> _startReadingPreview(FilePreview preview) async {
+    final text = FileViewerService.normalizeReadableText(
+      preview.text ?? preview.subtitle,
+    );
+    if (text.trim().isEmpty) {
+      _snack(_language.t('reader.empty'));
+      return;
+    }
+    final key = _readingKeyFor(preview.sourcePath ?? preview.title);
+    final chunks = _readingChunks(text);
+    if (chunks.isEmpty) {
+      _snack(_language.t('reader.empty'));
+      return;
+    }
+    final savedChunk = ((_settings.mediaResumePositions[key] ?? 0) ~/ 10000 - 1)
+        .clamp(0, chunks.length - 1)
+        .toInt();
+    final paths = await _readableSiblingPaths(preview.sourcePath);
+    final pathIndex = preview.sourcePath == null
+        ? -1
+        : paths.indexWhere((path) => path == preview.sourcePath);
+    setState(() {
+      _readingSession = _ReadingSession(
+        title: preview.title,
+        key: key,
+        chunks: chunks,
+        paths: paths,
+        pathIndex: pathIndex,
+        chunkIndex: savedChunk,
+      );
+    });
+    await _speakReadingChunk();
+  }
+
+  Future<List<String>> _readableSiblingPaths(String? sourcePath) async {
+    if (sourcePath == null || sourcePath.trim().isEmpty) return const [];
+    try {
+      final parent = _explorer.parentPathFor(sourcePath);
+      final snapshot = await _explorer.listDirectory(
+        parent,
+        commonPassword: _commonEncryptionPassword,
+        filePassword: _activeFilePassword(),
+        decryptNames: _settings.decryptNamesInExplorer,
+      );
+      return [
+        for (final entry in snapshot.entries)
+          if (entry.exists &&
+              !entry.isDirectory &&
+              _isReadableFileName(entry.name, entry.path))
+            entry.path,
+      ];
+    } catch (_) {
+      return [sourcePath];
+    }
+  }
+
+  bool _isReadableFileName(String name, String path) {
+    final displayedKind = FileViewerService.kindForName(name);
+    final pathKind = FileViewerService.kindForName(path);
+    return {
+          FileContentKind.text,
+          FileContentKind.html,
+          FileContentKind.ebook,
+          FileContentKind.document,
+        }.contains(displayedKind) ||
+        {
+          FileContentKind.text,
+          FileContentKind.html,
+          FileContentKind.ebook,
+          FileContentKind.document,
+        }.contains(pathKind);
+  }
+
+  List<String> _readingChunks(String text) {
+    final normalized = FileViewerService.normalizeReadableText(text);
+    final chunks = <String>[];
+    final buffer = StringBuffer();
+    for (final paragraph in normalized.split(RegExp(r'\n{2,}'))) {
+      final trimmed = paragraph.trim();
+      if (trimmed.isEmpty) continue;
+      if (buffer.length + trimmed.length > 900 && buffer.isNotEmpty) {
+        chunks.add(buffer.toString().trim());
+        buffer.clear();
+      }
+      if (buffer.isNotEmpty) buffer.write('\n\n');
+      buffer.write(trimmed);
+    }
+    if (buffer.isNotEmpty) chunks.add(buffer.toString().trim());
+    return chunks;
+  }
+
+  String _readingKeyFor(String source) => 'read:${source.trim()}';
+
+  Future<void> _speakReadingChunk() async {
+    final session = _readingSession;
+    if (session == null || session.chunks.isEmpty) return;
+    final index = session.chunkIndex.clamp(0, session.chunks.length - 1);
+    final chunk = session.chunks[index.toInt()];
+    await _rememberReadingPosition(session);
+    await PlatformServices.speakText(chunk);
+    _readingTimer?.cancel();
+    if (!session.playing) return;
+    final words = RegExp(r'\S+').allMatches(chunk).length;
+    final seconds = (words * 0.42).clamp(4.0, 90.0).toDouble();
+    _readingTimer = Timer(Duration(milliseconds: (seconds * 1000).round()), () {
+      unawaited(_readingNextChunk(autoAdvance: true));
+    });
+  }
+
+  Future<void> _rememberReadingPosition(_ReadingSession session) async {
+    final next = await _settingsRepo
+        .recordMediaResumePosition(
+          _settings,
+          session.key,
+          (session.chunkIndex + 1) * 10000,
+        )
+        .catchError((_) => _settings);
+    if (mounted &&
+        next.mediaResumePositions != _settings.mediaResumePositions) {
+      setState(() => _settings = next);
+    }
+  }
+
+  Future<void> _readingTogglePlay() async {
+    final session = _readingSession;
+    if (session == null) return;
+    if (session.playing) {
+      _readingTimer?.cancel();
+      await PlatformServices.stopSpeaking();
+      setState(() => _readingSession = session.copyWith(playing: false));
+      await _rememberReadingPosition(session);
+      return;
+    }
+    setState(() => _readingSession = session.copyWith(playing: true));
+    await _speakReadingChunk();
+  }
+
+  Future<void> _readingNextChunk({bool autoAdvance = false}) async {
+    final session = _readingSession;
+    if (session == null) return;
+    if (session.chunkIndex + 1 >= session.chunks.length) {
+      await _readingNextFile();
+      return;
+    }
+    setState(() {
+      _readingSession = session.copyWith(
+        chunkIndex: session.chunkIndex + 1,
+        playing: autoAdvance ? session.playing : true,
+      );
+    });
+    await _speakReadingChunk();
+  }
+
+  Future<void> _readingPreviousChunk() async {
+    final session = _readingSession;
+    if (session == null) return;
+    setState(() {
+      _readingSession = session.copyWith(
+        chunkIndex: math.max(0, session.chunkIndex - 1),
+        playing: true,
+      );
+    });
+    await _speakReadingChunk();
+  }
+
+  Future<void> _readingNextFile() async {
+    final session = _readingSession;
+    if (session == null || session.paths.isEmpty) return;
+    final nextIndex = session.pathIndex < 0
+        ? 0
+        : (session.pathIndex + 1) % session.paths.length;
+    await _loadReadingPath(session.paths[nextIndex], nextIndex);
+  }
+
+  Future<void> _loadReadingPath(String path, int pathIndex) async {
+    try {
+      final preview = await _explorer.previewFile(
+        path,
+        password: _activeFilePassword(),
+        commonPassword: _commonEncryptionPassword,
+      );
+      final text = FileViewerService.normalizeReadableText(
+        preview.text ?? preview.subtitle,
+      );
+      final chunks = _readingChunks(text);
+      if (chunks.isEmpty) return;
+      final key = _readingKeyFor(path);
+      final savedChunk =
+          ((_settings.mediaResumePositions[key] ?? 0) ~/ 10000 - 1)
+              .clamp(0, chunks.length - 1)
+              .toInt();
+      setState(() {
+        _readingSession = _readingSession?.copyWith(
+          title: preview.title,
+          key: key,
+          chunks: chunks,
+          pathIndex: pathIndex,
+          chunkIndex: savedChunk,
+          playing: true,
+        );
+      });
+      await _speakReadingChunk();
+    } catch (error) {
+      _snack('${_language.t('reader.error')} $error');
+    }
+  }
+
+  Future<void> _closeReadingSession() async {
+    final session = _readingSession;
+    _readingTimer?.cancel();
+    await PlatformServices.stopSpeaking();
+    if (session != null) await _rememberReadingPosition(session);
+    if (mounted) setState(() => _readingSession = null);
   }
 
   Future<void> _resumeLastPlayedMedia() async {
@@ -4338,6 +4844,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     required bool externalFloatingPlayer,
     required bool encryptThumbnailCache,
     required bool encryptResumePositions,
+    required int progressAutoCollapseSeconds,
     required bool rememberVideoPositions,
     required bool rememberAudioPositions,
   }) async {
@@ -4423,6 +4930,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       externalFloatingPlayer: externalFloatingPlayer,
       encryptThumbnailCache: encryptThumbnailCache,
       encryptResumePositions: encryptResumePositions,
+      progressAutoCollapseSeconds: progressAutoCollapseSeconds,
       rememberVideoPositions: rememberVideoPositions,
       rememberAudioPositions: rememberAudioPositions,
     );
@@ -4651,6 +5159,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     List<MediaPreviewItem> playlist,
   ) async {
     if (!_isPlayablePreview(preview)) return;
+    final allowMiniDock = _isMiniPlaybackAllowedForPath(preview.sourcePath);
     final effectivePlaylist = playlist.isEmpty
         ? [
             MediaPreviewItem(
@@ -4679,7 +5188,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       initialIndex: initialIndex,
       repeatOne: false,
       shuffle: false,
-      allowMiniDock: true,
+      allowMiniDock: allowMiniDock,
     );
     final item = effectivePlaylist[initialIndex];
     final resumeMs = _settings.mediaResumePositions[item.resumeKey ?? ''] ?? 0;
@@ -5304,6 +5813,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                   preview: _preview,
                                   mediaPlaylist: _mediaPlaylist,
                                   imagePlaylist: _imagePlaylist,
+                                  flashPlaylist: _flashPlaylist,
                                   mediaResumePositions:
                                       _settings.mediaResumePositions,
                                   onUp: _goBack,
@@ -5333,7 +5843,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                                   onOpenExternal: _openPreviewExternal,
                                   onPreviewWindow: _showPreviewWindow,
                                   onEditPreview: _openEditor,
+                                  onReadPreview: _startReadingPreview,
+                                  allowMiniDockForPreview:
+                                      _isMiniPlaybackAllowedForPath(
+                                          _selected?.path),
                                   onImageNavigate: _navigateImage,
+                                  onFlashNavigate: _navigateFlash,
                                   onRememberMediaPosition:
                                       _rememberMediaPosition,
                                   canPaste: _clipboardPaths.isNotEmpty,
@@ -5435,6 +5950,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
               _BackgroundJobsPanel(
                 jobs: _backgroundJobs,
                 language: _language,
+                autoCollapseSeconds: _settings.progressAutoCollapseSeconds,
                 onCancel: _cancelBackgroundJob,
                 onRemove: _removeBackgroundJob,
                 onToggleCollapsed: (job) => setState(
@@ -5452,6 +5968,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                   mediaPlaylistOverride: playlist,
                 ),
               ),
+              if (_readingSession != null)
+                _TextReadingDock(
+                  session: _readingSession!,
+                  language: _language,
+                  onTogglePlay: _readingTogglePlay,
+                  onPrevious: _readingPreviousChunk,
+                  onNext: () => _readingNextChunk(),
+                  onNextFile: _readingNextFile,
+                  onClose: _closeReadingSession,
+                ),
             ],
           ),
         ),
@@ -5899,6 +6425,9 @@ enum _EntryAction {
   useAsMusic,
   useAsMultimedia,
   folderSettings,
+  openAllImages,
+  openAllVideos,
+  openAllAudio,
   permissions,
   ocrExtract,
   openSwf,
@@ -7262,6 +7791,7 @@ class _ExplorerView extends StatelessWidget {
     required this.preview,
     required this.mediaPlaylist,
     required this.imagePlaylist,
+    required this.flashPlaylist,
     required this.mediaResumePositions,
     required this.onUp,
     required this.onForward,
@@ -7284,7 +7814,10 @@ class _ExplorerView extends StatelessWidget {
     required this.onOpenExternal,
     required this.onPreviewWindow,
     required this.onEditPreview,
+    required this.onReadPreview,
+    required this.allowMiniDockForPreview,
     required this.onImageNavigate,
+    required this.onFlashNavigate,
     required this.onRememberMediaPosition,
     required this.canPaste,
     required this.favoritePaths,
@@ -7324,6 +7857,7 @@ class _ExplorerView extends StatelessWidget {
   final Future<FilePreview>? preview;
   final List<MediaPreviewItem> mediaPlaylist;
   final List<MediaPreviewItem> imagePlaylist;
+  final List<MediaPreviewItem> flashPlaylist;
   final Map<String, int> mediaResumePositions;
   final VoidCallback onUp;
   final VoidCallback onForward;
@@ -7346,7 +7880,10 @@ class _ExplorerView extends StatelessWidget {
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
+  final ValueChanged<FilePreview> onReadPreview;
+  final bool allowMiniDockForPreview;
   final Future<FilePreview?> Function(int delta) onImageNavigate;
+  final Future<FilePreview?> Function(int delta) onFlashNavigate;
   final Future<void> Function(String key, Duration position)
       onRememberMediaPosition;
   final bool canPaste;
@@ -7504,6 +8041,7 @@ class _ExplorerView extends StatelessWidget {
             preview: preview,
             mediaPlaylist: mediaPlaylist,
             imagePlaylist: imagePlaylist,
+            flashPlaylist: flashPlaylist,
             mediaResumePositions: mediaResumePositions,
             visible: previewVisible,
             onTogglePreview: onTogglePreview,
@@ -7511,8 +8049,11 @@ class _ExplorerView extends StatelessWidget {
             onOpenExternal: onOpenExternal,
             onPreviewWindow: onPreviewWindow,
             onEditPreview: onEditPreview,
+            onReadPreview: onReadPreview,
+            allowMiniDock: allowMiniDockForPreview,
             onEntryAction: onEntryAction,
             onImageNavigate: onImageNavigate,
+            onFlashNavigate: onFlashNavigate,
             onRememberMediaPosition: onRememberMediaPosition,
           );
           if (c.maxWidth < 980) {
@@ -8231,6 +8772,24 @@ class _EntryList extends StatelessWidget {
           enabled: entry.exists,
           child: Text(language.t('folder.settings.title')),
         ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.openAllImages,
+          enabled: entry.exists,
+          child: Text(language.t('explorer.open.all.images')),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.openAllVideos,
+          enabled: entry.exists,
+          child: Text(language.t('explorer.open.all.videos')),
+        ),
+      if (entry.isDirectory)
+        PopupMenuItem(
+          value: _EntryAction.openAllAudio,
+          enabled: entry.exists,
+          child: Text(language.t('explorer.open.all.audio')),
+        ),
       if (entry.isDirectory) const PopupMenuDivider(),
       if (entry.isDirectory)
         PopupMenuItem(
@@ -8327,6 +8886,9 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.useAsMusic:
       case _EntryAction.useAsMultimedia:
       case _EntryAction.folderSettings:
+      case _EntryAction.openAllImages:
+      case _EntryAction.openAllVideos:
+      case _EntryAction.openAllAudio:
       case _EntryAction.permissions:
       case _EntryAction.ocrExtract:
       case _EntryAction.openSwf:
@@ -8729,6 +9291,7 @@ class _PreviewPane extends StatelessWidget {
     required this.preview,
     required this.mediaPlaylist,
     required this.imagePlaylist,
+    required this.flashPlaylist,
     required this.mediaResumePositions,
     required this.visible,
     required this.onTogglePreview,
@@ -8736,8 +9299,11 @@ class _PreviewPane extends StatelessWidget {
     required this.onOpenExternal,
     required this.onPreviewWindow,
     required this.onEditPreview,
+    required this.onReadPreview,
+    required this.allowMiniDock,
     required this.onEntryAction,
     required this.onImageNavigate,
+    required this.onFlashNavigate,
     required this.onRememberMediaPosition,
   });
 
@@ -8746,6 +9312,7 @@ class _PreviewPane extends StatelessWidget {
   final Future<FilePreview>? preview;
   final List<MediaPreviewItem> mediaPlaylist;
   final List<MediaPreviewItem> imagePlaylist;
+  final List<MediaPreviewItem> flashPlaylist;
   final Map<String, int> mediaResumePositions;
   final bool visible;
   final VoidCallback onTogglePreview;
@@ -8753,8 +9320,11 @@ class _PreviewPane extends StatelessWidget {
   final ValueChanged<FilePreview> onOpenExternal;
   final ValueChanged<FilePreview> onPreviewWindow;
   final ValueChanged<FilePreview> onEditPreview;
+  final ValueChanged<FilePreview> onReadPreview;
+  final bool allowMiniDock;
   final Future<void> Function(ExplorerEntry, _EntryAction) onEntryAction;
   final Future<FilePreview?> Function(int delta) onImageNavigate;
+  final Future<FilePreview?> Function(int delta) onFlashNavigate;
   final Future<void> Function(String key, Duration position)
       onRememberMediaPosition;
 
@@ -8782,11 +9352,15 @@ class _PreviewPane extends StatelessWidget {
                 language: language,
                 mediaPlaylist: mediaPlaylist,
                 imagePlaylist: imagePlaylist,
+                flashPlaylist: flashPlaylist,
                 mediaResumePositions: mediaResumePositions,
-                allowMiniDock: true,
+                allowMiniDock: allowMiniDock,
                 onRememberMediaPosition: onRememberMediaPosition,
                 onImageNavigate: (delta) async {
                   await onImageNavigate(delta);
+                },
+                onFlashNavigate: (delta) async {
+                  await onFlashNavigate(delta);
                 },
               ),
             ),
@@ -8809,9 +9383,7 @@ class _PreviewPane extends StatelessWidget {
                     case _PreviewAction.edit:
                       onEditPreview(p);
                     case _PreviewAction.speak:
-                      unawaited(PlatformServices.speakText(
-                        p.text ?? p.subtitle,
-                      ));
+                      onReadPreview(p);
                     case _PreviewAction.ocrExtract:
                       onEntryAction(entry!, _EntryAction.ocrExtract);
                     case _PreviewAction.rotateVideoLeft:
@@ -8897,7 +9469,9 @@ class _PreviewContent extends StatelessWidget {
     required this.language,
     this.mediaPlaylist = const [],
     this.imagePlaylist = const [],
+    this.flashPlaylist = const [],
     this.onImageNavigate,
+    this.onFlashNavigate,
     this.mediaResumePositions = const <String, int>{},
     this.onRememberMediaPosition,
     this.fillAvailable = false,
@@ -8909,7 +9483,9 @@ class _PreviewContent extends StatelessWidget {
   final AppLanguage language;
   final List<MediaPreviewItem> mediaPlaylist;
   final List<MediaPreviewItem> imagePlaylist;
+  final List<MediaPreviewItem> flashPlaylist;
   final Future<void> Function(int delta)? onImageNavigate;
+  final Future<void> Function(int delta)? onFlashNavigate;
   final Map<String, int> mediaResumePositions;
   final Future<void> Function(String key, Duration position)?
       onRememberMediaPosition;
@@ -8961,7 +9537,22 @@ class _PreviewContent extends StatelessWidget {
     }
 
     if (preview.contentKind == FileContentKind.flash) {
-      return _SwfPreview(preview: preview, language: language);
+      return _SwfPreview(
+        preview: preview,
+        language: language,
+        flashPlaylist: flashPlaylist,
+        onNavigate: onFlashNavigate,
+      );
+    }
+
+    if (preview.contentKind == FileContentKind.document &&
+        FileViewerService.extensionForName(preview.title) == '.pdf') {
+      return _PdfPreview(preview: preview, language: language);
+    }
+
+    if (preview.contentKind == FileContentKind.ebook &&
+        (preview.text ?? '').trim().isNotEmpty) {
+      return _EbookPreview(preview: preview, language: language);
     }
 
     if (preview.text != null && preview.text!.isNotEmpty) {
@@ -8999,6 +9590,168 @@ class _PreviewContent extends StatelessWidget {
         child: Text(preview.subtitle),
       ),
     );
+  }
+}
+
+bool _isVirtualPreviewPath(String path) =>
+    path.startsWith('remote://') ||
+    path.startsWith('torrent://') ||
+    path.startsWith('zip://') ||
+    path.startsWith('rar://');
+
+class _PdfPreview extends StatelessWidget {
+  const _PdfPreview({required this.preview, required this.language});
+
+  final FilePreview preview;
+  final AppLanguage language;
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = preview.bytes;
+    final sourcePath = preview.sourcePath;
+    final viewer = bytes != null && bytes.isNotEmpty
+        ? syncfusion_pdfviewer.SfPdfViewer.memory(Uint8List.fromList(bytes))
+        : sourcePath != null &&
+                sourcePath.isNotEmpty &&
+                !_isVirtualPreviewPath(sourcePath) &&
+                File(sourcePath).existsSync()
+            ? syncfusion_pdfviewer.SfPdfViewer.file(File(sourcePath))
+            : null;
+    if (viewer == null) {
+      return Card(
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: SelectableText(
+            preview.text?.trim().isNotEmpty == true
+                ? preview.text!
+                : language.t('pdf.preview.unavailable'),
+          ),
+        ),
+      );
+    }
+    return Card(
+      elevation: 0,
+      clipBehavior: Clip.antiAlias,
+      child: SizedBox(
+        height: math.max(520, MediaQuery.sizeOf(context).height * 0.72),
+        child: viewer,
+      ),
+    );
+  }
+}
+
+class _EbookPreview extends StatefulWidget {
+  const _EbookPreview({required this.preview, required this.language});
+
+  final FilePreview preview;
+  final AppLanguage language;
+
+  @override
+  State<_EbookPreview> createState() => _EbookPreviewState();
+}
+
+class _EbookPreviewState extends State<_EbookPreview> {
+  late final PageController _controller;
+  late List<String> _pages;
+  var _page = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = PageController();
+    _pages = _paginate(widget.preview.text ?? '');
+  }
+
+  @override
+  void didUpdateWidget(covariant _EbookPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.preview.text != widget.preview.text ||
+        oldWidget.preview.title != widget.preview.title) {
+      _pages = _paginate(widget.preview.text ?? '');
+      _page = 0;
+      _controller.jumpToPage(0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_pages.isEmpty) {
+      return Center(child: Text(widget.language.t('ebook.empty')));
+    }
+    return Card(
+      elevation: 0,
+      color: const Color(0xFFFFFBF1),
+      child: Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(18, 14, 18, 0),
+          child: Row(children: [
+            const Icon(Icons.menu_book_outlined),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                widget.preview.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            Text('${_page + 1}/${_pages.length}'),
+          ]),
+        ),
+        const Divider(height: 24),
+        SizedBox(
+          height: math.max(520, MediaQuery.sizeOf(context).height * 0.7),
+          child: PageView.builder(
+            controller: _controller,
+            onPageChanged: (value) => setState(() => _page = value),
+            itemCount: _pages.length,
+            itemBuilder: (context, index) => SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(28, 8, 28, 28),
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: SelectableText(
+                  _pages[index],
+                  textAlign: TextAlign.left,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    height: 1.55,
+                    color: Color(0xFF1F2933),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  List<String> _paginate(String raw) {
+    final text = FileViewerService.normalizeReadableText(raw);
+    if (text.isEmpty) return const <String>[];
+    final paragraphs = text
+        .split(RegExp(r'\n{2,}|(?<=\.)\s+(?=[A-ZА-ЯЁ])'))
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty);
+    final pages = <String>[];
+    final buffer = StringBuffer();
+    for (final paragraph in paragraphs) {
+      if (buffer.length + paragraph.length > 2600 && buffer.isNotEmpty) {
+        pages.add(buffer.toString().trim());
+        buffer.clear();
+      }
+      if (buffer.isNotEmpty) buffer.write('\n\n');
+      buffer.write(paragraph);
+    }
+    if (buffer.isNotEmpty) pages.add(buffer.toString().trim());
+    return pages;
   }
 }
 
@@ -9255,10 +10008,17 @@ class _HtmlPreviewState extends State<_HtmlPreview> {
 }
 
 class _SwfPreview extends StatefulWidget {
-  const _SwfPreview({required this.preview, required this.language});
+  const _SwfPreview({
+    required this.preview,
+    required this.language,
+    this.flashPlaylist = const [],
+    this.onNavigate,
+  });
 
   final FilePreview preview;
   final AppLanguage language;
+  final List<MediaPreviewItem> flashPlaylist;
+  final Future<void> Function(int delta)? onNavigate;
 
   @override
   State<_SwfPreview> createState() => _SwfPreviewState();
@@ -9293,58 +10053,99 @@ class _SwfPreviewState extends State<_SwfPreview> {
 
   @override
   Widget build(BuildContext context) {
-    return _EmbeddedBrowserView(
-      language: widget.language,
-      sessionFuture: _sessionFuture,
-      fallback: Center(
-        child: Card(
-          elevation: 0,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 520),
-            child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.extension_outlined, size: 48),
-                const SizedBox(height: 12),
-                Text(
-                  widget.language.t('preview.swf.title'),
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  widget.language.t('preview.swf.body'),
-                  textAlign: TextAlign.center,
-                ),
-                if (widget.preview.text != null &&
-                    widget.preview.text!.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  SelectableText(widget.preview.text!),
+    final canNavigate = widget.onNavigate != null &&
+        widget.flashPlaylist.length > 1 &&
+        widget.preview.contentKind == FileContentKind.flash;
+    return SizedBox(
+      height: math.max(520, MediaQuery.sizeOf(context).height * 0.72),
+      child: Stack(children: [
+        Positioned.fill(
+          child: _EmbeddedBrowserView(
+            language: widget.language,
+            sessionFuture: _sessionFuture,
+            fallback: _buildFallback(context),
+          ),
+        ),
+        Positioned(
+          right: 10,
+          top: 10,
+          child: Material(
+            elevation: 6,
+            borderRadius: BorderRadius.circular(24),
+            color: Theme.of(context).colorScheme.surface.withValues(alpha: .9),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              IconButton(
+                onPressed: canNavigate
+                    ? () => unawaited(widget.onNavigate!(-1))
+                    : null,
+                icon: const Icon(Icons.chevron_left),
+                tooltip: widget.language.t('media.previous'),
+              ),
+              IconButton(
+                onPressed:
+                    canNavigate ? () => unawaited(widget.onNavigate!(1)) : null,
+                icon: const Icon(Icons.chevron_right),
+                tooltip: widget.language.t('media.next'),
+              ),
+              PopupMenuButton<String>(
+                icon: const Icon(Icons.touch_app_outlined),
+                tooltip: widget.language.t('preview.swf.menu'),
+                onSelected: (value) {
+                  if (value == 'reload') {
+                    setState(() => _sessionFuture = _createSession());
+                  }
+                  if (value == 'external') {
+                    unawaited(PlatformServices.openSwfWithRuffle(
+                      title: widget.preview.title,
+                      sourcePath: widget.preview.sourcePath,
+                      bytes: widget.preview.bytes,
+                    ));
+                  }
+                },
+                itemBuilder: (_) => [
+                  PopupMenuItem(
+                    value: 'reload',
+                    child: Text(widget.language.t('explorer.refresh')),
+                  ),
+                  PopupMenuItem(
+                    value: 'external',
+                    child: Text(widget.language.t('preview.swf.open')),
+                  ),
                 ],
-                const SizedBox(height: 16),
-                FilledButton.icon(
-                  onPressed: () async {
-                    try {
-                      await PlatformServices.openSwfWithRuffle(
-                        title: widget.preview.title,
-                        sourcePath: widget.preview.sourcePath,
-                        bytes: widget.preview.bytes,
-                      );
-                    } catch (error) {
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            '${widget.language.t('preview.swf.open.error')} $error',
-                          ),
-                        ),
-                      );
-                    }
-                  },
-                  icon: const Icon(Icons.open_in_browser),
-                  label: Text(widget.language.t('preview.external')),
-                ),
-              ]),
-            ),
+              ),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildFallback(BuildContext context) {
+    return Center(
+      child: Card(
+        elevation: 0,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.extension_outlined, size: 48),
+              const SizedBox(height: 12),
+              Text(
+                widget.language.t('preview.swf.title'),
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                widget.language.t('preview.swf.body'),
+                textAlign: TextAlign.center,
+              ),
+              if (widget.preview.text != null &&
+                  widget.preview.text!.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                SelectableText(widget.preview.text!),
+              ],
+            ]),
           ),
         ),
       ),
@@ -10300,6 +11101,123 @@ class _InMemoryMediaEntry {
   final String contentType;
 }
 
+class _TextReadingDock extends StatefulWidget {
+  const _TextReadingDock({
+    required this.session,
+    required this.language,
+    required this.onTogglePlay,
+    required this.onPrevious,
+    required this.onNext,
+    required this.onNextFile,
+    required this.onClose,
+  });
+
+  final _ReadingSession session;
+  final AppLanguage language;
+  final Future<void> Function() onTogglePlay;
+  final Future<void> Function() onPrevious;
+  final Future<void> Function() onNext;
+  final Future<void> Function() onNextFile;
+  final Future<void> Function() onClose;
+
+  @override
+  State<_TextReadingDock> createState() => _TextReadingDockState();
+}
+
+class _TextReadingDockState extends State<_TextReadingDock> {
+  Offset? _offset;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, constraints) {
+      const width = 360.0;
+      const height = 132.0;
+      final initial = Offset(
+        math.max(12, constraints.maxWidth - width - 16),
+        math.max(12, constraints.maxHeight - height - 96),
+      );
+      final rawOffset = _offset ?? initial;
+      final left = rawOffset.dx
+          .clamp(8.0, math.max(8.0, constraints.maxWidth - width - 8))
+          .toDouble();
+      final top = rawOffset.dy
+          .clamp(8.0, math.max(8.0, constraints.maxHeight - height - 8))
+          .toDouble();
+      final current = widget.session.chunkIndex + 1;
+      final total = math.max(1, widget.session.chunks.length);
+      return Positioned(
+        left: left,
+        top: top,
+        width: width,
+        child: GestureDetector(
+          onPanUpdate: (details) => setState(() {
+            _offset = Offset(left, top) + details.delta;
+          }),
+          child: Material(
+            elevation: 12,
+            borderRadius: BorderRadius.circular(20),
+            color: Theme.of(context).colorScheme.surface,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Row(children: [
+                  const Icon(Icons.record_voice_over_outlined),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      widget.session.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: widget.onClose,
+                    icon: const Icon(Icons.close),
+                    tooltip: widget.language.t('common.close'),
+                  ),
+                ]),
+                LinearProgressIndicator(value: current / total),
+                const SizedBox(height: 4),
+                Text(
+                  '${widget.language.t('reader.fragment')} $current/$total',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  IconButton(
+                    onPressed: widget.onPrevious,
+                    icon: const Icon(Icons.skip_previous),
+                    tooltip: widget.language.t('media.previous'),
+                  ),
+                  IconButton(
+                    onPressed: widget.onTogglePlay,
+                    icon: Icon(widget.session.playing
+                        ? Icons.pause_circle_outline
+                        : Icons.play_circle_outline),
+                    tooltip: widget.session.playing
+                        ? widget.language.t('media.pause')
+                        : widget.language.t('media.play'),
+                  ),
+                  IconButton(
+                    onPressed: widget.onNext,
+                    icon: const Icon(Icons.skip_next),
+                    tooltip: widget.language.t('media.next'),
+                  ),
+                  IconButton(
+                    onPressed: widget.onNextFile,
+                    icon: const Icon(Icons.queue_play_next_outlined),
+                    tooltip: widget.language.t('reader.next.file'),
+                  ),
+                ]),
+              ]),
+            ),
+          ),
+        ),
+      );
+    });
+  }
+}
+
 class _FloatingMediaDock extends StatefulWidget {
   const _FloatingMediaDock({
     required this.session,
@@ -10326,6 +11244,7 @@ class _BackgroundJobsPanel extends StatefulWidget {
   const _BackgroundJobsPanel({
     required this.jobs,
     required this.language,
+    required this.autoCollapseSeconds,
     required this.onCancel,
     required this.onRemove,
     required this.onToggleCollapsed,
@@ -10333,6 +11252,7 @@ class _BackgroundJobsPanel extends StatefulWidget {
 
   final List<_BackgroundJob> jobs;
   final AppLanguage language;
+  final int autoCollapseSeconds;
   final ValueChanged<_BackgroundJob> onCancel;
   final ValueChanged<_BackgroundJob> onRemove;
   final ValueChanged<_BackgroundJob> onToggleCollapsed;
@@ -10343,7 +11263,22 @@ class _BackgroundJobsPanel extends StatefulWidget {
 
 class _BackgroundJobsPanelState extends State<_BackgroundJobsPanel> {
   Offset? _offset;
-  var _compact = false;
+  var _compact = true;
+  Timer? _collapseTimer;
+
+  @override
+  void didUpdateWidget(covariant _BackgroundJobsPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_compact && widget.jobs.isNotEmpty) {
+      _scheduleAutoCollapse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _collapseTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -10398,7 +11333,7 @@ class _BackgroundJobsPanelState extends State<_BackgroundJobsPanel> {
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: () => setState(() => _compact = false),
+        onTap: _expand,
         child: SizedBox(
           width: 72,
           height: 72,
@@ -10413,8 +11348,15 @@ class _BackgroundJobsPanelState extends State<_BackgroundJobsPanel> {
               ),
             ),
             Text(
-              done ? '${widget.jobs.length}' : '${(aggregate * 100).round()}%',
+              '${widget.jobs.length}',
               style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            Positioned(
+              bottom: 10,
+              child: Text(
+                '${(aggregate * 100).round()}%',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
             ),
           ]),
         ),
@@ -10515,6 +11457,19 @@ class _BackgroundJobsPanelState extends State<_BackgroundJobsPanel> {
       (sum, job) => sum + (job.done || job.failed ? job.total : job.completed),
     );
     return (completed / total).clamp(0.0, 1.0).toDouble();
+  }
+
+  void _expand() {
+    setState(() => _compact = false);
+    _scheduleAutoCollapse();
+  }
+
+  void _scheduleAutoCollapse() {
+    _collapseTimer?.cancel();
+    final seconds = widget.autoCollapseSeconds.clamp(1, 120);
+    _collapseTimer = Timer(Duration(seconds: seconds), () {
+      if (mounted) setState(() => _compact = true);
+    });
   }
 }
 
@@ -11599,6 +12554,7 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
             controller: _controller,
             scrollController: _editorScrollController,
             expands: true,
+            textAlignVertical: TextAlignVertical.top,
             maxLines: null,
             minLines: null,
             style: const TextStyle(
@@ -11753,7 +12709,7 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
       final chunk = bytes.sublist(i, math.min(i + 16, bytes.length));
       final hex =
           chunk.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(' ');
-      final ascii = _printableAscii(chunk);
+      final ascii = _printableText(chunk);
       if (buffer.isNotEmpty) buffer.write('\n');
       buffer.write(
         '${i.toRadixString(16).padLeft(8, '0')}  '
@@ -11769,7 +12725,7 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
       final chunk = bytes.sublist(i, math.min(i + 8, bytes.length));
       final bits =
           chunk.map((byte) => byte.toRadixString(2).padLeft(8, '0')).join(' ');
-      final ascii = _printableAscii(chunk);
+      final ascii = _printableText(chunk);
       if (buffer.isNotEmpty) buffer.write('\n');
       buffer.write(
         '${i.toRadixString(16).padLeft(8, '0')}  '
@@ -11807,9 +12763,16 @@ class _TextBinaryEditorDialogState extends State<_TextBinaryEditorDialog> {
     return Uint8List.fromList(bytes);
   }
 
-  String _printableAscii(List<int> bytes) => String.fromCharCodes(
-        bytes.map((byte) => byte >= 32 && byte <= 126 ? byte : 46),
-      );
+  String _printableText(List<int> bytes) {
+    final decoded = FileViewerService.decodeText(
+      bytes,
+      encoding: _encoding == 'auto' ? 'utf-8' : _encoding,
+      trim: false,
+    );
+    return decoded
+        .replaceAll(RegExp(r'[\r\n\t]'), ' ')
+        .replaceAll(RegExp(r'[\u0000-\u001F]'), '.');
+  }
 }
 
 class _DrawStroke {
@@ -13559,6 +14522,52 @@ class _PluginSettingsDialogState extends State<_PluginSettingsDialog> {
   }
 }
 
+class _AndroidPermissionStatusCard extends StatelessWidget {
+  const _AndroidPermissionStatusCard({required this.language});
+
+  final AppLanguage language;
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<AndroidStorageAccessStatus>(
+      future: PlatformServices.androidStorageAccessStatus(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const LinearProgressIndicator(minHeight: 2);
+        }
+        final status = snapshot.data!;
+        String mark(bool value) => value
+            ? language.t('common.enabled')
+            : language.t('common.disabled');
+        return Card(
+          elevation: 0,
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  language.t('settings.android.permissions.status'),
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 6),
+                SelectableText([
+                  'SDK: ${status.sdkInt}',
+                  '${language.t('settings.android.permission.all.files')}: ${mark(status.hasAllFilesAccess)}',
+                  '${language.t('settings.android.permission.images')}: ${mark(status.hasMediaImages)}',
+                  '${language.t('settings.android.permission.video')}: ${mark(status.hasMediaVideo)}',
+                  '${language.t('settings.android.permission.audio')}: ${mark(status.hasMediaAudio)}',
+                ].join('\n')),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _SettingsView extends StatefulWidget {
   const _SettingsView({
     required this.language,
@@ -13651,6 +14660,7 @@ class _SettingsView extends StatefulWidget {
     required bool externalFloatingPlayer,
     required bool encryptThumbnailCache,
     required bool encryptResumePositions,
+    required int progressAutoCollapseSeconds,
     required bool rememberVideoPositions,
     required bool rememberAudioPositions,
   }) onSave;
@@ -13693,6 +14703,7 @@ class _SettingsViewState extends State<_SettingsView> {
   late final TextEditingController _interfaceTextScale;
   late final TextEditingController _interfaceScale;
   late final TextEditingController _toolbarIconScale;
+  late final TextEditingController _progressAutoCollapseSeconds;
   late final TextEditingController _programProxy;
   late final TextEditingController _globalPluginProxy;
   late final TextEditingController _galleryFolders;
@@ -13834,6 +14845,9 @@ class _SettingsViewState extends State<_SettingsView> {
     _toolbarIconScale = TextEditingController(
       text: widget.settings.toolbarIconScale.toStringAsFixed(2),
     );
+    _progressAutoCollapseSeconds = TextEditingController(
+      text: '${widget.settings.progressAutoCollapseSeconds}',
+    );
     _programProxy = TextEditingController(
       text: widget.settings.programProxy ?? '',
     );
@@ -13886,6 +14900,7 @@ class _SettingsViewState extends State<_SettingsView> {
       _interfaceTextScale,
       _interfaceScale,
       _toolbarIconScale,
+      _progressAutoCollapseSeconds,
       _programProxy,
       _globalPluginProxy,
       _galleryFolders,
@@ -13924,6 +14939,7 @@ class _SettingsViewState extends State<_SettingsView> {
     _interfaceTextScale.dispose();
     _interfaceScale.dispose();
     _toolbarIconScale.dispose();
+    _progressAutoCollapseSeconds.dispose();
     _programProxy.dispose();
     _globalPluginProxy.dispose();
     _galleryFolders.dispose();
@@ -14436,6 +15452,14 @@ class _SettingsViewState extends State<_SettingsView> {
           onChanged: (v) => setState(() => _autoCloseMediaOnSectionChange = v),
           title: Text(language.t('settings.background.autoclose')),
         ),
+        TextField(
+          controller: _progressAutoCollapseSeconds,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: language.t('settings.progress.autocollapse.seconds'),
+            helperText: language.t('settings.progress.autocollapse.note'),
+          ),
+        ),
       ]),
       const SizedBox(height: 12),
       _settingsCard(context, language.t('settings.proxy'), [
@@ -14465,6 +15489,8 @@ class _SettingsViewState extends State<_SettingsView> {
                 setState(() => _requirePasswordOnAndroidResume = v),
             title: Text(language.t('settings.android.lock.resume')),
           ),
+          const SizedBox(height: 8),
+          _AndroidPermissionStatusCard(language: language),
           const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: widget.onRequestAndroidStorageAccess,
@@ -14697,6 +15723,8 @@ class _SettingsViewState extends State<_SettingsView> {
         externalFloatingPlayer: _externalFloatingPlayer,
         encryptThumbnailCache: _encryptThumbnailCache,
         encryptResumePositions: _encryptResumePositions,
+        progressAutoCollapseSeconds:
+            int.tryParse(_progressAutoCollapseSeconds.text.trim()) ?? 3,
         rememberVideoPositions: _rememberVideoPositions,
         rememberAudioPositions: _rememberAudioPositions,
       );

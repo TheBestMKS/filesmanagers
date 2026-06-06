@@ -561,7 +561,7 @@ Get-PnpDevice -Class WPD -Status OK |
       } else {
         entries.add(
           ExplorerEntry(
-            name: basename(path),
+            name: _displayNameForPath(path),
             path: path,
             kind: ExplorerEntryKind.unknown,
             sizeBytes: 0,
@@ -572,6 +572,22 @@ Get-PnpDevice -Class WPD -Status OK |
       }
     }
     return DirectorySnapshot(path: label, entries: entries);
+  }
+
+  String _displayNameForPath(String path) {
+    final remote = _RemoteVirtualPath.tryParse(path);
+    if (remote != null) return _remoteBasename(remote.innerPath);
+    final torrent = _TorrentVirtualPath.tryParse(path);
+    if (torrent != null) return _zipBasename(torrent.innerPath);
+    final zip = _ZipVirtualPath.tryParse(path);
+    if (zip != null) return _zipBasename(zip.innerPath);
+    final rar = _RarVirtualPath.tryParse(path);
+    if (rar != null) return _zipBasename(rar.innerPath);
+    try {
+      return Uri.decodeComponent(basename(path));
+    } catch (_) {
+      return basename(path);
+    }
   }
 
   Future<DirectorySnapshot> snapshotForLocations(
@@ -2701,7 +2717,9 @@ Get-PnpDevice -Class WPD -Status OK |
         return false;
       }
       if (kind == FileContentKind.text || kind == FileContentKind.html) {
-        return matcher.matches(await file.readAsString());
+        return matcher.matches(FileViewerService.bytesToText(
+          await file.readAsBytes(),
+        ));
       }
       final preview = await FileViewerService.previewPlainFile(file);
       final text = preview.text;
@@ -2791,7 +2809,7 @@ Get-PnpDevice -Class WPD -Status OK |
             'psm': '3',
           },
         ).timeout(const Duration(seconds: 40));
-        final trimmed = text.trim();
+        final trimmed = FileViewerService.normalizeReadableText(text).trim();
         return trimmed.isEmpty ? null : trimmed;
       }
       final binary = await _findTesseractBinary();
@@ -2807,9 +2825,13 @@ Get-PnpDevice -Class WPD -Status OK |
           if (tessdataDir != null) ...['--tessdata-dir', tessdataDir],
         ],
         runInShell: Platform.isWindows && !File(binary).existsSync(),
+        stdoutEncoding: utf8,
+        stderrEncoding: utf8,
       ).timeout(const Duration(seconds: 25));
       if (result.exitCode != 0) return null;
-      final text = result.stdout.toString().trim();
+      final text = FileViewerService.normalizeReadableText(
+        result.stdout.toString(),
+      ).trim();
       return text.isEmpty ? null : text;
     } catch (_) {
       return null;
