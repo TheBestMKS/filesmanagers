@@ -30,7 +30,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.12';
+const _appVersion = '0.12.13';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -2742,6 +2742,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         await _openEntry(entry);
       case _EntryAction.edit:
         await _editEntry(entry);
+      case _EntryAction.create:
+        return;
       case _EntryAction.createFolder:
         await _createFolder(entry);
       case _EntryAction.createPlain:
@@ -6392,6 +6394,7 @@ enum _CommonSetupDecision { cancel, unique, settings }
 enum _EntryAction {
   open,
   edit,
+  create,
   createFolder,
   createPlain,
   createEncryptedPlain,
@@ -8486,7 +8489,9 @@ class _EntryList extends StatelessWidget {
                         color: Color(0xFF2B7A4B)),
                   PopupMenuButton<_EntryAction>(
                     icon: const Icon(Icons.more_vert),
-                    onSelected: (action) => _handleEntryAction(entry, action),
+                    onSelected: (action) => unawaited(
+                      _handleEntryMenuSelection(context, entry, action, null),
+                    ),
                     itemBuilder: (_) => _entryMenuItems(entry),
                   ),
                 ]),
@@ -8564,9 +8569,85 @@ class _EntryList extends StatelessWidget {
       items: _entryMenuItems(entry),
     );
     if (selectedAction != null) {
-      _handleEntryAction(entry, selectedAction);
+      if (!context.mounted) return;
+      await _handleEntryMenuSelection(context, entry, selectedAction, position);
     }
   }
+
+  Future<void> _handleEntryMenuSelection(
+    BuildContext context,
+    ExplorerEntry entry,
+    _EntryAction action,
+    Offset? position,
+  ) async {
+    if (action == _EntryAction.create) {
+      final selected = await _showCreateSubmenu(context, position);
+      if (selected != null) {
+        _handleEntryAction(entry, selected);
+      }
+      return;
+    }
+    _handleEntryAction(entry, action);
+  }
+
+  Future<_EntryAction?> _showCreateSubmenu(
+    BuildContext context,
+    Offset? position,
+  ) {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final contextBox = context.findRenderObject();
+    final fallback = contextBox is RenderBox
+        ? contextBox.localToGlobal(Offset(
+            contextBox.size.width,
+            math.min(48, contextBox.size.height) / 2,
+          ))
+        : Offset(overlay.size.width / 2, overlay.size.height / 2);
+    final source =
+        position == null ? fallback : position + const Offset(24, 24);
+    final anchor = Offset(
+      source.dx.clamp(8.0, overlay.size.width - 8).toDouble(),
+      source.dy.clamp(8.0, overlay.size.height - 8).toDouble(),
+    );
+    return showMenu<_EntryAction>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(anchor.dx, anchor.dy, 1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: _createSubmenuItems(),
+    );
+  }
+
+  List<PopupMenuEntry<_EntryAction>> _createSubmenuItems() => [
+        PopupMenuItem(
+          value: _EntryAction.createFolder,
+          child: Text(language.t('create.folder')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createPlain,
+          child: Text(language.t('create.plain')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createEncryptedPlain,
+          child: Text(language.t('create.encrypted.plain')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createCsv,
+          child: Text(language.t('create.csv')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createEncryptedCsv,
+          child: Text(language.t('create.encrypted.csv')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createImage,
+          child: Text(language.t('create.image')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createEncryptedImage,
+          child: Text(language.t('create.encrypted.image')),
+        ),
+      ];
 
   List<PopupMenuEntry<_EntryAction>> _entryMenuItems(ExplorerEntry entry) {
     final isFavorite = favoritePaths.contains(entry.path);
@@ -8601,67 +8682,15 @@ class _EntryList extends StatelessWidget {
         ),
       const PopupMenuDivider(),
       PopupMenuItem(
-        value: _EntryAction.createFolder,
+        value: _EntryAction.create,
         enabled: entry.exists &&
             entry.isDirectory &&
             !isVirtual &&
             !isProfileLocation,
-        child: Text(
-            '${language.t('explorer.create')} > ${language.t('create.folder')}'),
-      ),
-      PopupMenuItem(
-        value: _EntryAction.createPlain,
-        enabled: entry.exists &&
-            entry.isDirectory &&
-            !isVirtual &&
-            !isProfileLocation,
-        child: Text(
-            '${language.t('explorer.create')} > ${language.t('create.plain')}'),
-      ),
-      PopupMenuItem(
-        value: _EntryAction.createEncryptedPlain,
-        enabled: entry.exists &&
-            entry.isDirectory &&
-            !isVirtual &&
-            !isProfileLocation,
-        child: Text(
-            '${language.t('explorer.create')} > ${language.t('create.encrypted.plain')}'),
-      ),
-      PopupMenuItem(
-        value: _EntryAction.createCsv,
-        enabled: entry.exists &&
-            entry.isDirectory &&
-            !isVirtual &&
-            !isProfileLocation,
-        child: Text(
-            '${language.t('explorer.create')} > ${language.t('create.csv')}'),
-      ),
-      PopupMenuItem(
-        value: _EntryAction.createEncryptedCsv,
-        enabled: entry.exists &&
-            entry.isDirectory &&
-            !isVirtual &&
-            !isProfileLocation,
-        child: Text(
-            '${language.t('explorer.create')} > ${language.t('create.encrypted.csv')}'),
-      ),
-      PopupMenuItem(
-        value: _EntryAction.createImage,
-        enabled: entry.exists &&
-            entry.isDirectory &&
-            !isVirtual &&
-            !isProfileLocation,
-        child: Text(
-            '${language.t('explorer.create')} > ${language.t('create.image')}'),
-      ),
-      PopupMenuItem(
-        value: _EntryAction.createEncryptedImage,
-        enabled: entry.exists &&
-            entry.isDirectory &&
-            !isVirtual &&
-            !isProfileLocation,
-        child: Text(
-            '${language.t('explorer.create')} > ${language.t('create.encrypted.image')}'),
+        child: Row(children: [
+          Expanded(child: Text(language.t('explorer.create'))),
+          const Icon(Icons.chevron_right, size: 18),
+        ]),
       ),
       PopupMenuItem(
         value:
@@ -8859,6 +8888,8 @@ class _EntryList extends StatelessWidget {
         onEntry(entry);
       case _EntryAction.edit:
         onEntryAction(entry, action);
+      case _EntryAction.create:
+        return;
       case _EntryAction.createFolder:
       case _EntryAction.createPlain:
       case _EntryAction.createEncryptedPlain:
@@ -9252,35 +9283,82 @@ class _EmptyExplorerArea extends StatelessWidget {
         ),
         const PopupMenuDivider(),
         PopupMenuItem(
-          value: _EntryAction.createFolder,
-          child: Text(
-              '${language.t('explorer.create')} > ${language.t('create.folder')}'),
-        ),
-        PopupMenuItem(
-          value: _EntryAction.createPlain,
-          child: Text(
-              '${language.t('explorer.create')} > ${language.t('create.plain')}'),
-        ),
-        PopupMenuItem(
-          value: _EntryAction.createEncryptedPlain,
-          child: Text(
-              '${language.t('explorer.create')} > ${language.t('create.encrypted.plain')}'),
-        ),
-        PopupMenuItem(
-          value: _EntryAction.createCsv,
-          child: Text(
-              '${language.t('explorer.create')} > ${language.t('create.csv')}'),
-        ),
-        PopupMenuItem(
-          value: _EntryAction.createImage,
-          child: Text(
-              '${language.t('explorer.create')} > ${language.t('create.image')}'),
+          value: _EntryAction.create,
+          child: Row(children: [
+            Expanded(child: Text(language.t('explorer.create'))),
+            const Icon(Icons.chevron_right, size: 18),
+          ]),
         ),
       ],
     );
     if (selected != null) {
+      if (selected == _EntryAction.create) {
+        if (!context.mounted) return;
+        final child = await _showCreateSubmenu(context, position);
+        if (child != null) {
+          await onAction(path, child);
+        }
+        return;
+      }
       await onAction(path, selected);
     }
+  }
+
+  Future<_EntryAction?> _showCreateSubmenu(
+    BuildContext context,
+    Offset? position,
+  ) {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final contextBox = context.findRenderObject();
+    final fallback = contextBox is RenderBox
+        ? contextBox.localToGlobal(Offset(
+            contextBox.size.width,
+            math.min(48, contextBox.size.height) / 2,
+          ))
+        : Offset(overlay.size.width / 2, overlay.size.height / 2);
+    final source =
+        position == null ? fallback : position + const Offset(24, 24);
+    final anchor = Offset(
+      source.dx.clamp(8.0, overlay.size.width - 8).toDouble(),
+      source.dy.clamp(8.0, overlay.size.height - 8).toDouble(),
+    );
+    return showMenu<_EntryAction>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(anchor.dx, anchor.dy, 1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem(
+          value: _EntryAction.createFolder,
+          child: Text(language.t('create.folder')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createPlain,
+          child: Text(language.t('create.plain')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createEncryptedPlain,
+          child: Text(language.t('create.encrypted.plain')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createCsv,
+          child: Text(language.t('create.csv')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createEncryptedCsv,
+          child: Text(language.t('create.encrypted.csv')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createImage,
+          child: Text(language.t('create.image')),
+        ),
+        PopupMenuItem(
+          value: _EntryAction.createEncryptedImage,
+          child: Text(language.t('create.encrypted.image')),
+        ),
+      ],
+    );
   }
 }
 
