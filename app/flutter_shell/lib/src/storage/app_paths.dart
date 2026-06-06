@@ -99,6 +99,13 @@ class AppPaths {
     return dir;
   }
 
+  static Future<Directory> protectedCacheDirectory() async {
+    final appData = await appDataDirectory();
+    return _ensureDirectory(
+      Directory('${appData.path}${Platform.pathSeparator}cache'),
+    );
+  }
+
   static Future<Directory> pluginsDirectory() async {
     final override = Platform.environment['SECUREVAULT_PLUGINS_DIR'];
     if (override != null && override.trim().isNotEmpty) {

@@ -636,6 +636,14 @@ class AppLanguage {
     'preview.swf.title': 'SWF / Flash object',
     'preview.swf.body':
         'Interactive SWF playback requires an external handler or a Ruffle-compatible plugin. Use the preview menu to open it externally after the warning.',
+    'preview.swf.open': 'Open SWF',
+    'preview.swf.open.error': 'SWF opening error:',
+    'preview.swf.not_file': 'This file is not a SWF object.',
+    'ocr.extract': 'Extract OCR text',
+    'ocr.processing': 'Extracting text with OCR...',
+    'ocr.empty': 'OCR did not find text.',
+    'ocr.error': 'OCR error:',
+    'ocr.copied': 'OCR text copied.',
   };
 
   static const _russianStrings = <String, String>{
@@ -1240,6 +1248,14 @@ class AppLanguage {
     'preview.swf.title': 'SWF / Flash-объект',
     'preview.swf.body':
         'Для интерактивного запуска SWF нужен внешний обработчик или Ruffle-совместимый плагин. Используйте меню просмотра для внешнего открытия после предупреждения.',
+    'preview.swf.open': 'Открыть SWF',
+    'preview.swf.open.error': 'Ошибка открытия SWF:',
+    'preview.swf.not_file': 'Этот файл не является SWF-объектом.',
+    'ocr.extract': 'Извлечь текст OCR',
+    'ocr.processing': 'Извлечение текста через OCR...',
+    'ocr.empty': 'OCR не нашёл текст.',
+    'ocr.error': 'Ошибка OCR:',
+    'ocr.copied': 'OCR-текст скопирован.',
   };
 
   static List<String> get requiredStringKeys => _englishStrings.keys.toList();

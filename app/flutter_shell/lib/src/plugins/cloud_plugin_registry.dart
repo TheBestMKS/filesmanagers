@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
+import 'package:flutter/services.dart';
 
 import '../storage/app_paths.dart';
 import 'connection_profile.dart';
@@ -865,6 +866,54 @@ class CloudPluginRegistry {
       await _ensureRarPluginPayload(rarDir);
     }
 
+    final swfDir = await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'swf_ruffle_player',
+      manifest: <String, Object?>{
+        'id': 'swf-ruffle-player',
+        'name': 'Ruffle SWF Player',
+        'version': '1.0.0',
+        'pluginType': 'viewer-extension',
+        'description':
+            'Adds interactive SWF/Flash opening through the bundled Ruffle web runtime served from SecureVault memory cache on Windows and Android.',
+        'authType': 'none',
+        'capabilities': [
+          'fileHandler',
+          'previewProvider',
+          'interactiveViewer',
+          'contextMenuActions'
+        ],
+        'components': <String, Object?>{
+          'executor': 'swf-ruffle',
+          'runtime': 'components/ruffle',
+        },
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{
+            'executor': 'swf-ruffle',
+            'runtime': 'components/ruffle',
+          },
+          'android-arm64': <String, Object?>{
+            'executor': 'swf-ruffle',
+            'runtime': 'components/ruffle',
+          },
+          'fallback': <String, Object?>{
+            'executor': 'swf-ruffle',
+            'runtime': 'components/ruffle',
+          },
+        },
+        'fileHandlers': [
+          <String, Object?>{
+            'extensions': ['.swf'],
+            'mode': 'interactive-preview',
+          }
+        ],
+      },
+    );
+    if (swfDir != null) {
+      await _ensureSwfRufflePayload(swfDir);
+    }
+
     await _writeTemplate(
       pluginsDir,
       deleted: deleted,
@@ -910,17 +959,17 @@ class CloudPluginRegistry {
     Directory pluginsDir,
     Set<String> deleted,
   ) async {
-    await _writeTemplate(
+    final ocrDir = await _writeTemplate(
       pluginsDir,
       deleted: deleted,
       folder: 'tesseract_ocr_search',
       manifest: <String, Object?>{
         'id': 'tesseract-ocr',
         'name': 'Tesseract OCR Search',
-        'version': '1.0.0',
+        'version': '1.1.0',
         'pluginType': 'content-search-extension',
         'description':
-            'Adds OCR-assisted content search for images and PDFs through bundled or system Tesseract executors.',
+            'Adds OCR-assisted content search and context-menu text extraction for images and PDFs. Android uses bundled flutter_tesseract_ocr with rus+eng tessdata; desktop uses bundled or system Tesseract CLI.',
         'authType': 'none',
         'capabilities': [
           'contentSearch',
@@ -938,24 +987,47 @@ class CloudPluginRegistry {
             'default': 'true',
           },
         },
-        'components': <String, Object?>{'executor': 'tesseract-ocr'},
+        'components': <String, Object?>{
+          'executor': 'tesseract-ocr',
+          'androidEngine': 'flutter_tesseract_ocr',
+          'desktopEngine': 'tesseract-cli',
+          'tessdata': 'assets/tessdata',
+        },
         'platformComponents': <String, Object?>{
           'windows-x64': <String, Object?>{
             'executor': 'tesseract-ocr',
             'binary': 'components/tesseract/windows-x64/tesseract.exe',
           },
+          'windows-arm64': <String, Object?>{
+            'executor': 'tesseract-ocr',
+            'binary': 'components/tesseract/windows-arm64/tesseract.exe',
+          },
           'linux-x64': <String, Object?>{
             'executor': 'tesseract-ocr',
             'binary': 'components/tesseract/linux-x64/tesseract',
           },
+          'android-arm': <String, Object?>{
+            'executor': 'tesseract-ocr',
+            'engine': 'flutter_tesseract_ocr',
+            'tessdataAssets': 'assets/tessdata',
+          },
           'android-arm64': <String, Object?>{
             'executor': 'tesseract-ocr',
-            'binary': 'components/tesseract/android-arm64/tesseract',
+            'engine': 'flutter_tesseract_ocr',
+            'tessdataAssets': 'assets/tessdata',
+          },
+          'android-x64': <String, Object?>{
+            'executor': 'tesseract-ocr',
+            'engine': 'flutter_tesseract_ocr',
+            'tessdataAssets': 'assets/tessdata',
           },
           'fallback': <String, Object?>{'executor': 'tesseract-ocr'},
         },
       },
     );
+    if (ocrDir != null) {
+      await _ensureTesseractPluginPayload(ocrDir);
+    }
 
     await _writeTemplate(
       pluginsDir,
@@ -1013,15 +1085,195 @@ class CloudPluginRegistry {
     required Map<String, Object?> manifest,
     Set<String> deleted = const <String>{},
   }) async {
-    final id = manifest['id']?.toString();
+    final normalizedManifest = _withStandardPlatformComponents(manifest);
+    final id = normalizedManifest['id']?.toString();
     if (id != null && deleted.contains(id)) return null;
     final dir = Directory('${pluginsDir.path}${Platform.pathSeparator}$folder');
     final file = File('${dir.path}${Platform.pathSeparator}plugin.json');
-    if (await file.exists()) return dir;
+    if (await file.exists()) {
+      try {
+        final decoded = jsonDecode(await file.readAsString());
+        if (decoded is Map) {
+          final existing = decoded.map((key, value) => MapEntry(
+                key.toString(),
+                value as Object?,
+              ));
+          final merged = _mergeTemplateManifest(existing, normalizedManifest);
+          final before = const JsonEncoder.withIndent('  ').convert(existing);
+          final after = const JsonEncoder.withIndent('  ').convert(merged);
+          if (before != after) {
+            await file.writeAsString(after);
+          }
+        }
+      } catch (_) {
+        // Keep a broken user-supplied plugin file untouched; the loader will
+        // surface parsing errors separately without deleting user data.
+      }
+      return dir;
+    }
     await dir.create(recursive: true);
-    await file
-        .writeAsString(const JsonEncoder.withIndent('  ').convert(manifest));
+    await file.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(normalizedManifest));
     return dir;
+  }
+
+  Map<String, Object?> _withStandardPlatformComponents(
+    Map<String, Object?> manifest,
+  ) {
+    final copy = <String, Object?>{...manifest};
+    final components = _asStringMap(copy['components']);
+    final platform = <String, Object?>{
+      ...?_asStringMap(copy['platformComponents']),
+    };
+    final executor = components?['executor']?.toString() ??
+        _firstExecutor(platform) ??
+        'plugin-executor';
+    final fallback = _asStringMap(platform['fallback']) ??
+        <String, Object?>{'executor': executor};
+    Map<String, Object?> componentFor(String key, [String? sourceKey]) {
+      return <String, Object?>{
+        ...fallback,
+        ...?_asStringMap(platform[sourceKey ?? key]),
+      };
+    }
+
+    platform['windows-x64'] =
+        _asStringMap(platform['windows-x64']) ?? componentFor('windows-x64');
+    platform['windows-arm64'] = _asStringMap(platform['windows-arm64']) ??
+        componentFor('windows-arm64', 'windows-x64');
+    platform['android-arm64'] = _asStringMap(platform['android-arm64']) ??
+        componentFor('android-arm64');
+    platform['android-arm'] = _asStringMap(platform['android-arm']) ??
+        componentFor('android-arm', 'android-arm64');
+    platform['android-x64'] = _asStringMap(platform['android-x64']) ??
+        componentFor('android-x64', 'android-arm64');
+    platform['fallback'] = fallback;
+    copy['platformComponents'] = platform;
+    return copy;
+  }
+
+  Map<String, Object?> _mergeTemplateManifest(
+    Map<String, Object?> existing,
+    Map<String, Object?> template,
+  ) {
+    final merged = <String, Object?>{...existing};
+    for (final key in [
+      'id',
+      'name',
+      'version',
+      'pluginType',
+      'description',
+      'authType',
+      'repositoryUrl',
+      'updateUrl',
+      'components',
+      'proxy',
+      'mediaCatalog',
+      'listFiles',
+      'fileInfo',
+      'fileStream',
+      'upload',
+    ]) {
+      if (template.containsKey(key)) {
+        merged[key] = _mergeObject(existing[key], template[key]);
+      }
+    }
+    merged['capabilities'] = _mergeStringLists(
+      existing['capabilities'],
+      template['capabilities'],
+    );
+    merged['fileHandlers'] = _mergeObjectLists(
+      existing['fileHandlers'],
+      template['fileHandlers'],
+      keyFields: const ['mode', 'sectionId'],
+    );
+    merged['sections'] = _mergeObjectLists(
+      existing['sections'],
+      template['sections'],
+      keyFields: const ['id'],
+    );
+    merged['settings'] =
+        _mergeObject(existing['settings'], template['settings']);
+    merged['variables'] =
+        _mergeObject(existing['variables'], template['variables']);
+    merged['platformComponents'] = _mergeObject(
+      existing['platformComponents'],
+      template['platformComponents'],
+    );
+    return merged;
+  }
+
+  Object? _mergeObject(Object? existing, Object? template) {
+    if (existing is Map && template is Map) {
+      final result = <String, Object?>{};
+      for (final entry in template.entries) {
+        result[entry.key.toString()] = entry.value as Object?;
+      }
+      for (final entry in existing.entries) {
+        final key = entry.key.toString();
+        result[key] = _mergeObject(entry.value, result[key]);
+      }
+      return result;
+    }
+    return existing ?? template;
+  }
+
+  List<String> _mergeStringLists(Object? existing, Object? template) {
+    final values = <String>[];
+    for (final source in [template, existing]) {
+      if (source is List) {
+        for (final item in source) {
+          final value = item.toString();
+          if (!values.contains(value)) values.add(value);
+        }
+      }
+    }
+    return values;
+  }
+
+  List<Object?> _mergeObjectLists(
+    Object? existing,
+    Object? template, {
+    required List<String> keyFields,
+  }) {
+    final values = <Object?>[];
+    void addAll(Object? source) {
+      if (source is! List) return;
+      for (final item in source) {
+        if (item is Map) {
+          final key =
+              keyFields.map((field) => item[field]?.toString() ?? '').join('|');
+          final already = values.any((existingItem) {
+            if (existingItem is! Map) return false;
+            final existingKey = keyFields
+                .map((field) => existingItem[field]?.toString() ?? '')
+                .join('|');
+            return existingKey == key;
+          });
+          if (!already) values.add(item);
+        } else if (!values.contains(item)) {
+          values.add(item);
+        }
+      }
+    }
+
+    addAll(template);
+    addAll(existing);
+    return values;
+  }
+
+  Map<String, Object?>? _asStringMap(Object? value) {
+    if (value is! Map) return null;
+    return value.map((key, item) => MapEntry(key.toString(), item as Object?));
+  }
+
+  String? _firstExecutor(Map<String, Object?> platform) {
+    for (final value in platform.values) {
+      final map = _asStringMap(value);
+      final executor = map?['executor']?.toString();
+      if (executor != null && executor.isNotEmpty) return executor;
+    }
+    return null;
   }
 
   Future<void> _ensureTorrentPluginPayload(Directory pluginDir) async {
@@ -1092,6 +1344,87 @@ class CloudPluginRegistry {
         }
       }
       return;
+    }
+  }
+
+  Future<void> _ensureSwfRufflePayload(Directory pluginDir) async {
+    final targetDir = Directory(
+      '${pluginDir.path}${Platform.pathSeparator}components'
+      '${Platform.pathSeparator}ruffle',
+    );
+    await targetDir.create(recursive: true);
+    const files = <String>[
+      'ruffle.js',
+      'core.ruffle.a6584f4c154875f3f805.js',
+      'core.ruffle.f8e79026a9aea0a4e05d.js',
+      'bae0d5b86e41210ba443.wasm',
+      'ecc5e233d534bdc785c1.wasm',
+      'LICENSE_APACHE',
+      'LICENSE_MIT',
+    ];
+    for (final name in files) {
+      final target = File('${targetDir.path}${Platform.pathSeparator}$name');
+      if (await target.exists() && await target.length() > 0) continue;
+      try {
+        final data = await rootBundle.load(
+          'assets/plugin_components/swf_ruffle_player/ruffle/$name',
+        );
+        await target.writeAsBytes(
+          data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+          flush: true,
+        );
+      } catch (_) {
+        final source = File(
+          'app${Platform.pathSeparator}flutter_shell'
+          '${Platform.pathSeparator}assets${Platform.pathSeparator}'
+          'plugin_components${Platform.pathSeparator}swf_ruffle_player'
+          '${Platform.pathSeparator}ruffle${Platform.pathSeparator}$name',
+        );
+        if (await source.exists()) {
+          await source.copy(target.path);
+        }
+      }
+    }
+  }
+
+  Future<void> _ensureTesseractPluginPayload(Directory pluginDir) async {
+    final targetDir = Directory(
+      '${pluginDir.path}${Platform.pathSeparator}components'
+      '${Platform.pathSeparator}tessdata',
+    );
+    await targetDir.create(recursive: true);
+    const files = <String>['eng.traineddata', 'rus.traineddata'];
+    for (final name in files) {
+      final target = File('${targetDir.path}${Platform.pathSeparator}$name');
+      if (await target.exists() && await target.length() > 0) continue;
+      try {
+        final data = await rootBundle.load('assets/tessdata/$name');
+        await target.writeAsBytes(
+          data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
+          flush: true,
+        );
+      } catch (_) {
+        final source = File(
+          'app${Platform.pathSeparator}flutter_shell'
+          '${Platform.pathSeparator}assets${Platform.pathSeparator}'
+          'tessdata${Platform.pathSeparator}$name',
+        );
+        if (await source.exists()) {
+          await source.copy(target.path);
+        }
+      }
+    }
+    final config = File(
+      '${pluginDir.path}${Platform.pathSeparator}components'
+      '${Platform.pathSeparator}tessdata_config.json',
+    );
+    if (!await config.exists()) {
+      await config.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(<String, Object?>{
+          'files': files,
+          'defaultLanguage': 'rus+eng',
+        }),
+      );
     }
   }
 }

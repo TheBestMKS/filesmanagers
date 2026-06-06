@@ -1,7 +1,7 @@
 name: secure_vault_shell
 description: Flutter shell for the secure vault explorer.
 publish_to: "none"
-version: 0.12.9
+version: 0.12.10
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -24,6 +24,8 @@ dependencies:
   dartssh2: ^2.17.1
   dart_smb2: ^0.1.0
   rar: 0.3.0
+  flutter_html: ^3.0.0
+  flutter_tesseract_ocr: ^0.4.31
 
 dev_dependencies:
   flutter_test:
@@ -35,3 +37,6 @@ flutter:
   assets:
     - assets/i18n/
     - assets/icons/logo_program.png
+    - assets/tessdata_config.json
+    - assets/tessdata/
+    - assets/plugin_components/swf_ruffle_player/ruffle/

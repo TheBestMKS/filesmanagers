@@ -4,10 +4,13 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
 import 'package:rar/rar.dart' as rar_plugin;
 
 import '../ffi/crypt_bindings.dart';
+import '../platform_services.dart';
 import '../plugins/cloud_plugin_registry.dart' hide basename;
 import '../plugins/connection_profile.dart';
 import '../remote/remote_file_system.dart';
@@ -1951,27 +1954,7 @@ Get-PnpDevice -Class WPD -Status OK |
 
   Future<List<_RarArchiveEntry>> _rarEntries(String archivePath) async {
     if (Platform.isAndroid) {
-      final result = await rar_plugin.Rar.listRarContents(
-        rarFilePath: archivePath,
-      );
-      if (result['success'] != true) {
-        throw FileSystemException(
-          result['message']?.toString() ?? 'RAR listing failed.',
-          archivePath,
-        );
-      }
-      final files = result['files'];
-      return files is List
-          ? files
-              .map((item) => _RarArchiveEntry(
-                    name: item.toString(),
-                    sizeBytes: 0,
-                    modifiedAt: DateTime.now(),
-                    isDirectory: item.toString().endsWith('/') ||
-                        item.toString().endsWith('\\'),
-                  ))
-              .toList()
-          : const <_RarArchiveEntry>[];
+      return _rarCachedEntries(archivePath);
     }
     return _rarCliEntries(archivePath);
   }
@@ -1979,28 +1962,12 @@ Get-PnpDevice -Class WPD -Status OK |
   Future<Uint8List> _rarEntryBytes(String archivePath, String innerPath) async {
     final normalized = _normalizeZipEntryName(innerPath);
     if (Platform.isAndroid) {
-      final temp = await Directory.systemTemp.createTemp('securevault_rar_');
-      try {
-        final result = await rar_plugin.Rar.extractRarFile(
-          rarFilePath: archivePath,
-          destinationPath: temp.path,
-        );
-        if (result['success'] != true) {
-          throw FileSystemException(
-            result['message']?.toString() ?? 'RAR extraction failed.',
-            archivePath,
-          );
-        }
-        final file = File(
-          '${temp.path}${Platform.pathSeparator}'
-          '${normalized.split('/').join(Platform.pathSeparator)}',
-        );
-        return await file.readAsBytes();
-      } finally {
-        if (await temp.exists()) {
-          await temp.delete(recursive: true);
-        }
-      }
+      final root = await _rarExtractedRoot(archivePath);
+      final file = File(
+        '${root.path}${Platform.pathSeparator}'
+        '${normalized.split('/').join(Platform.pathSeparator)}',
+      );
+      return await file.readAsBytes();
     }
     final temp = await Directory.systemTemp.createTemp('securevault_rar_');
     try {
@@ -2700,7 +2667,17 @@ Get-PnpDevice -Class WPD -Status OK |
           commonPassword: commonPassword,
         );
         final text = preview.text;
-        return text != null && matcher.matches(text);
+        if (text != null && matcher.matches(text)) return true;
+        if ((preview.contentKind == FileContentKind.image ||
+                FileViewerService.extensionForName(preview.title) == '.pdf') &&
+            preview.bytes != null) {
+          final ocrText = await _ocrTextForBytes(
+            preview.title,
+            Uint8List.fromList(preview.bytes!),
+          );
+          return ocrText != null && matcher.matches(ocrText);
+        }
+        return false;
       }
       final kind = FileViewerService.kindForName(entry.path);
       final extension = FileViewerService.extensionForName(entry.path);
@@ -2739,19 +2716,86 @@ Get-PnpDevice -Class WPD -Status OK |
     }
   }
 
+  Future<String?> extractOcrText(
+    String path, {
+    String? commonPassword,
+    String? filePassword,
+  }) async {
+    final name = _displayNameForOcr(path);
+    final kind = FileViewerService.kindForName(name);
+    final extension = FileViewerService.extensionForName(name);
+    final explorerKind = _kindForFile(name);
+
+    final zip = _ZipVirtualPath.tryParse(path);
+    final rar = _RarVirtualPath.tryParse(path);
+    final remote = _RemoteVirtualPath.tryParse(path);
+    final torrent = _TorrentVirtualPath.tryParse(path);
+    final isVirtual =
+        zip != null || rar != null || remote != null || torrent != null;
+    final localFile = File(path);
+    if (kind != FileContentKind.image &&
+        extension != '.pdf' &&
+        explorerKind != ExplorerEntryKind.encryptedFile &&
+        !isVirtual) {
+      return null;
+    }
+    if (!isVirtual &&
+        explorerKind != ExplorerEntryKind.encryptedFile &&
+        await localFile.exists()) {
+      return _ocrTextForFile(localFile);
+    }
+
+    final preview = await previewFile(
+      path,
+      password: filePassword,
+      commonPassword: commonPassword,
+    );
+    final bytes = preview.bytes;
+    if (bytes == null || bytes.isEmpty) {
+      final text = preview.text?.trim();
+      return text == null || text.isEmpty ? null : text;
+    }
+    return _ocrTextForBytes(name, Uint8List.fromList(bytes));
+  }
+
+  String _displayNameForOcr(String path) {
+    final zip = _ZipVirtualPath.tryParse(path);
+    if (zip != null) return _zipBasename(zip.innerPath);
+    final rar = _RarVirtualPath.tryParse(path);
+    if (rar != null) return _zipBasename(rar.innerPath);
+    final remote = _RemoteVirtualPath.tryParse(path);
+    if (remote != null) return _remoteBasename(remote.innerPath);
+    final torrent = _TorrentVirtualPath.tryParse(path);
+    if (torrent != null) return _zipBasename(torrent.innerPath);
+    return basename(path);
+  }
+
   Future<String?> _ocrTextForFile(File file) async {
-    final binary = await _findTesseractBinary();
-    if (binary == null) return null;
     final extension = FileViewerService.extensionForName(file.path);
     var inputPath = file.path;
     Directory? tempDir;
     try {
       if (extension == '.pdf') {
-        tempDir = await Directory.systemTemp.createTemp('securevault_ocr_');
+        final cache = await AppPaths.protectedCacheDirectory();
+        tempDir = await cache.createTemp('securevault_ocr_');
         final image = await _renderPdfFirstPage(file, tempDir);
         if (image == null) return null;
         inputPath = image.path;
       }
+      if (Platform.isAndroid || Platform.isIOS) {
+        final text = await FlutterTesseractOcr.extractText(
+          inputPath,
+          language: 'rus+eng',
+          args: const <String, String>{
+            'preserve_interword_spaces': '1',
+            'psm': '3',
+          },
+        ).timeout(const Duration(seconds: 40));
+        final trimmed = text.trim();
+        return trimmed.isEmpty ? null : trimmed;
+      }
+      final binary = await _findTesseractBinary();
+      if (binary == null) return null;
       final result = await Process.run(
         binary,
         [inputPath, 'stdout', '-l', 'rus+eng'],
@@ -2771,7 +2815,99 @@ Get-PnpDevice -Class WPD -Status OK |
     }
   }
 
+  Future<List<_RarArchiveEntry>> _rarCachedEntries(String archivePath) async {
+    final root = await _rarExtractedRoot(archivePath);
+    final entries = <_RarArchiveEntry>[];
+    await for (final entity in root.list(recursive: true, followLinks: false)) {
+      final relative = _relativePath(root.path, entity.path);
+      if (relative.isEmpty || relative == '.complete') continue;
+      final stat = await entity.stat();
+      entries.add(_RarArchiveEntry(
+        name: relative,
+        sizeBytes: entity is File ? stat.size : 0,
+        modifiedAt: stat.modified,
+        isDirectory: entity is Directory,
+      ));
+    }
+    return entries;
+  }
+
+  Future<Directory> _rarExtractedRoot(String archivePath) async {
+    final archiveFile = File(archivePath);
+    final stat = await archiveFile.stat();
+    final digest = crypto.sha256
+        .convert(utf8.encode(
+          '${_normalizePath(archivePath)}|${stat.size}|'
+          '${stat.modified.toUtc().millisecondsSinceEpoch}',
+        ))
+        .toString()
+        .substring(0, 24);
+    final cache = await AppPaths.protectedCacheDirectory();
+    final root = Directory(
+      '${cache.path}${Platform.pathSeparator}rar'
+      '${Platform.pathSeparator}$digest',
+    );
+    final marker = File('${root.path}${Platform.pathSeparator}.complete');
+    if (await marker.exists()) return root;
+    if (await root.exists()) {
+      await root.delete(recursive: true);
+    }
+    await root.create(recursive: true);
+    final result = await rar_plugin.Rar.extractRarFile(
+      rarFilePath: archivePath,
+      destinationPath: root.path,
+    );
+    if (result['success'] != true) {
+      throw FileSystemException(
+        result['message']?.toString() ?? 'RAR extraction failed.',
+        archivePath,
+      );
+    }
+    await marker.writeAsString(DateTime.now().toUtc().toIso8601String());
+    return root;
+  }
+
+  String _relativePath(String rootPath, String entityPath) {
+    final normalizedRoot = rootPath.replaceAll('\\', '/');
+    final normalizedEntity = entityPath.replaceAll('\\', '/');
+    if (!normalizedEntity.startsWith(normalizedRoot)) {
+      return normalizedEntity.split('/').last;
+    }
+    return normalizedEntity
+        .substring(normalizedRoot.length)
+        .replaceFirst(RegExp(r'^/+'), '')
+        .replaceAll('\\', '/');
+  }
+
+  Future<String?> _ocrTextForBytes(String name, Uint8List bytes) async {
+    Directory? tempDir;
+    try {
+      final extension = FileViewerService.extensionForName(name);
+      final cache = await AppPaths.protectedCacheDirectory();
+      tempDir = await cache.createTemp('securevault_ocr_bytes_');
+      final source = File(
+        '${tempDir.path}${Platform.pathSeparator}source$extension',
+      );
+      await source.writeAsBytes(bytes, flush: true);
+      return _ocrTextForFile(source);
+    } finally {
+      if (tempDir != null) {
+        try {
+          await tempDir.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+  }
+
   Future<File?> _renderPdfFirstPage(File pdf, Directory tempDir) async {
+    if (Platform.isAndroid) {
+      final bytes = await PlatformServices.renderPdfFirstPage(pdf.path);
+      if (bytes != null && bytes.isNotEmpty) {
+        final image = File('${tempDir.path}${Platform.pathSeparator}page.png');
+        await image.writeAsBytes(bytes, flush: true);
+        return image;
+      }
+    }
     final outBase = '${tempDir.path}${Platform.pathSeparator}page';
     try {
       final result = await Process.run(

@@ -395,11 +395,11 @@ class FileViewerService {
       FileContentKind.ebook =>
         'This e-book can be read in the built-in reader. TTS is available from the preview menu when the platform provides speech synthesis.',
       FileContentKind.html =>
-        'HTML pages are rendered as a safe in-app text preview. External browser opening is available after the disclosure warning.',
+        'HTML pages are rendered in the built-in browser-like preview. External browser opening remains available after the disclosure warning.',
       FileContentKind.archive =>
         'ZIP and RAR archives can be inspected and extracted from the file context menu.',
       FileContentKind.flash =>
-        'SWF is recognized. Interactive playback requires an installed external handler or a Ruffle-compatible plugin.',
+        'SWF is recognized and can be opened interactively through the bundled Ruffle plugin.',
       FileContentKind.container =>
         'TrueCrypt/VeraCrypt-compatible container. Mounting uses the bundled container plugin or an installed VeraCrypt CLI/driver.',
       FileContentKind.unknown =>

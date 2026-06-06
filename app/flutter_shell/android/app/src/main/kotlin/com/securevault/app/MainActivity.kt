@@ -9,6 +9,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.ParcelFileDescriptor
+import android.graphics.pdf.PdfRenderer
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
@@ -78,6 +80,10 @@ class MainActivity : FlutterActivity() {
                     val path = call.arguments as? String
                     result.success(if (path.isNullOrBlank()) null else readVideoThumbnail(path))
                 }
+                "renderPdfFirstPage" -> {
+                    val path = call.arguments as? String
+                    result.success(if (path.isNullOrBlank()) null else renderPdfFirstPage(path))
+                }
                 "speakText" -> {
                     val text = call.arguments as? String
                     if (text.isNullOrBlank()) {
@@ -94,6 +100,11 @@ class MainActivity : FlutterActivity() {
                         return@setMethodCallHandler
                     }
                     try {
+                        if (path.startsWith("http://") || path.startsWith("https://") || path.startsWith("mailto:")) {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(path)))
+                            result.success(null)
+                            return@setMethodCallHandler
+                        }
                         val uri = if (path.startsWith("content://")) {
                             Uri.parse(path)
                         } else if (path.startsWith("file://")) {
@@ -241,6 +252,36 @@ class MainActivity : FlutterActivity() {
         } finally {
             try {
                 retriever.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun renderPdfFirstPage(path: String): ByteArray? {
+        val file = File(path)
+        if (!file.exists()) return null
+        val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        return try {
+            PdfRenderer(descriptor).use { renderer ->
+                if (renderer.pageCount <= 0) return null
+                renderer.openPage(0).use { page ->
+                    val scale = 2.0f
+                    val width = (page.width * scale).toInt().coerceAtLeast(1)
+                    val height = (page.height * scale).toInt().coerceAtLeast(1)
+                    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                    bitmap.eraseColor(android.graphics.Color.WHITE)
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    val stream = ByteArrayOutputStream()
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+                    bitmap.recycle()
+                    stream.toByteArray()
+                }
+            }
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                descriptor.close()
             } catch (_: Exception) {
             }
         }

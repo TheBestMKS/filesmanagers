@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_html/flutter_html.dart' as flutter_html;
 import 'package:image/image.dart' as img;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -25,7 +26,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.9';
+const _appVersion = '0.12.10';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -2592,6 +2593,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         await _showFolderSettingsDialog(entry.path);
       case _EntryAction.permissions:
         await _changePermissions(entry);
+      case _EntryAction.ocrExtract:
+        await _extractOcrText(entry);
+      case _EntryAction.openSwf:
+        await _openSwfEntry(entry);
       case _EntryAction.editConnectionProfile:
         await _editConnectionProfile(entry);
       case _EntryAction.deleteConnectionProfile:
@@ -3417,6 +3422,78 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         ],
       ),
     );
+  }
+
+  Future<void> _extractOcrText(ExplorerEntry entry) async {
+    _snack(_language.t('ocr.processing'));
+    try {
+      final text = await _explorer.extractOcrText(
+        entry.path,
+        commonPassword: _commonEncryptionPassword,
+        filePassword: _activeFilePassword(),
+      );
+      if (!mounted) return;
+      if (text == null || text.trim().isEmpty) {
+        _snack(_language.t('ocr.empty'));
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(_language.t('ocr.extract')),
+          content: SizedBox(
+            width: 720,
+            height: 520,
+            child: Scrollbar(
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  text,
+                  style: const TextStyle(fontFamily: 'Consolas', height: 1.35),
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: text));
+                if (context.mounted) Navigator.pop(context);
+                _snack(_language.t('ocr.copied'));
+              },
+              child: Text(_language.t('explorer.copy')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_language.t('common.close')),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      _snack('${_language.t('ocr.error')} $error');
+    }
+  }
+
+  Future<void> _openSwfEntry(ExplorerEntry entry) async {
+    try {
+      final preview = await _explorer.previewFile(
+        entry.path,
+        password: _activeFilePassword(),
+        commonPassword: _commonEncryptionPassword,
+      );
+      if (preview.contentKind != FileContentKind.flash) {
+        _snack(_language.t('preview.swf.not_file'));
+        return;
+      }
+      await PlatformServices.openSwfWithRuffle(
+        title: preview.title,
+        sourcePath: preview.sourcePath,
+        bytes: preview.bytes,
+      );
+    } catch (error) {
+      _snack('${_language.t('preview.swf.open.error')} $error');
+    }
   }
 
   Future<void> _changePermissions(ExplorerEntry entry) async {
@@ -5775,6 +5852,8 @@ enum _EntryAction {
   useAsMultimedia,
   folderSettings,
   permissions,
+  ocrExtract,
+  openSwf,
   editConnectionProfile,
   deleteConnectionProfile,
 }
@@ -7904,6 +7983,11 @@ class _EntryList extends StatelessWidget {
         entry.path.startsWith('zip://') || entry.path.startsWith('rar://');
     final isRemote = entry.path.startsWith('remote://');
     final isProfileLocation = entry.connectionProfileId != null;
+    final extension = FileViewerService.extensionForName(entry.path);
+    final ocrCandidate =
+        FileViewerService.kindForName(entry.path) == FileContentKind.image ||
+            extension == '.pdf' ||
+            entry.isEncrypted;
     if (entry.isNavigationEntry) {
       return [
         PopupMenuItem(
@@ -8059,12 +8143,23 @@ class _EntryList extends StatelessWidget {
       ),
       if (!entry.isDirectory) const PopupMenuDivider(),
       if (!entry.isDirectory &&
-          {'.zip', '.rar', '.cbr', '.rev'}
-              .contains(FileViewerService.extensionForName(entry.path)))
+          {'.zip', '.rar', '.cbr', '.rev'}.contains(extension))
         PopupMenuItem(
           value: _EntryAction.unzip,
           enabled: entry.exists && !isVirtual && !isProfileLocation,
           child: Text(language.t('explorer.unzip')),
+        ),
+      if (!entry.isDirectory && ocrCandidate)
+        PopupMenuItem(
+          value: _EntryAction.ocrExtract,
+          enabled: entry.exists,
+          child: Text(language.t('ocr.extract')),
+        ),
+      if (!entry.isDirectory && extension == '.swf')
+        PopupMenuItem(
+          value: _EntryAction.openSwf,
+          enabled: entry.exists,
+          child: Text(language.t('preview.swf.open')),
         ),
       if (!entry.isDirectory && !entry.isEncrypted)
         PopupMenuItem(
@@ -8182,6 +8277,8 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.useAsMultimedia:
       case _EntryAction.folderSettings:
       case _EntryAction.permissions:
+      case _EntryAction.ocrExtract:
+      case _EntryAction.openSwf:
       case _EntryAction.editConnectionProfile:
       case _EntryAction.deleteConnectionProfile:
         onEntryAction(entry, action);
@@ -8851,9 +8948,6 @@ class _HtmlPreview extends StatelessWidget {
     final html = preview.bytes == null
         ? (preview.text ?? '')
         : FileViewerService.bytesToText(preview.bytes!);
-    final title = _title(html).isEmpty ? preview.title : _title(html);
-    final body = _readableText(html);
-    final assets = _assetRefs(html).take(24).toList();
     return Card(
       elevation: 0,
       clipBehavior: Clip.antiAlias,
@@ -8875,90 +8969,47 @@ class _HtmlPreview extends StatelessWidget {
         ),
         Expanded(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(18),
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title, style: Theme.of(context).textTheme.headlineSmall),
-              const SizedBox(height: 12),
-              SelectableText(
-                body.isEmpty ? preview.subtitle : body,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      height: 1.45,
-                    ),
-              ),
-              if (assets.isNotEmpty) ...[
-                const SizedBox(height: 16),
-                Text(
-                  language.t('preview.html.assets'),
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
-                const SizedBox(height: 8),
-                for (final asset in assets)
-                  Chip(
-                    avatar: const Icon(Icons.link, size: 16),
-                    label: Text(asset, overflow: TextOverflow.ellipsis),
-                  ),
-              ],
-            ]),
+            padding: const EdgeInsets.all(12),
+            child: flutter_html.Html(
+              data: html.isEmpty ? '<p>${preview.subtitle}</p>' : html,
+              onLinkTap: (url, attributes, element) async {
+                final target = _resolveLink(url);
+                if (target == null) return;
+                try {
+                  await PlatformServices.openExternal(target);
+                } catch (_) {
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(target)),
+                  );
+                }
+              },
+            ),
           ),
         ),
       ]),
     );
   }
 
-  String _title(String html) {
-    final match = RegExp(
-      r'<title[^>]*>(.*?)</title>',
-      caseSensitive: false,
-      dotAll: true,
-    ).firstMatch(html);
-    return _decodeEntities(match?.group(1) ?? '').trim();
-  }
-
-  String _readableText(String html) {
-    var text = html
-        .replaceAll(
-            RegExp(r'<script\b[^>]*>.*?</script>',
-                caseSensitive: false, dotAll: true),
-            ' ')
-        .replaceAll(
-            RegExp(r'<style\b[^>]*>.*?</style>',
-                caseSensitive: false, dotAll: true),
-            ' ')
-        .replaceAll(
-            RegExp(r'</(p|div|h[1-6]|li|tr|section|article)>',
-                caseSensitive: false),
-            '\n')
-        .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
-        .replaceAll(RegExp(r'<[^>]+>'), ' ');
-    text = _decodeEntities(text).replaceAll(RegExp(r'[ \t]+'), ' ');
-    return text
-        .split(RegExp(r'\n+'))
-        .map((line) => line.trim())
-        .where((line) => line.isNotEmpty)
-        .join('\n\n');
-  }
-
-  List<String> _assetRefs(String html) {
-    final refs = <String>{};
-    for (final match in RegExp(
-      r'''(?:src|href)\s*=\s*["']([^"']+)["']''',
-      caseSensitive: false,
-    ).allMatches(html)) {
-      final value = match.group(1)?.trim();
-      if (value == null || value.isEmpty || value.startsWith('#')) continue;
-      refs.add(_decodeEntities(value));
+  String? _resolveLink(String? url) {
+    if (url == null || url.trim().isEmpty || url.startsWith('#')) return null;
+    final value = url.trim();
+    if (value.startsWith('http://') ||
+        value.startsWith('https://') ||
+        value.startsWith('mailto:')) {
+      return value;
     }
-    return refs.toList();
+    final source = preview.sourcePath;
+    if (source == null ||
+        source.startsWith('zip://') ||
+        source.startsWith('rar://') ||
+        source.startsWith('remote://') ||
+        source.startsWith('torrent://')) {
+      return value;
+    }
+    final base = File(source).parent.path;
+    return File('$base${Platform.pathSeparator}$value').absolute.path;
   }
-
-  String _decodeEntities(String value) => value
-      .replaceAll('&nbsp;', ' ')
-      .replaceAll('&amp;', '&')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&#39;', "'");
 }
 
 class _SwfPreview extends StatelessWidget {
@@ -8992,6 +9043,29 @@ class _SwfPreview extends StatelessWidget {
                 const SizedBox(height: 12),
                 SelectableText(preview.text!),
               ],
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () async {
+                  try {
+                    await PlatformServices.openSwfWithRuffle(
+                      title: preview.title,
+                      sourcePath: preview.sourcePath,
+                      bytes: preview.bytes,
+                    );
+                  } catch (error) {
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          '${language.t('preview.swf.open.error')} $error',
+                        ),
+                      ),
+                    );
+                  }
+                },
+                icon: const Icon(Icons.play_arrow),
+                label: Text(language.t('preview.swf.open')),
+              ),
             ]),
           ),
         ),

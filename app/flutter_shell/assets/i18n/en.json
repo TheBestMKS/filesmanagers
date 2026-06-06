@@ -543,6 +543,14 @@
     "preview.forced": "Opened by saved/forced association.",
     "preview.html.assets": "Linked page files",
     "preview.swf.title": "SWF / Flash object",
-    "preview.swf.body": "Interactive SWF playback requires an external handler or a Ruffle-compatible plugin. Use the preview menu to open it externally after the warning."
+    "preview.swf.body": "Interactive SWF playback requires an external handler or a Ruffle-compatible plugin. Use the preview menu to open it externally after the warning.",
+    "preview.swf.open": "Open SWF",
+    "preview.swf.open.error": "SWF opening error:",
+    "preview.swf.not_file": "This file is not a SWF object.",
+    "ocr.extract": "Extract OCR text",
+    "ocr.processing": "Extracting text with OCR...",
+    "ocr.empty": "OCR did not find text.",
+    "ocr.error": "OCR error:",
+    "ocr.copied": "OCR text copied."
   }
 }
