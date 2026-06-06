@@ -10,6 +10,8 @@ import 'package:flutter_html/flutter_html.dart' as flutter_html;
 import 'package:image/image.dart' as img;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:webview_flutter/webview_flutter.dart' as android_webview;
+import 'package:webview_windows/webview_windows.dart' as windows_webview;
 
 import 'src/explorer/explorer_models.dart';
 import 'src/explorer/file_explorer_repository.dart';
@@ -26,7 +28,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.10';
+const _appVersion = '0.12.11';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -1435,10 +1437,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _mediaPlaylist = playlist;
         _imagePlaylist = const [];
       });
-      if (forceFullScreen ||
-          _shouldOpenMediaFullscreen(preview, forceFullScreen)) {
+      if (_shouldOpenMediaFullscreen(preview, forceFullScreen)) {
         _showPreviewWindow(preview);
-      } else if (_isMediaLibraryPage && _isPlayablePreview(preview)) {
+      } else if (_shouldPlayInExistingMini(preview) ||
+          (_isMediaLibraryPage && _isPlayablePreview(preview))) {
         await _playMediaPreviewInSession(preview, playlist);
       }
       if (_rememberRecentForEntry(entry)) {
@@ -1516,8 +1518,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _showPreviewWindow(openedPreview);
     } else if (mounted &&
         openedPreview != null &&
-        _isMediaLibraryPage &&
-        _isPlayablePreview(openedPreview)) {
+        (_shouldPlayInExistingMini(openedPreview) ||
+            (_isMediaLibraryPage && _isPlayablePreview(openedPreview)))) {
       await _playMediaPreviewInSession(openedPreview, _mediaPlaylist);
     }
     if (_rememberRecentForEntry(entry)) {
@@ -3979,8 +3981,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     }
   }
 
-  void _showPreviewWindow(FilePreview preview) {
+  void _showPreviewWindow(
+    FilePreview preview, {
+    List<MediaPreviewItem>? mediaPlaylistOverride,
+  }) {
     var currentPreview = preview;
+    var videoRotationTurns = 0;
     showDialog<void>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -3990,7 +3996,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
               title: AnimatedBuilder(
                 animation: _sharedMediaSession,
                 builder: (context, _) {
-                  final title = _sharedMediaSession.currentTitle;
+                  final useMediaTitle = _isPlayablePreview(currentPreview);
+                  final title =
+                      useMediaTitle ? _sharedMediaSession.currentTitle : '';
                   return Text(title.isEmpty ? currentPreview.title : title);
                 },
               ),
@@ -4009,6 +4017,21 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                         unawaited(PlatformServices.speakText(
                           currentPreview.text ?? currentPreview.subtitle,
                         ));
+                      case _PreviewAction.ocrExtract:
+                        if (_selected != null) {
+                          _handleEntryAction(
+                            _selected!,
+                            _EntryAction.ocrExtract,
+                          );
+                        }
+                      case _PreviewAction.rotateVideoLeft:
+                        setDialogState(() {
+                          videoRotationTurns = (videoRotationTurns - 1) % 4;
+                        });
+                      case _PreviewAction.rotateVideoRight:
+                        setDialogState(() {
+                          videoRotationTurns = (videoRotationTurns + 1) % 4;
+                        });
                       case _PreviewAction.external:
                         _openPreviewExternal(currentPreview);
                       case _PreviewAction.copy:
@@ -4049,6 +4072,21 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                         value: _PreviewAction.speak,
                         child: Text(_language.t('preview.speak')),
                       ),
+                    if (_canOcrPreview(currentPreview))
+                      PopupMenuItem(
+                        value: _PreviewAction.ocrExtract,
+                        child: Text(_language.t('ocr.extract')),
+                      ),
+                    if (currentPreview.contentKind == FileContentKind.video)
+                      PopupMenuItem(
+                        value: _PreviewAction.rotateVideoLeft,
+                        child: Text(_language.t('video.rotate.left')),
+                      ),
+                    if (currentPreview.contentKind == FileContentKind.video)
+                      PopupMenuItem(
+                        value: _PreviewAction.rotateVideoRight,
+                        child: Text(_language.t('video.rotate.right')),
+                      ),
                     PopupMenuItem(
                       value: _PreviewAction.external,
                       child: Text(_language.t('preview.external')),
@@ -4081,11 +4119,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
             body: _PreviewContent(
               preview: currentPreview,
               language: _language,
-              mediaPlaylist: _mediaPlaylist,
+              mediaPlaylist: mediaPlaylistOverride ?? _mediaPlaylist,
               imagePlaylist: _imagePlaylist,
               mediaResumePositions: _settings.mediaResumePositions,
               onRememberMediaPosition: _rememberMediaPosition,
               fillAvailable: true,
+              videoRotationTurns: videoRotationTurns,
               onImageNavigate: (delta) async {
                 final next = await _navigateImage(delta);
                 if (next != null) {
@@ -4552,7 +4591,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       preview.contentKind == FileContentKind.audio ||
       preview.contentKind == FileContentKind.video;
 
+  bool _shouldPlayInExistingMini(FilePreview preview) =>
+      _isPlayablePreview(preview) &&
+      _sharedMediaSession.active &&
+      _sharedMediaSession.collapsed;
+
   bool _shouldOpenMediaFullscreen(FilePreview preview, bool forceFullScreen) {
+    if (_shouldPlayInExistingMini(preview)) return false;
     if (forceFullScreen) return true;
     if (_isMediaLibraryPage && _isPlayablePreview(preview)) {
       return !_sharedMediaSession.active;
@@ -5402,7 +5447,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                 enableMiniVideo: _settings.enableMiniVideo,
                 enableMiniAudio: _settings.enableMiniAudio,
                 continueInBackground: _settings.continueMediaInBackground,
-                onOpenFullScreen: _showPreviewWindow,
+                onOpenFullScreen: (preview, playlist) => _showPreviewWindow(
+                  preview,
+                  mediaPlaylistOverride: playlist,
+                ),
               ),
             ],
           ),
@@ -5863,6 +5911,9 @@ enum _PreviewAction {
   window,
   edit,
   speak,
+  ocrExtract,
+  rotateVideoLeft,
+  rotateVideoRight,
   external,
   copy,
   cut,
@@ -8761,6 +8812,11 @@ class _PreviewPane extends StatelessWidget {
                       unawaited(PlatformServices.speakText(
                         p.text ?? p.subtitle,
                       ));
+                    case _PreviewAction.ocrExtract:
+                      onEntryAction(entry!, _EntryAction.ocrExtract);
+                    case _PreviewAction.rotateVideoLeft:
+                    case _PreviewAction.rotateVideoRight:
+                      onPreviewWindow(p);
                     case _PreviewAction.external:
                       onOpenExternal(p);
                     case _PreviewAction.copy:
@@ -8794,6 +8850,11 @@ class _PreviewPane extends StatelessWidget {
                     PopupMenuItem(
                       value: _PreviewAction.speak,
                       child: Text(language.t('preview.speak')),
+                    ),
+                  if (_canOcrPreview(p))
+                    PopupMenuItem(
+                      value: _PreviewAction.ocrExtract,
+                      child: Text(language.t('ocr.extract')),
                     ),
                   PopupMenuItem(
                     value: _PreviewAction.external,
@@ -8841,6 +8902,7 @@ class _PreviewContent extends StatelessWidget {
     this.onRememberMediaPosition,
     this.fillAvailable = false,
     this.allowMiniDock = true,
+    this.videoRotationTurns = 0,
   });
 
   final FilePreview preview;
@@ -8853,6 +8915,7 @@ class _PreviewContent extends StatelessWidget {
       onRememberMediaPosition;
   final bool fillAvailable;
   final bool allowMiniDock;
+  final int videoRotationTurns;
 
   @override
   Widget build(BuildContext context) {
@@ -8888,6 +8951,8 @@ class _PreviewContent extends StatelessWidget {
         resumePositions: mediaResumePositions,
         onRememberPosition: onRememberMediaPosition,
         allowMiniDock: allowMiniDock,
+        fillAvailable: fillAvailable,
+        videoRotationTurns: videoRotationTurns,
       );
     }
 
@@ -8937,17 +9002,178 @@ class _PreviewContent extends StatelessWidget {
   }
 }
 
-class _HtmlPreview extends StatelessWidget {
+class _EmbeddedBrowserView extends StatefulWidget {
+  const _EmbeddedBrowserView({
+    required this.sessionFuture,
+    required this.language,
+    required this.fallback,
+  });
+
+  final Future<EmbeddedWebSession> sessionFuture;
+  final AppLanguage language;
+  final Widget fallback;
+
+  @override
+  State<_EmbeddedBrowserView> createState() => _EmbeddedBrowserViewState();
+}
+
+class _EmbeddedBrowserViewState extends State<_EmbeddedBrowserView> {
+  EmbeddedWebSession? _session;
+  Future<void>? _controllerFuture;
+  windows_webview.WebviewController? _windowsController;
+  android_webview.WebViewController? _androidController;
+
+  @override
+  void initState() {
+    super.initState();
+    _controllerFuture = _initialize();
+  }
+
+  @override
+  void didUpdateWidget(covariant _EmbeddedBrowserView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sessionFuture != widget.sessionFuture) {
+      unawaited(_session?.close());
+      _session = null;
+      _windowsController?.dispose();
+      _windowsController = null;
+      _androidController = null;
+      _controllerFuture = _initialize();
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_session?.close());
+    _windowsController?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _initialize() async {
+    final session = await widget.sessionFuture;
+    if (!mounted) {
+      await session.close();
+      return;
+    }
+    _session = session;
+    if (Platform.isWindows) {
+      final version =
+          await windows_webview.WebviewController.getWebViewVersion();
+      if (version == null || version.trim().isEmpty) {
+        throw StateError(widget.language.t('preview.webview2.missing'));
+      }
+      final controller = windows_webview.WebviewController();
+      await controller.initialize();
+      await controller.setPopupWindowPolicy(
+        windows_webview.WebviewPopupWindowPolicy.sameWindow,
+      );
+      await controller.loadUrl(session.uri.toString());
+      _windowsController = controller;
+      return;
+    }
+    if (Platform.isAndroid) {
+      final controller = android_webview.WebViewController()
+        ..setJavaScriptMode(android_webview.JavaScriptMode.unrestricted)
+        ..setBackgroundColor(Colors.transparent)
+        ..setNavigationDelegate(android_webview.NavigationDelegate(
+          onNavigationRequest: (request) {
+            final uri = Uri.tryParse(request.url);
+            if (uri == null) return android_webview.NavigationDecision.prevent;
+            if (uri.host == '127.0.0.1' || uri.host == 'localhost') {
+              return android_webview.NavigationDecision.navigate;
+            }
+            unawaited(PlatformServices.openExternal(request.url));
+            return android_webview.NavigationDecision.prevent;
+          },
+        ));
+      await controller.loadRequest(session.uri);
+      _androidController = controller;
+      return;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!Platform.isWindows && !Platform.isAndroid) {
+      return widget.fallback;
+    }
+    return FutureBuilder<void>(
+      future: _controllerFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Card(
+            elevation: 0,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: SelectableText(
+                '${widget.language.t('preview.browser.error')}\n${snapshot.error}',
+              ),
+            ),
+          );
+        }
+        if (Platform.isWindows && _windowsController != null) {
+          return windows_webview.Webview(_windowsController!);
+        }
+        if (Platform.isAndroid && _androidController != null) {
+          return android_webview.WebViewWidget(controller: _androidController!);
+        }
+        return widget.fallback;
+      },
+    );
+  }
+}
+
+class _HtmlPreview extends StatefulWidget {
   const _HtmlPreview({required this.preview, required this.language});
 
   final FilePreview preview;
   final AppLanguage language;
 
   @override
+  State<_HtmlPreview> createState() => _HtmlPreviewState();
+}
+
+class _HtmlPreviewState extends State<_HtmlPreview> {
+  late Future<EmbeddedWebSession> _sessionFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _sessionFuture = _createSession();
+  }
+
+  @override
+  void didUpdateWidget(covariant _HtmlPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.preview.sourcePath != widget.preview.sourcePath ||
+        oldWidget.preview.title != widget.preview.title ||
+        oldWidget.preview.text != widget.preview.text ||
+        oldWidget.preview.bytes?.length != widget.preview.bytes?.length) {
+      _sessionFuture = _createSession();
+    }
+  }
+
+  Future<EmbeddedWebSession> _createSession() {
+    final html = _html;
+    return PlatformServices.startHtmlSession(
+      title: widget.preview.title,
+      html: html.isEmpty ? '<p>${widget.preview.subtitle}</p>' : html,
+      sourcePath: _canUseLocalAssets(widget.preview.sourcePath)
+          ? widget.preview.sourcePath
+          : null,
+    );
+  }
+
+  String get _html => widget.preview.bytes == null
+      ? (widget.preview.text ?? '')
+      : FileViewerService.bytesToText(widget.preview.bytes!);
+
+  @override
   Widget build(BuildContext context) {
-    final html = preview.bytes == null
-        ? (preview.text ?? '')
-        : FileViewerService.bytesToText(preview.bytes!);
+    final html = _html;
     return Card(
       elevation: 0,
       clipBehavior: Clip.antiAlias,
@@ -8960,7 +9186,7 @@ class _HtmlPreview extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                preview.sourcePath ?? preview.title,
+                widget.preview.sourcePath ?? widget.preview.title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -8968,27 +9194,43 @@ class _HtmlPreview extends StatelessWidget {
           ]),
         ),
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(12),
-            child: flutter_html.Html(
-              data: html.isEmpty ? '<p>${preview.subtitle}</p>' : html,
-              onLinkTap: (url, attributes, element) async {
-                final target = _resolveLink(url);
-                if (target == null) return;
-                try {
-                  await PlatformServices.openExternal(target);
-                } catch (_) {
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(target)),
-                  );
-                }
-              },
+          child: _EmbeddedBrowserView(
+            language: widget.language,
+            sessionFuture: _sessionFuture,
+            fallback: SingleChildScrollView(
+              padding: const EdgeInsets.all(12),
+              child: flutter_html.Html(
+                data: html.isEmpty ? '<p>${widget.preview.subtitle}</p>' : html,
+                onLinkTap: (url, attributes, element) async {
+                  final target = _resolveLink(url);
+                  if (target == null) return;
+                  try {
+                    await PlatformServices.openExternal(target);
+                  } catch (_) {
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(target)),
+                    );
+                  }
+                },
+              ),
             ),
           ),
         ),
       ]),
     );
+  }
+
+  bool _canUseLocalAssets(String? sourcePath) {
+    if (sourcePath == null || widget.preview.decrypted) return false;
+    final extension = FileViewerService.extensionForName(sourcePath);
+    if (!FileViewerService.htmlExtensions.contains(extension)) return false;
+    return !sourcePath.startsWith('zip://') &&
+        !sourcePath.startsWith('rar://') &&
+        !sourcePath.startsWith('remote://') &&
+        !sourcePath.startsWith('torrent://') &&
+        !sourcePath.startsWith('http://') &&
+        !sourcePath.startsWith('https://');
   }
 
   String? _resolveLink(String? url) {
@@ -8999,7 +9241,7 @@ class _HtmlPreview extends StatelessWidget {
         value.startsWith('mailto:')) {
       return value;
     }
-    final source = preview.sourcePath;
+    final source = widget.preview.sourcePath;
     if (source == null ||
         source.startsWith('zip://') ||
         source.startsWith('rar://') ||
@@ -9012,61 +9254,97 @@ class _HtmlPreview extends StatelessWidget {
   }
 }
 
-class _SwfPreview extends StatelessWidget {
+class _SwfPreview extends StatefulWidget {
   const _SwfPreview({required this.preview, required this.language});
 
   final FilePreview preview;
   final AppLanguage language;
 
   @override
+  State<_SwfPreview> createState() => _SwfPreviewState();
+}
+
+class _SwfPreviewState extends State<_SwfPreview> {
+  late Future<EmbeddedWebSession> _sessionFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _sessionFuture = _createSession();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SwfPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.preview.sourcePath != widget.preview.sourcePath ||
+        oldWidget.preview.title != widget.preview.title ||
+        oldWidget.preview.bytes?.length != widget.preview.bytes?.length) {
+      _sessionFuture = _createSession();
+    }
+  }
+
+  Future<EmbeddedWebSession> _createSession() {
+    return PlatformServices.startSwfRuffleSession(
+      title: widget.preview.title,
+      sourcePath: widget.preview.sourcePath,
+      bytes: widget.preview.bytes,
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Card(
-        elevation: 0,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: Padding(
-            padding: const EdgeInsets.all(18),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.extension_outlined, size: 48),
-              const SizedBox(height: 12),
-              Text(
-                language.t('preview.swf.title'),
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                language.t('preview.swf.body'),
-                textAlign: TextAlign.center,
-              ),
-              if (preview.text != null && preview.text!.isNotEmpty) ...[
+    return _EmbeddedBrowserView(
+      language: widget.language,
+      sessionFuture: _sessionFuture,
+      fallback: Center(
+        child: Card(
+          elevation: 0,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.extension_outlined, size: 48),
                 const SizedBox(height: 12),
-                SelectableText(preview.text!),
-              ],
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                onPressed: () async {
-                  try {
-                    await PlatformServices.openSwfWithRuffle(
-                      title: preview.title,
-                      sourcePath: preview.sourcePath,
-                      bytes: preview.bytes,
-                    );
-                  } catch (error) {
-                    if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          '${language.t('preview.swf.open.error')} $error',
+                Text(
+                  widget.language.t('preview.swf.title'),
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  widget.language.t('preview.swf.body'),
+                  textAlign: TextAlign.center,
+                ),
+                if (widget.preview.text != null &&
+                    widget.preview.text!.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  SelectableText(widget.preview.text!),
+                ],
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: () async {
+                    try {
+                      await PlatformServices.openSwfWithRuffle(
+                        title: widget.preview.title,
+                        sourcePath: widget.preview.sourcePath,
+                        bytes: widget.preview.bytes,
+                      );
+                    } catch (error) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            '${widget.language.t('preview.swf.open.error')} $error',
+                          ),
                         ),
-                      ),
-                    );
-                  }
-                },
-                icon: const Icon(Icons.play_arrow),
-                label: Text(language.t('preview.swf.open')),
-              ),
-            ]),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.open_in_browser),
+                  label: Text(widget.language.t('preview.external')),
+                ),
+              ]),
+            ),
           ),
         ),
       ),
@@ -9415,6 +9693,8 @@ class _MediaPreviewPlayer extends StatefulWidget {
     required this.resumePositions,
     required this.onRememberPosition,
     required this.allowMiniDock,
+    required this.fillAvailable,
+    required this.videoRotationTurns,
   });
 
   final FilePreview preview;
@@ -9424,6 +9704,8 @@ class _MediaPreviewPlayer extends StatefulWidget {
   final Future<void> Function(String key, Duration position)?
       onRememberPosition;
   final bool allowMiniDock;
+  final bool fillAvailable;
+  final int videoRotationTurns;
 
   @override
   State<_MediaPreviewPlayer> createState() => _MediaPreviewPlayerState();
@@ -9481,6 +9763,20 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
     try {
       final wasAlreadyOpen =
           _sharedMediaSession.isSame(widget.preview, widget.playlist);
+      final canAttachToActivePlaylist =
+          _sharedMediaSession.isSamePlaylist(widget.playlist);
+      if (!wasAlreadyOpen && canAttachToActivePlaylist) {
+        _sharedMediaSession.attachToActivePlaylist(
+          preview: widget.preview,
+          playlist: widget.playlist,
+          allowMiniDock: widget.allowMiniDock,
+        );
+        await _player.setPlaylistMode(
+          _repeatOne ? PlaylistMode.single : PlaylistMode.loop,
+        );
+        await _player.setShuffle(_shuffle);
+        return;
+      }
       await _sharedMediaSession.open(
         preview: widget.preview,
         playlist: widget.playlist,
@@ -9563,10 +9859,10 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
                 ),
               )
             else if (widget.preview.contentKind == FileContentKind.video)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(18),
-                child: _AdaptiveVideoSurface(controller: _controller),
-              )
+              if (widget.fillAvailable)
+                Expanded(child: _buildVideoSurface())
+              else
+                _buildVideoSurface()
             else
               Card(
                 color: const Color(0xFFEAF2F8),
@@ -9622,12 +9918,29 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
       },
     );
   }
+
+  Widget _buildVideoSurface() {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: _AdaptiveVideoSurface(
+        controller: _controller,
+        quarterTurns: widget.videoRotationTurns,
+        disableNativeFullscreen: widget.fillAvailable,
+      ),
+    );
+  }
 }
 
 class _AdaptiveVideoSurface extends StatelessWidget {
-  const _AdaptiveVideoSurface({required this.controller});
+  const _AdaptiveVideoSurface({
+    required this.controller,
+    this.quarterTurns = 0,
+    this.disableNativeFullscreen = false,
+  });
 
   final VideoController controller;
+  final int quarterTurns;
+  final bool disableNativeFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -9642,10 +9955,25 @@ class _AdaptiveVideoSurface extends StatelessWidget {
           final width = (widthSnapshot.data ?? 0).toDouble();
           final height = (heightSnapshot.data ?? 0).toDouble();
           final aspectRatio = width > 0 && height > 0 ? width / height : 16 / 9;
+          final normalizedTurns = quarterTurns % 4;
+          final displayAspectRatio =
+              normalizedTurns.isOdd ? 1 / aspectRatio : aspectRatio;
           return Center(
             child: AspectRatio(
-              aspectRatio: aspectRatio.clamp(0.1, 10.0).toDouble(),
-              child: Video(controller: controller, fit: BoxFit.contain),
+              aspectRatio: displayAspectRatio.clamp(0.1, 10.0).toDouble(),
+              child: RotatedBox(
+                quarterTurns: normalizedTurns,
+                child: Video(
+                  controller: controller,
+                  fit: BoxFit.contain,
+                  onEnterFullscreen: disableNativeFullscreen
+                      ? () async {}
+                      : defaultEnterNativeFullscreen,
+                  onExitFullscreen: disableNativeFullscreen
+                      ? () async {}
+                      : defaultExitNativeFullscreen,
+                ),
+              ),
             ),
           );
         },
@@ -9679,16 +10007,23 @@ class _SharedMediaSession extends ChangeNotifier {
     super.dispose();
   }
 
-  static String keyFor(FilePreview preview, List<MediaPreviewItem> playlist) {
-    final itemsKey = playlist
+  static String playlistKeyFor(List<MediaPreviewItem> playlist) {
+    return playlist
         .map((item) =>
             '${item.title}|${item.path ?? ''}|${item.resumeKey ?? ''}|${item.bytes?.length ?? 0}|${item.encrypted}')
         .join('\n');
+  }
+
+  static String keyFor(FilePreview preview, List<MediaPreviewItem> playlist) {
+    final itemsKey = playlistKeyFor(playlist);
     return '${preview.title}|${preview.sourcePath ?? ''}|${preview.contentKind.name}|$itemsKey';
   }
 
   bool isSame(FilePreview preview, List<MediaPreviewItem> playlist) =>
       active && _sessionKey == keyFor(preview, playlist);
+
+  bool isSamePlaylist(List<MediaPreviewItem> playlist) =>
+      active && playlistKeyFor(this.playlist) == playlistKeyFor(playlist);
 
   MediaPreviewItem? get currentItem {
     if (playlist.isEmpty) return null;
@@ -9697,6 +10032,32 @@ class _SharedMediaSession extends ChangeNotifier {
   }
 
   String get currentTitle => currentItem?.title ?? preview?.title ?? '';
+
+  FilePreview? get currentPreview {
+    final item = currentItem;
+    if (item == null) return preview;
+    return FilePreview(
+      title: item.title,
+      subtitle: item.path ?? item.resumeKey ?? preview?.subtitle ?? '',
+      sourcePath: item.path ?? preview?.sourcePath,
+      bytes: item.bytes,
+      decrypted: item.encrypted,
+      contentKind: item.kind,
+    );
+  }
+
+  void attachToActivePlaylist({
+    required FilePreview preview,
+    required List<MediaPreviewItem> playlist,
+    required bool allowMiniDock,
+  }) {
+    if (!active) return;
+    this.preview = preview;
+    this.playlist = playlist;
+    _sessionKey = keyFor(preview, playlist);
+    dockSuppressed = !allowMiniDock;
+    notifyListeners();
+  }
 
   Future<void> open({
     required FilePreview preview,
@@ -9954,7 +10315,8 @@ class _FloatingMediaDock extends StatefulWidget {
   final bool enableMiniVideo;
   final bool enableMiniAudio;
   final bool continueInBackground;
-  final ValueChanged<FilePreview> onOpenFullScreen;
+  final void Function(FilePreview preview, List<MediaPreviewItem> playlist)
+      onOpenFullScreen;
 
   @override
   State<_FloatingMediaDock> createState() => _FloatingMediaDockState();
@@ -10248,7 +10610,10 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
                       tooltip: widget.language.t('media.next'),
                     ),
                     IconButton(
-                      onPressed: () => widget.onOpenFullScreen(preview),
+                      onPressed: () => widget.onOpenFullScreen(
+                        widget.session.currentPreview ?? preview,
+                        widget.session.playlist,
+                      ),
                       icon: const Icon(Icons.fullscreen),
                       tooltip: widget.language.t('preview.window'),
                     ),
@@ -12295,6 +12660,11 @@ bool _isEditablePreview(FilePreview preview) =>
     preview.contentKind == FileContentKind.document ||
     preview.contentKind == FileContentKind.ebook ||
     preview.contentKind == FileContentKind.unknown;
+
+bool _canOcrPreview(FilePreview preview) =>
+    preview.contentKind == FileContentKind.image ||
+    FileViewerService.extensionForName(preview.title) == '.pdf' ||
+    FileViewerService.extensionForName(preview.sourcePath ?? '') == '.pdf';
 
 class _EndpointFieldControllers {
   _EndpointFieldControllers({

@@ -242,6 +242,9 @@ class AppLanguage {
     'preview.hide': 'Hide preview',
     'preview.show': 'Show preview',
     'preview.container': 'Container',
+    'preview.browser.error': 'Embedded browser error:',
+    'preview.webview2.missing':
+        'Microsoft Edge WebView2 Runtime is not installed.',
     'preview.external.warning.title': 'Disclosure warning',
     'preview.external.warning':
         'The file can be exposed to another application, temporary files, recent-file lists, thumbnails, or system caches. Continue only if you trust that app.',
@@ -268,6 +271,8 @@ class AppLanguage {
     'media.audio.playlist': 'Audio playlist',
     'media.video.playlist': 'Video playlist',
     'media.encrypted.item': 'Encrypted source',
+    'video.rotate.left': 'Rotate video left',
+    'video.rotate.right': 'Rotate video right',
     'editor.open': 'Edit',
     'editor.unsupported': 'This file type is not editable yet.',
     'editor.saved': 'Saved:',
@@ -865,6 +870,9 @@ class AppLanguage {
     'preview.hide': 'Скрыть просмотр',
     'preview.show': 'Показать просмотр',
     'preview.container': 'Контейнер',
+    'preview.browser.error': 'Ошибка встроенного браузера:',
+    'preview.webview2.missing':
+        'Среда Microsoft Edge WebView2 Runtime не установлена.',
     'preview.external.warning.title': 'Предупреждение о раскрытии',
     'preview.external.warning':
         'Файл может быть раскрыт другой программе, временным файлам, спискам последних документов, миниатюрам или системному кэшу. Продолжайте только если доверяете этой программе.',
@@ -892,6 +900,8 @@ class AppLanguage {
     'media.audio.playlist': 'Плейлист аудио',
     'media.video.playlist': 'Плейлист видео',
     'media.encrypted.item': 'Зашифрованный источник',
+    'video.rotate.left': 'Повернуть видео влево',
+    'video.rotate.right': 'Повернуть видео вправо',
     'editor.open': 'Редактировать',
     'editor.unsupported': 'Этот тип файла пока нельзя редактировать.',
     'editor.saved': 'Сохранено:',

@@ -966,10 +966,10 @@ class CloudPluginRegistry {
       manifest: <String, Object?>{
         'id': 'tesseract-ocr',
         'name': 'Tesseract OCR Search',
-        'version': '1.1.0',
+        'version': '1.2.0',
         'pluginType': 'content-search-extension',
         'description':
-            'Adds OCR-assisted content search and context-menu text extraction for images and PDFs. Android uses bundled flutter_tesseract_ocr with rus+eng tessdata; desktop uses bundled or system Tesseract CLI.',
+            'Adds OCR-assisted content search and context-menu text extraction for images and PDFs. Android uses bundled flutter_tesseract_ocr with rus+eng tessdata; Windows uses the bundled Tesseract CLI runtime from plugin components and falls back to system Tesseract if needed.',
         'authType': 'none',
         'capabilities': [
           'contentSearch',
@@ -1414,6 +1414,33 @@ class CloudPluginRegistry {
         }
       }
     }
+    final windowsRuntimeTarget = Directory(
+      '${pluginDir.path}${Platform.pathSeparator}components'
+      '${Platform.pathSeparator}tesseract'
+      '${Platform.pathSeparator}windows-x64',
+    );
+    final runtimeSources = <Directory>[
+      Directory(
+        'windows${Platform.pathSeparator}runner${Platform.pathSeparator}'
+        'resources${Platform.pathSeparator}tesseract'
+        '${Platform.pathSeparator}windows-x64',
+      ),
+      Directory(
+        'app${Platform.pathSeparator}flutter_shell'
+        '${Platform.pathSeparator}windows${Platform.pathSeparator}runner'
+        '${Platform.pathSeparator}resources${Platform.pathSeparator}tesseract'
+        '${Platform.pathSeparator}windows-x64',
+      ),
+    ];
+    for (final source in runtimeSources) {
+      final binary = File(
+        '${source.path}${Platform.pathSeparator}tesseract.exe',
+      );
+      if (await source.exists() && await binary.exists()) {
+        await _copyDirectoryContents(source, windowsRuntimeTarget);
+        break;
+      }
+    }
     final config = File(
       '${pluginDir.path}${Platform.pathSeparator}components'
       '${Platform.pathSeparator}tessdata_config.json',
@@ -1427,6 +1454,33 @@ class CloudPluginRegistry {
       );
     }
   }
+
+  Future<void> _copyDirectoryContents(
+    Directory source,
+    Directory target,
+  ) async {
+    await target.create(recursive: true);
+    await for (final entity
+        in source.list(recursive: true, followLinks: false)) {
+      final relative = entity.path
+          .substring(source.path.length)
+          .replaceFirst(RegExp(r'^[\\/]+'), '');
+      if (relative.isEmpty) continue;
+      final targetPath = '${target.path}${Platform.pathSeparator}$relative';
+      if (entity is Directory) {
+        await Directory(targetPath).create(recursive: true);
+      } else if (entity is File) {
+        await Directory(_dirname(targetPath)).create(recursive: true);
+        await entity.copy(targetPath);
+      }
+    }
+  }
 }
 
 String basename(String path) => path.split(Platform.pathSeparator).last;
+
+String _dirname(String path) {
+  final index = path.lastIndexOf(Platform.pathSeparator);
+  if (index <= 0) return '.';
+  return path.substring(0, index);
+}

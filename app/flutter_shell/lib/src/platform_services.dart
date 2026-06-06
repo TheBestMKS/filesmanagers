@@ -50,6 +50,20 @@ class AndroidStorageAccessStatus {
   }
 }
 
+class EmbeddedWebSession {
+  EmbeddedWebSession._(this.uri, this._onClose);
+
+  final Uri uri;
+  final Future<void> Function() _onClose;
+  var _closed = false;
+
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    await _onClose();
+  }
+}
+
 class PlatformServices {
   PlatformServices._();
 
@@ -175,23 +189,65 @@ class PlatformServices {
     String? sourcePath,
     List<int>? bytes,
   }) async {
+    final session = await startSwfRuffleSession(
+      title: title,
+      sourcePath: sourcePath,
+      bytes: bytes,
+    );
+    await openExternal(session.uri.toString());
+  }
+
+  static Future<EmbeddedWebSession> startHtmlSession({
+    required String title,
+    required String html,
+    String? sourcePath,
+  }) async {
+    final baseDir = _localBaseDirectory(sourcePath);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    _swfServers.add(server);
+    final session = EmbeddedWebSession._(
+      Uri.parse('http://127.0.0.1:${server.port}/index.html'),
+      () async {
+        _swfServers.remove(server);
+        await server.close(force: true);
+      },
+    );
+    unawaited(_serveHtmlSession(
+      server,
+      title: title,
+      html: html,
+      baseDir: baseDir,
+    ));
+    Timer(const Duration(minutes: 30), () => unawaited(session.close()));
+    return session;
+  }
+
+  static Future<EmbeddedWebSession> startSwfRuffleSession({
+    required String title,
+    String? sourcePath,
+    List<int>? bytes,
+  }) async {
     final swfBytes = bytes != null
         ? Uint8List.fromList(bytes)
         : await File(sourcePath ?? '').readAsBytes();
     final runtimeDir = await _ensureRuffleRuntime();
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     _swfServers.add(server);
+    final session = EmbeddedWebSession._(
+      Uri.parse('http://127.0.0.1:${server.port}/index.html'),
+      () async {
+        _swfServers.remove(server);
+        await server.close(force: true);
+      },
+    );
     unawaited(_serveSwfSession(
       server,
       title: title,
       swfBytes: swfBytes,
       runtimeDir: runtimeDir,
     ));
-    Timer(const Duration(minutes: 30), () async {
-      _swfServers.remove(server);
-      await server.close(force: true);
-    });
-    await openExternal('http://127.0.0.1:${server.port}/index.html');
+    Timer(const Duration(minutes: 30), () => unawaited(session.close()));
+    return session;
   }
 
   static Future<Directory> _ensureRuffleRuntime() async {
@@ -289,10 +345,81 @@ class PlatformServices {
     }
   }
 
+  static Future<void> _serveHtmlSession(
+    HttpServer server, {
+    required String title,
+    required String html,
+    required Directory? baseDir,
+  }) async {
+    await for (final request in server) {
+      try {
+        final path = request.uri.path == '/' ? '/index.html' : request.uri.path;
+        if (path == '/index.html') {
+          request.response.headers.contentType = ContentType.html;
+          request.response.write(html);
+        } else if (baseDir != null) {
+          final relative = Uri.decodeComponent(path.substring(1))
+              .replaceAll('\\', '/')
+              .split('/')
+              .where((part) => part.isNotEmpty && part != '..')
+              .join(Platform.pathSeparator);
+          if (relative.isEmpty) {
+            request.response.statusCode = HttpStatus.notFound;
+          } else {
+            final file =
+                File('${baseDir.path}${Platform.pathSeparator}$relative');
+            final normalizedBase = baseDir.absolute.path;
+            final normalizedFile = file.absolute.path;
+            if (!normalizedFile.startsWith(normalizedBase) ||
+                !await file.exists()) {
+              request.response.statusCode = HttpStatus.notFound;
+            } else {
+              request.response.headers.set(
+                HttpHeaders.contentTypeHeader,
+                _contentTypeFor(file.path),
+              );
+              await request.response.addStream(file.openRead());
+            }
+          }
+        } else {
+          request.response.statusCode = HttpStatus.notFound;
+        }
+      } catch (error) {
+        request.response.statusCode = HttpStatus.internalServerError;
+        request.response.write(error.toString());
+      } finally {
+        await request.response.close();
+      }
+    }
+  }
+
+  static Directory? _localBaseDirectory(String? sourcePath) {
+    if (sourcePath == null ||
+        sourcePath.startsWith('zip://') ||
+        sourcePath.startsWith('rar://') ||
+        sourcePath.startsWith('remote://') ||
+        sourcePath.startsWith('torrent://') ||
+        sourcePath.startsWith('http://') ||
+        sourcePath.startsWith('https://')) {
+      return null;
+    }
+    final file = File(sourcePath);
+    return file.existsSync() ? file.parent : null;
+  }
+
   static String _contentTypeFor(String name) {
     if (name.endsWith('.js')) return 'application/javascript; charset=utf-8';
     if (name.endsWith('.wasm')) return 'application/wasm';
     if (name.endsWith('.map')) return 'application/json; charset=utf-8';
+    if (name.endsWith('.html') || name.endsWith('.htm')) {
+      return 'text/html; charset=utf-8';
+    }
+    if (name.endsWith('.css')) return 'text/css; charset=utf-8';
+    if (name.endsWith('.png')) return 'image/png';
+    if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+    if (name.endsWith('.gif')) return 'image/gif';
+    if (name.endsWith('.svg')) return 'image/svg+xml';
+    if (name.endsWith('.webp')) return 'image/webp';
     return 'application/octet-stream';
   }
 

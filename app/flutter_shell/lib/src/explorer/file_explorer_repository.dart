@@ -2796,9 +2796,16 @@ Get-PnpDevice -Class WPD -Status OK |
       }
       final binary = await _findTesseractBinary();
       if (binary == null) return null;
+      final tessdataDir = await _tessdataDirectoryFor(binary);
       final result = await Process.run(
         binary,
-        [inputPath, 'stdout', '-l', 'rus+eng'],
+        [
+          inputPath,
+          'stdout',
+          '-l',
+          'rus+eng',
+          if (tessdataDir != null) ...['--tessdata-dir', tessdataDir],
+        ],
         runInShell: Platform.isWindows && !File(binary).existsSync(),
       ).timeout(const Duration(seconds: 25));
       if (result.exitCode != 0) return null;
@@ -2932,10 +2939,24 @@ Get-PnpDevice -Class WPD -Status OK |
 
   Future<String?> _findTesseractBinary() async {
     final plugins = await AppPaths.pluginsDirectory();
+    final platformFolder = Platform.isWindows
+        ? 'windows-x64'
+        : Platform.isAndroid
+            ? 'android-arm64'
+            : 'linux-x64';
+    final binaryName = Platform.isWindows ? 'tesseract.exe' : 'tesseract';
     final candidates = <String>[
       '${plugins.path}${Platform.pathSeparator}tesseract_ocr_search'
           '${Platform.pathSeparator}components${Platform.pathSeparator}tesseract'
-          '${Platform.pathSeparator}${Platform.isWindows ? 'windows-x64${Platform.pathSeparator}tesseract.exe' : Platform.isAndroid ? 'android-arm64${Platform.pathSeparator}tesseract' : 'linux-x64${Platform.pathSeparator}tesseract'}',
+          '${Platform.pathSeparator}$platformFolder'
+          '${Platform.pathSeparator}$binaryName',
+      'windows${Platform.pathSeparator}runner${Platform.pathSeparator}resources'
+          '${Platform.pathSeparator}tesseract${Platform.pathSeparator}windows-x64'
+          '${Platform.pathSeparator}tesseract.exe',
+      'app${Platform.pathSeparator}flutter_shell${Platform.pathSeparator}windows'
+          '${Platform.pathSeparator}runner${Platform.pathSeparator}resources'
+          '${Platform.pathSeparator}tesseract${Platform.pathSeparator}windows-x64'
+          '${Platform.pathSeparator}tesseract.exe',
       Platform.isWindows ? 'tesseract.exe' : 'tesseract',
     ];
     for (final candidate in candidates) {
@@ -2945,6 +2966,18 @@ Get-PnpDevice -Class WPD -Status OK |
       }
       if (!candidate.contains(Platform.pathSeparator)) return candidate;
     }
+    return null;
+  }
+
+  Future<String?> _tessdataDirectoryFor(String binary) async {
+    if (!binary.contains(Platform.pathSeparator)) return null;
+    final dir = File(binary).parent;
+    final tessdata = Directory('${dir.path}${Platform.pathSeparator}tessdata');
+    if (await tessdata.exists()) return tessdata.path;
+    final pluginTessdata = Directory(
+      '${dir.parent.parent.path}${Platform.pathSeparator}tessdata',
+    );
+    if (await pluginTessdata.exists()) return pluginTessdata.path;
     return null;
   }
 

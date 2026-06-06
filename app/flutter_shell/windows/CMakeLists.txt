@@ -104,6 +104,14 @@ if(EXISTS "${SECUREVAULT_ARIA2C}")
     COMPONENT Runtime)
 endif()
 
+set(SECUREVAULT_TESSERACT_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/runner/resources/tesseract/windows-x64")
+if(EXISTS "${SECUREVAULT_TESSERACT_DIR}/tesseract.exe")
+  install(DIRECTORY "${SECUREVAULT_TESSERACT_DIR}/"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/plugins/tesseract_ocr_search/components/tesseract/windows-x64"
+    COMPONENT Runtime)
+endif()
+
 if(PLUGIN_BUNDLED_LIBRARIES)
   install(FILES "${PLUGIN_BUNDLED_LIBRARIES}"
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
