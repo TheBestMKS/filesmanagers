@@ -1136,6 +1136,82 @@ class CloudPluginRegistry {
         ],
       },
     );
+
+    await _writeTemplate(
+      pluginsDir,
+      deleted: deleted,
+      folder: 'syntax_highlight_code',
+      manifest: <String, Object?>{
+        'id': 'syntax-highlight-code',
+        'name': 'Code Syntax Highlight',
+        'version': '1.0.0',
+        'pluginType': 'preview-extension',
+        'description':
+            'Automatically detects C/C++, C#, Python, Kotlin, CMD, PowerShell, Dart and common markup/script files and colors source text in the built-in viewer/editor.',
+        'authType': 'none',
+        'capabilities': [
+          'previewEnhancer',
+          'syntaxHighlight',
+          'textEditorEnhancer',
+          'autoLanguageDetection'
+        ],
+        'components': <String, Object?>{
+          'executor': 'builtin-dart-syntax-highlighter',
+        },
+        'platformComponents': <String, Object?>{
+          'windows-x64': <String, Object?>{
+            'executor': 'builtin-dart-syntax-highlighter',
+          },
+          'windows-arm64': <String, Object?>{
+            'executor': 'builtin-dart-syntax-highlighter',
+          },
+          'android-arm': <String, Object?>{
+            'executor': 'builtin-dart-syntax-highlighter',
+          },
+          'android-arm64': <String, Object?>{
+            'executor': 'builtin-dart-syntax-highlighter',
+          },
+          'android-x64': <String, Object?>{
+            'executor': 'builtin-dart-syntax-highlighter',
+          },
+          'fallback': <String, Object?>{
+            'executor': 'builtin-dart-syntax-highlighter',
+          },
+        },
+        'fileHandlers': [
+          <String, Object?>{
+            'extensions': [
+              '.c',
+              '.cc',
+              '.cpp',
+              '.cxx',
+              '.h',
+              '.hpp',
+              '.cs',
+              '.py',
+              '.pyw',
+              '.kt',
+              '.kts',
+              '.cmd',
+              '.bat',
+              '.ps1',
+              '.psm1',
+              '.psd1',
+              '.dart',
+              '.js',
+              '.ts',
+              '.json',
+              '.yaml',
+              '.yml',
+              '.xml',
+              '.html',
+              '.htm'
+            ],
+            'mode': 'syntax-highlight',
+          }
+        ],
+      },
+    );
   }
 
   Future<Directory?> _writeTemplate(

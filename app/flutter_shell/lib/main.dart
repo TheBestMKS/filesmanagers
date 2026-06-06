@@ -30,7 +30,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.13';
+const _appVersion = '0.12.14';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -1547,6 +1547,33 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     }
     if (mounted &&
         openedPreview != null &&
+        _storedExtensionOpenMode(entry) != null) {
+      final mode = _storedExtensionOpenMode(entry)!;
+      if (mode == 'external') {
+        await _openPreviewExternal(openedPreview);
+        return;
+      }
+      final resolved = await _coercePreviewKind(openedPreview, mode);
+      openedPreview = resolved;
+      final playlist = mediaPlaylistOverride?.isNotEmpty == true
+          ? _playlistWithSelectedPreview(
+              resolved,
+              mediaPlaylistOverride!,
+              selectedPath: entry.path,
+            )
+          : await _buildMediaPlaylist(entry, resolved);
+      final imagePlaylist = await _buildImagePlaylist(entry, resolved);
+      final flashPlaylist = await _buildFlashPlaylist(entry, resolved);
+      if (mounted && _selected?.path == entry.path) {
+        setState(() {
+          _preview = Future<FilePreview>.value(resolved);
+          _mediaPlaylist = playlist;
+          _imagePlaylist = imagePlaylist;
+          _flashPlaylist = flashPlaylist;
+        });
+      }
+    } else if (mounted &&
+        openedPreview != null &&
         openedPreview.contentKind == FileContentKind.unknown) {
       final resolved = await _resolveUnknownPreview(entry, openedPreview);
       if (resolved == null) return;
@@ -1588,6 +1615,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         setState(() => _settings = next);
       }
     }
+  }
+
+  String? _storedExtensionOpenMode(ExplorerEntry entry) {
+    final extension = FileViewerService.extensionForName(entry.name).isNotEmpty
+        ? FileViewerService.extensionForName(entry.name)
+        : FileViewerService.extensionForName(entry.path);
+    if (extension.isEmpty) return null;
+    final mode = _settings.unknownExtensionModes[extension];
+    if (mode == null || mode.isEmpty || mode == 'internal') return null;
+    return mode;
   }
 
   Future<FilePreview?> _resolveUnknownPreview(
@@ -1722,6 +1759,36 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       decrypted: preview.decrypted,
       contentKind: kind,
     );
+  }
+
+  Future<void> _openEntryAs(ExplorerEntry entry, String mode) async {
+    if (entry.isDirectory || !entry.exists) return;
+    try {
+      final raw = await _explorer.previewFile(
+        entry.path,
+        password: _activeFilePassword(),
+        commonPassword: _commonEncryptionPassword,
+      );
+      final preview = await _coercePreviewKind(raw, mode);
+      final previewFuture = Future<FilePreview>.value(preview);
+      final mediaPlaylist = await _buildMediaPlaylist(entry, preview);
+      final imagePlaylist = await _buildImagePlaylist(entry, preview);
+      final flashPlaylist = await _buildFlashPlaylist(entry, preview);
+      if (!mounted) return;
+      setState(() {
+        _selected = entry;
+        _preview = previewFuture;
+        _mediaPlaylist = mediaPlaylist;
+        _imagePlaylist = imagePlaylist;
+        _flashPlaylist = flashPlaylist;
+      });
+      if (_isPlayablePreview(preview) &&
+          (_shouldPlayInExistingMini(preview) || !_previewVisible)) {
+        await _playMediaPreviewInSession(preview, mediaPlaylist);
+      }
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
   }
 
   Future<bool> _navigationEntryReturnsToLocations(String? path) async {
@@ -2758,6 +2825,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         await _createFile(entry, _CreateFileKind.image);
       case _EntryAction.createEncryptedImage:
         await _createFile(entry, _CreateFileKind.encryptedImage);
+      case _EntryAction.openAs:
+        return;
+      case _EntryAction.openAsText:
+        await _openEntryAs(entry, 'text');
+      case _EntryAction.openAsImage:
+        await _openEntryAs(entry, 'image');
+      case _EntryAction.openAsAudio:
+        await _openEntryAs(entry, 'audio');
+      case _EntryAction.openAsVideo:
+        await _openEntryAs(entry, 'video');
       case _EntryAction.encrypt:
         await _encryptSelectedFile(entry);
       case _EntryAction.decrypt:
@@ -2797,6 +2874,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       case _EntryAction.clearSelection:
       case _EntryAction.zipSelected:
         await _handleBulkAction(action);
+      case _EntryAction.encryptMenu:
+      case _EntryAction.decryptMenu:
+      case _EntryAction.useAs:
+        return;
       case _EntryAction.folderContainer:
         await _createFolderContainer(entry);
       case _EntryAction.folderEncryptName:
@@ -3639,26 +3720,108 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   Future<void> _showEntryProperties(ExplorerEntry entry) async {
+    final extension = FileViewerService.extensionForName(entry.name).isNotEmpty
+        ? FileViewerService.extensionForName(entry.name)
+        : FileViewerService.extensionForName(entry.path);
+    var openMode = extension.isEmpty
+        ? 'internal'
+        : (_settings.unknownExtensionModes[extension] ?? 'internal');
     await showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(_language.t('explorer.properties')),
-        content: SelectableText(
-          '${_language.t('common.path')}: ${entry.path}\n'
-          '${_language.t('explorer.name')}: ${entry.name}\n'
-          '${_language.t('explorer.type')}: ${entry.kind.name}\n'
-          '${_language.t('explorer.size')}: ${entry.sizeBytes}\n'
-          '${_language.t('explorer.modified')}: ${entry.modifiedAt}\n'
-          '${_language.t('explorer.exists')}: ${entry.exists}',
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(_language.t('common.ok')),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(_language.t('explorer.properties')),
+          content: SizedBox(
+            width: 540,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SelectableText(
+                    '${_language.t('common.path')}: ${entry.path}\n'
+                    '${_language.t('explorer.name')}: ${entry.name}\n'
+                    '${_language.t('explorer.type')}: ${entry.kind.name}\n'
+                    '${_language.t('explorer.size')}: ${entry.sizeBytes}\n'
+                    '${_language.t('explorer.modified')}: ${entry.modifiedAt}\n'
+                    '${_language.t('explorer.exists')}: ${entry.exists}',
+                  ),
+                  if (!entry.isDirectory && extension.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    Text(
+                      '${_language.t('common.extension')}: $extension',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<String>(
+                      initialValue: openMode,
+                      decoration: InputDecoration(
+                        labelText: _language.t('properties.extension.opening'),
+                      ),
+                      items: [
+                        DropdownMenuItem(
+                          value: 'external',
+                          child: Text(_language.t('properties.open.external')),
+                        ),
+                        DropdownMenuItem(
+                          value: 'internal',
+                          child: Text(_language.t('properties.open.internal')),
+                        ),
+                        DropdownMenuItem(
+                          value: 'text',
+                          child: Text(_language.t('preview.force.text')),
+                        ),
+                        DropdownMenuItem(
+                          value: 'audio',
+                          child: Text(_language.t('preview.force.audio')),
+                        ),
+                        DropdownMenuItem(
+                          value: 'video',
+                          child: Text(_language.t('preview.force.video')),
+                        ),
+                        DropdownMenuItem(
+                          value: 'image',
+                          child: Text(_language.t('preview.force.image')),
+                        ),
+                      ],
+                      onChanged: (value) async {
+                        if (value == null) return;
+                        setDialogState(() => openMode = value);
+                        await _setExtensionOpenMode(extension, value);
+                      },
+                    ),
+                  ],
+                ],
+              ),
+            ),
           ),
-        ],
+          actions: [
+            TextButton.icon(
+              onPressed: () => unawaited(_changePermissions(entry)),
+              icon: const Icon(Icons.admin_panel_settings_outlined),
+              label: Text(_language.t('permissions.title')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_language.t('common.ok')),
+            ),
+          ],
+        ),
       ),
     );
+  }
+
+  Future<void> _setExtensionOpenMode(String extension, String mode) async {
+    if (extension.isEmpty) return;
+    final nextModes = Map<String, String>.of(_settings.unknownExtensionModes);
+    if (mode == 'internal') {
+      nextModes.remove(extension);
+    } else {
+      nextModes[extension] = mode;
+    }
+    final next = _settings.copyWith(unknownExtensionModes: nextModes);
+    await _settingsRepo.save(next);
+    if (mounted) setState(() => _settings = next);
   }
 
   Future<void> _extractOcrText(ExplorerEntry entry) async {
@@ -3676,7 +3839,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _snack(_language.t('ocr.empty'));
         return;
       }
-      await showDialog<void>(
+      final action = await showDialog<String>(
         context: context,
         builder: (context) => AlertDialog(
           title: Text(_language.t('ocr.extract')),
@@ -3702,6 +3865,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
               },
               child: Text(_language.t('explorer.copy')),
             ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'edit'),
+              child: Text(_language.t('ocr.edit')),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'save'),
+              child: Text(_language.t('ocr.save.text')),
+            ),
             FilledButton(
               onPressed: () => Navigator.pop(context),
               child: Text(_language.t('common.close')),
@@ -3709,8 +3880,40 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
           ],
         ),
       );
+      if (action == 'edit') {
+        await _openEditor(FilePreview(
+          title: '${entry.name}.txt',
+          subtitle: entry.path,
+          sourcePath: null,
+          text: normalized,
+          bytes: Uint8List.fromList(utf8.encode(normalized)),
+          contentKind: FileContentKind.text,
+        ));
+      } else if (action == 'save') {
+        await _saveOcrText(entry, normalized);
+      }
     } catch (error) {
       _snack('${_language.t('ocr.error')} $error');
+    }
+  }
+
+  Future<void> _saveOcrText(ExplorerEntry entry, String text) async {
+    final suggestedName = '${entry.name}.txt';
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (context) => _SaveTextPathDialog(
+        language: _language,
+        suggestedName: suggestedName,
+      ),
+    );
+    if (selected == null || selected.trim().isEmpty) return;
+    try {
+      final file = File(selected);
+      await file.parent.create(recursive: true);
+      await file.writeAsString(text, encoding: utf8);
+      _snack('${_language.t('snack.saved')} ${file.path}');
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
     }
   }
 
@@ -3740,6 +3943,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   }
 
   Future<void> _changePermissions(ExplorerEntry entry) async {
+    final isLocalWindows = Platform.isWindows &&
+        !_explorer.isVirtualPath(entry.path) &&
+        entry.exists;
+    if (isLocalWindows) {
+      await _changeWindowsPermissions(entry);
+      return;
+    }
     if (!_explorer.supportsPermissions(entry.path)) {
       _snack(_language.t('permissions.unsupported'));
       return;
@@ -3806,6 +4016,125 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         mode: result.mode,
         recursive: result.recursive,
       );
+      _snack(_language.t('permissions.changed'));
+      await _refresh();
+    } catch (error) {
+      _snack('${_language.t('snack.operation.error')} $error');
+    }
+  }
+
+  Future<void> _changeWindowsPermissions(ExplorerEntry entry) async {
+    final accountController = TextEditingController();
+    var read = true;
+    var write = false;
+    var execute = entry.isDirectory;
+    var recursive = entry.isDirectory;
+    final result = await showDialog<
+        ({
+          String account,
+          bool read,
+          bool write,
+          bool execute,
+          bool recursive
+        })>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(_language.t('permissions.title')),
+          content: SizedBox(
+            width: 480,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SelectableText(entry.path),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: accountController,
+                  decoration: InputDecoration(
+                    labelText: _language.t('security.account'),
+                    helperText: r'РќР°РїСЂРёРјРµСЂ: DOMAIN\User, BUILTIN\Users',
+                  ),
+                ),
+                CheckboxListTile(
+                  value: read,
+                  onChanged: (value) =>
+                      setDialogState(() => read = value ?? false),
+                  title: Text(_language.t('security.read')),
+                ),
+                CheckboxListTile(
+                  value: write,
+                  onChanged: (value) =>
+                      setDialogState(() => write = value ?? false),
+                  title: Text(_language.t('security.write')),
+                ),
+                CheckboxListTile(
+                  value: execute,
+                  onChanged: (value) =>
+                      setDialogState(() => execute = value ?? false),
+                  title: Text(_language.t('security.execute')),
+                ),
+                if (entry.isDirectory)
+                  SwitchListTile(
+                    value: recursive,
+                    onChanged: (value) =>
+                        setDialogState(() => recursive = value),
+                    title: Text(_language.t('permissions.recursive')),
+                  ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(_language.t('common.cancel')),
+            ),
+            FilledButton(
+              onPressed: () {
+                final account = accountController.text.trim();
+                if (account.isEmpty || (!read && !write && !execute)) return;
+                Navigator.pop(
+                  context,
+                  (
+                    account: account,
+                    read: read,
+                    write: write,
+                    execute: execute,
+                    recursive: recursive
+                  ),
+                );
+              },
+              child: Text(_language.t('security.apply')),
+            ),
+          ],
+        ),
+      ),
+    );
+    accountController.dispose();
+    if (result == null) return;
+    final rights = <String>[];
+    if (result.read && result.execute) {
+      rights.add('RX');
+    } else {
+      if (result.read) rights.add('R');
+      if (result.execute) rights.add('X');
+    }
+    if (result.write) rights.add('W');
+    final prefix = entry.isDirectory ? '(OI)(CI)' : '';
+    final grant = '${result.account}:$prefix(${rights.join(',')})';
+    final args = <String>[entry.path, '/grant', grant];
+    if (result.recursive && entry.isDirectory) args.add('/T');
+    try {
+      final process = await Process.run('icacls', args);
+      if (process.exitCode != 0) {
+        throw ProcessException(
+          'icacls',
+          args,
+          '${process.stderr}\n${process.stdout}',
+          process.exitCode,
+        );
+      }
       _snack(_language.t('permissions.changed'));
       await _refresh();
     } catch (error) {
@@ -5581,7 +5910,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     try {
       final file = await AppLog.file();
       await AppLog.write('Log file opened from About dialog.');
-      await PlatformServices.openExternal(file.path);
+      final entry = await _explorer.entryForPath(file.path);
+      if (!mounted || entry == null) return;
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      await _openEntry(entry, forceFullScreen: true);
     } catch (error) {
       _snack('${_language.t('snack.operation.error')} $error');
     }
@@ -5683,6 +6017,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       child: Scaffold(
         body: SafeArea(
           child: Stack(
+            clipBehavior: Clip.none,
             children: [
               LayoutBuilder(
                 builder: (context, c) {
@@ -5965,6 +6300,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                 enableMiniVideo: _settings.enableMiniVideo,
                 enableMiniAudio: _settings.enableMiniAudio,
                 continueInBackground: _settings.continueMediaInBackground,
+                externalFloatingPlayer: _settings.externalFloatingPlayer,
                 onOpenFullScreen: (preview, playlist) => _showPreviewWindow(
                   preview,
                   mediaPlaylistOverride: playlist,
@@ -6402,6 +6738,11 @@ enum _EntryAction {
   createEncryptedCsv,
   createImage,
   createEncryptedImage,
+  openAs,
+  openAsText,
+  openAsImage,
+  openAsAudio,
+  openAsVideo,
   copy,
   cut,
   paste,
@@ -6418,11 +6759,14 @@ enum _EntryAction {
   zipSelected,
   encrypt,
   decrypt,
+  encryptMenu,
+  decryptMenu,
   folderContainer,
   folderEncryptName,
   folderDecryptName,
   folderEncrypt,
   folderDecrypt,
+  useAs,
   useAsGallery,
   useAsVideo,
   useAsMusic,
@@ -6461,6 +6805,193 @@ enum _ExplorerMenuAction {
   toggleHidden,
   toggleSystem,
   folderSettings,
+}
+
+class _ContextMenuSpec {
+  const _ContextMenuSpec({
+    this.action,
+    this.label,
+    this.enabled = true,
+    this.children = const <_ContextMenuSpec>[],
+  }) : divider = false;
+
+  const _ContextMenuSpec.divider()
+      : action = null,
+        label = null,
+        enabled = false,
+        children = const <_ContextMenuSpec>[],
+        divider = true;
+
+  final _EntryAction? action;
+  final String? label;
+  final bool enabled;
+  final List<_ContextMenuSpec> children;
+  final bool divider;
+
+  bool get hasChildren => children.isNotEmpty;
+}
+
+Future<_EntryAction?> _showCascadingContextMenu({
+  required BuildContext context,
+  required Offset? position,
+  required List<_ContextMenuSpec> items,
+}) {
+  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+  final fallback = Offset(overlay.size.width / 2, overlay.size.height / 2);
+  return showDialog<_EntryAction>(
+    context: context,
+    barrierColor: Colors.transparent,
+    builder: (_) => _CascadingContextMenu(
+      anchor: position ?? fallback,
+      items: items,
+    ),
+  );
+}
+
+class _CascadingContextMenu extends StatefulWidget {
+  const _CascadingContextMenu({
+    required this.anchor,
+    required this.items,
+  });
+
+  final Offset anchor;
+  final List<_ContextMenuSpec> items;
+
+  @override
+  State<_CascadingContextMenu> createState() => _CascadingContextMenuState();
+}
+
+class _CascadingContextMenuState extends State<_CascadingContextMenu> {
+  static const _menuWidth = 292.0;
+  static const _itemHeight = 42.0;
+  static const _dividerHeight = 8.0;
+  int? _activeIndex;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      type: MaterialType.transparency,
+      child: LayoutBuilder(builder: (context, constraints) {
+        final left = widget.anchor.dx
+            .clamp(8.0, math.max(8.0, constraints.maxWidth - _menuWidth - 8))
+            .toDouble();
+        final top = widget.anchor.dy
+            .clamp(8.0, math.max(8.0, constraints.maxHeight - 64))
+            .toDouble();
+        final active =
+            _activeIndex == null ? null : widget.items[_activeIndex!];
+        final childItems = active != null && active.enabled
+            ? active.children
+            : const <_ContextMenuSpec>[];
+        final childTop = active == null
+            ? top
+            : (top + _rowOffset(_activeIndex!))
+                .clamp(8.0, math.max(8.0, constraints.maxHeight - 64))
+                .toDouble();
+        final opensRight = left + _menuWidth * 2 + 18 <= constraints.maxWidth;
+        final childLeft = opensRight
+            ? left + _menuWidth + 6
+            : math.max(8.0, left - _menuWidth - 6);
+        return Stack(children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => Navigator.pop(context),
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            left: left,
+            top: top,
+            width: _menuWidth,
+            child: _menu(widget.items, root: true),
+          ),
+          if (childItems.isNotEmpty)
+            Positioned(
+              left: childLeft,
+              top: childTop,
+              width: _menuWidth,
+              child: _menu(childItems),
+            ),
+        ]);
+      }),
+    );
+  }
+
+  Widget _menu(List<_ContextMenuSpec> items, {bool root = false}) {
+    final maxHeight = MediaQuery.sizeOf(context).height - 24;
+    return Material(
+      elevation: 12,
+      borderRadius: BorderRadius.circular(12),
+      clipBehavior: Clip.antiAlias,
+      color: Theme.of(context).colorScheme.surface,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxHeight),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (var i = 0; i < items.length; i++) _row(items[i], i, root),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _row(_ContextMenuSpec item, int index, bool root) {
+    if (item.divider) return const Divider(height: _dividerHeight);
+    final active = root && _activeIndex == index && item.hasChildren;
+    final colorScheme = Theme.of(context).colorScheme;
+    return MouseRegion(
+      onEnter: (_) {
+        if (root && item.enabled && item.hasChildren) {
+          setState(() => _activeIndex = index);
+        }
+      },
+      child: InkWell(
+        onTap: item.enabled ? () => _activate(item, root, index) : null,
+        child: Container(
+          height: _itemHeight,
+          color: active
+              ? colorScheme.primaryContainer.withValues(alpha: .55)
+              : null,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Row(children: [
+            Expanded(
+              child: Text(
+                item.label ?? '',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: item.enabled
+                      ? colorScheme.onSurface
+                      : colorScheme.onSurface.withValues(alpha: .38),
+                ),
+              ),
+            ),
+            if (item.hasChildren) const Icon(Icons.chevron_right, size: 18),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  void _activate(_ContextMenuSpec item, bool root, int index) {
+    if (!item.enabled) return;
+    if (item.hasChildren) {
+      if (root) setState(() => _activeIndex = index);
+      return;
+    }
+    final action = item.action;
+    if (action != null) Navigator.pop(context, action);
+  }
+
+  double _rowOffset(int index) {
+    var offset = 6.0;
+    for (var i = 0; i < index; i++) {
+      offset += widget.items[i].divider ? _dividerHeight : _itemHeight;
+    }
+    return offset;
+  }
 }
 
 class _LockScreen extends StatefulWidget {
@@ -8154,38 +8685,59 @@ class _StorageUsageStrip extends StatelessWidget {
       future: _StorageUsageInfo.load(current),
       builder: (context, snapshot) {
         final info = snapshot.data;
-        final text = info == null
-            ? language.t('storage.checking')
+        final labels = info == null
+            ? [language.t('storage.checking')]
             : info.available
-                ? '${language.t('storage.total')}: ${_formatBytes(info.total)}  '
-                    '${language.t('storage.used')}: ${_formatBytes(info.used)}  '
-                    '${language.t('storage.free')}: ${_formatBytes(info.free)}'
-                : info.message ?? language.t('storage.unavailable');
+                ? [
+                    '${language.t('storage.total')}: ${_formatBytes(info.total)}',
+                    '${language.t('storage.used')}: ${_formatBytes(info.used)}',
+                    '${language.t('storage.free')}: ${_formatBytes(info.free)}',
+                  ]
+                : [info.message ?? language.t('storage.unavailable')];
         final value = info == null || !info.available || info.total <= 0
             ? null
             : (info.used / info.total).clamp(0.0, 1.0).toDouble();
-        return Row(children: [
-          Expanded(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(99),
-              child: LinearProgressIndicator(
-                minHeight: 4,
-                value: value,
-                backgroundColor: const Color(0xFFE8EEF5),
-              ),
+        return LayoutBuilder(builder: (context, constraints) {
+          final narrow = constraints.maxWidth < 420;
+          final bar = ClipRRect(
+            borderRadius: BorderRadius.circular(99),
+            child: LinearProgressIndicator(
+              minHeight: 4,
+              value: value,
+              backgroundColor: const Color(0xFFE8EEF5),
             ),
-          ),
-          const SizedBox(width: 8),
-          Flexible(
-            flex: 2,
-            child: Text(
-              text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelSmall,
-            ),
-          ),
-        ]);
+          );
+          final labelWrap = Wrap(
+            spacing: 8,
+            runSpacing: 2,
+            children: [
+              for (final label in labels)
+                Text(
+                  label,
+                  maxLines: narrow ? 2 : 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        fontSize: narrow ? 10 : null,
+                      ),
+                ),
+            ],
+          );
+          if (narrow) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                bar,
+                const SizedBox(height: 4),
+                labelWrap,
+              ],
+            );
+          }
+          return Row(children: [
+            Expanded(child: bar),
+            const SizedBox(width: 8),
+            Flexible(flex: 2, child: labelWrap),
+          ]);
+        });
       },
     );
   }
@@ -8487,12 +9039,11 @@ class _EntryList extends StatelessWidget {
                   if (entry.containerInfo?.isOk == true)
                     const Icon(Icons.verified_outlined,
                         color: Color(0xFF2B7A4B)),
-                  PopupMenuButton<_EntryAction>(
+                  IconButton(
                     icon: const Icon(Icons.more_vert),
-                    onSelected: (action) => unawaited(
-                      _handleEntryMenuSelection(context, entry, action, null),
+                    onPressed: () => unawaited(
+                      _showEntryContextMenu(context, entry, null),
                     ),
-                    itemBuilder: (_) => _entryMenuItems(entry),
                   ),
                 ]),
                 onTap: selectionMode
@@ -8552,104 +9103,112 @@ class _EntryList extends StatelessWidget {
     ExplorerEntry entry,
     Offset? position,
   ) async {
-    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final selectedAction = await showMenu<_EntryAction>(
+    final selectedAction = await _showCascadingContextMenu(
       context: context,
-      position: position == null
-          ? RelativeRect.fromLTRB(
-              overlay.size.width / 2,
-              overlay.size.height / 2,
-              overlay.size.width / 2,
-              overlay.size.height / 2,
-            )
-          : RelativeRect.fromRect(
-              Rect.fromLTWH(position.dx, position.dy, 1, 1),
-              Offset.zero & overlay.size,
-            ),
-      items: _entryMenuItems(entry),
+      position: position,
+      items: _entryMenuSpecs(entry),
     );
     if (selectedAction != null) {
-      if (!context.mounted) return;
-      await _handleEntryMenuSelection(context, entry, selectedAction, position);
+      _handleEntryAction(entry, selectedAction);
     }
   }
 
-  Future<void> _handleEntryMenuSelection(
-    BuildContext context,
-    ExplorerEntry entry,
+  _ContextMenuSpec _menuItem(
     _EntryAction action,
-    Offset? position,
-  ) async {
-    if (action == _EntryAction.create) {
-      final selected = await _showCreateSubmenu(context, position);
-      if (selected != null) {
-        _handleEntryAction(entry, selected);
-      }
-      return;
-    }
-    _handleEntryAction(entry, action);
-  }
+    String label, {
+    bool enabled = true,
+  }) =>
+      _ContextMenuSpec(
+        action: action,
+        label: label,
+        enabled: enabled,
+      );
 
-  Future<_EntryAction?> _showCreateSubmenu(
-    BuildContext context,
-    Offset? position,
-  ) {
-    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final contextBox = context.findRenderObject();
-    final fallback = contextBox is RenderBox
-        ? contextBox.localToGlobal(Offset(
-            contextBox.size.width,
-            math.min(48, contextBox.size.height) / 2,
-          ))
-        : Offset(overlay.size.width / 2, overlay.size.height / 2);
-    final source =
-        position == null ? fallback : position + const Offset(24, 24);
-    final anchor = Offset(
-      source.dx.clamp(8.0, overlay.size.width - 8).toDouble(),
-      source.dy.clamp(8.0, overlay.size.height - 8).toDouble(),
-    );
-    return showMenu<_EntryAction>(
-      context: context,
-      position: RelativeRect.fromRect(
-        Rect.fromLTWH(anchor.dx, anchor.dy, 1, 1),
-        Offset.zero & overlay.size,
-      ),
-      items: _createSubmenuItems(),
-    );
-  }
+  _ContextMenuSpec _parentItem(
+    _EntryAction action,
+    String label, {
+    bool enabled = true,
+    required List<_ContextMenuSpec> children,
+  }) =>
+      _ContextMenuSpec(
+        action: action,
+        label: label,
+        enabled: enabled,
+        children: children,
+      );
 
-  List<PopupMenuEntry<_EntryAction>> _createSubmenuItems() => [
-        PopupMenuItem(
-          value: _EntryAction.createFolder,
-          child: Text(language.t('create.folder')),
+  List<_ContextMenuSpec> _createSubmenuSpecs() => [
+        _menuItem(_EntryAction.createFolder, language.t('create.folder')),
+        _menuItem(_EntryAction.createPlain, language.t('create.plain')),
+        _menuItem(
+          _EntryAction.createEncryptedPlain,
+          language.t('create.encrypted.plain'),
         ),
-        PopupMenuItem(
-          value: _EntryAction.createPlain,
-          child: Text(language.t('create.plain')),
+        _menuItem(_EntryAction.createCsv, language.t('create.csv')),
+        _menuItem(
+          _EntryAction.createEncryptedCsv,
+          language.t('create.encrypted.csv'),
         ),
-        PopupMenuItem(
-          value: _EntryAction.createEncryptedPlain,
-          child: Text(language.t('create.encrypted.plain')),
-        ),
-        PopupMenuItem(
-          value: _EntryAction.createCsv,
-          child: Text(language.t('create.csv')),
-        ),
-        PopupMenuItem(
-          value: _EntryAction.createEncryptedCsv,
-          child: Text(language.t('create.encrypted.csv')),
-        ),
-        PopupMenuItem(
-          value: _EntryAction.createImage,
-          child: Text(language.t('create.image')),
-        ),
-        PopupMenuItem(
-          value: _EntryAction.createEncryptedImage,
-          child: Text(language.t('create.encrypted.image')),
+        _menuItem(_EntryAction.createImage, language.t('create.image')),
+        _menuItem(
+          _EntryAction.createEncryptedImage,
+          language.t('create.encrypted.image'),
         ),
       ];
 
-  List<PopupMenuEntry<_EntryAction>> _entryMenuItems(ExplorerEntry entry) {
+  List<_ContextMenuSpec> _openAsSubmenuSpecs() => [
+        _menuItem(_EntryAction.openAsText, language.t('preview.force.text')),
+        _menuItem(_EntryAction.openAsImage, language.t('preview.force.image')),
+        _menuItem(_EntryAction.openAsAudio, language.t('preview.force.audio')),
+        _menuItem(_EntryAction.openAsVideo, language.t('preview.force.video')),
+      ];
+
+  List<_ContextMenuSpec> _useAsSubmenuSpecs() => [
+        _menuItem(
+          _EntryAction.useAsGallery,
+          language.t('folder.use.gallery'),
+        ),
+        _menuItem(
+          _EntryAction.useAsVideo,
+          language.t('folder.use.video'),
+        ),
+        _menuItem(
+          _EntryAction.useAsMusic,
+          language.t('folder.use.audio'),
+        ),
+        _menuItem(
+          _EntryAction.useAsMultimedia,
+          language.t('folder.use.multimedia'),
+        ),
+      ];
+
+  List<_ContextMenuSpec> _folderEncryptSubmenuSpecs() => [
+        _menuItem(
+          _EntryAction.folderContainer,
+          language.t('explorer.folder.container.as'),
+        ),
+        _menuItem(
+          _EntryAction.folderEncryptName,
+          language.t('explorer.folder.encrypt.name.short'),
+        ),
+        _menuItem(
+          _EntryAction.folderEncrypt,
+          language.t('explorer.folder.encrypt.files'),
+        ),
+      ];
+
+  List<_ContextMenuSpec> _folderDecryptSubmenuSpecs() => [
+        _menuItem(
+          _EntryAction.folderDecryptName,
+          language.t('explorer.folder.decrypt.name.short'),
+        ),
+        _menuItem(
+          _EntryAction.folderDecrypt,
+          language.t('explorer.folder.decrypt.files'),
+        ),
+      ];
+
+  List<_ContextMenuSpec> _entryMenuSpecs(ExplorerEntry entry) {
     final isFavorite = favoritePaths.contains(entry.path);
     final isRecent = recentPaths.contains(entry.path);
     final isVirtual =
@@ -8661,223 +9220,171 @@ class _EntryList extends StatelessWidget {
         FileViewerService.kindForName(entry.path) == FileContentKind.image ||
             extension == '.pdf' ||
             entry.isEncrypted;
+    final canChangeFile = entry.exists && !isVirtual && !isProfileLocation;
     if (entry.isNavigationEntry) {
       return [
-        PopupMenuItem(
-          value: _EntryAction.open,
-          child: Text(language.t('common.open')),
-        ),
+        _menuItem(_EntryAction.open, language.t('common.open')),
       ];
     }
-    return <PopupMenuEntry<_EntryAction>>[
-      PopupMenuItem(
-        value: _EntryAction.open,
-        child: Text(language.t('common.open')),
-      ),
+    return [
+      _menuItem(_EntryAction.open, language.t('common.open')),
       if (!entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.edit,
+        _menuItem(
+          _EntryAction.edit,
+          language.t('editor.open'),
           enabled: entry.exists,
-          child: Text(language.t('editor.open')),
         ),
-      const PopupMenuDivider(),
-      PopupMenuItem(
-        value: _EntryAction.create,
-        enabled: entry.exists &&
-            entry.isDirectory &&
-            !isVirtual &&
-            !isProfileLocation,
-        child: Row(children: [
-          Expanded(child: Text(language.t('explorer.create'))),
-          const Icon(Icons.chevron_right, size: 18),
-        ]),
-      ),
-      PopupMenuItem(
-        value:
-            isFavorite ? _EntryAction.removeFavorite : _EntryAction.addFavorite,
-        child: Text(
-          isFavorite
-              ? language.t('favorites.remove')
-              : language.t('favorites.add'),
+      const _ContextMenuSpec.divider(),
+      if (entry.isDirectory)
+        _parentItem(
+          _EntryAction.create,
+          language.t('explorer.create'),
+          enabled: canChangeFile,
+          children: _createSubmenuSpecs(),
         ),
+      if (!entry.isDirectory)
+        _parentItem(
+          _EntryAction.openAs,
+          language.t('explorer.open.as'),
+          enabled: entry.exists,
+          children: _openAsSubmenuSpecs(),
+        ),
+      _menuItem(
+        isFavorite ? _EntryAction.removeFavorite : _EntryAction.addFavorite,
+        isFavorite
+            ? language.t('favorites.remove')
+            : language.t('favorites.add'),
       ),
       if (isRecent)
-        PopupMenuItem(
-          value: _EntryAction.removeRecent,
-          child: Text(language.t('recent.remove')),
-        ),
-      const PopupMenuDivider(),
-      PopupMenuItem(
-        value: _EntryAction.copy,
-        enabled: entry.exists && !isVirtual && !isProfileLocation,
-        child: Text(language.t('explorer.copy')),
+        _menuItem(_EntryAction.removeRecent, language.t('recent.remove')),
+      const _ContextMenuSpec.divider(),
+      _menuItem(
+        _EntryAction.copy,
+        language.t('explorer.copy'),
+        enabled: canChangeFile,
       ),
-      PopupMenuItem(
-        value: _EntryAction.cut,
-        enabled: entry.exists && !isVirtual && !isProfileLocation,
-        child: Text(language.t('explorer.cut')),
+      _menuItem(
+        _EntryAction.cut,
+        language.t('explorer.cut'),
+        enabled: canChangeFile,
       ),
-      PopupMenuItem(
-        value: _EntryAction.paste,
-        enabled: canPaste &&
-            entry.isDirectory &&
-            entry.exists &&
-            !isVirtual &&
-            !isProfileLocation,
-        child: Text(language.t('explorer.paste')),
+      _menuItem(
+        _EntryAction.paste,
+        language.t('explorer.paste'),
+        enabled: canPaste && entry.isDirectory && canChangeFile,
       ),
-      PopupMenuItem(
-        value: _EntryAction.rename,
-        enabled: entry.exists && !isVirtual && !isProfileLocation,
-        child: Text(language.t('explorer.rename')),
+      _menuItem(
+        _EntryAction.rename,
+        language.t('explorer.rename'),
+        enabled: canChangeFile,
       ),
-      PopupMenuItem(
-        value: _EntryAction.delete,
-        enabled: entry.exists && !isVirtual && !isProfileLocation,
-        child: Text(language.t('explorer.delete')),
+      _menuItem(
+        _EntryAction.delete,
+        language.t('explorer.delete'),
+        enabled: canChangeFile,
       ),
-      PopupMenuItem(
-        value: _EntryAction.properties,
-        child: Text(language.t('explorer.properties')),
-      ),
+      _menuItem(_EntryAction.properties, language.t('explorer.properties')),
       if (isRemote)
-        PopupMenuItem(
-          value: _EntryAction.permissions,
+        _menuItem(
+          _EntryAction.permissions,
+          language.t('permissions.title'),
           enabled: entry.exists,
-          child: Text(language.t('permissions.title')),
         ),
-      if (entry.connectionProfileId != null) const PopupMenuDivider(),
+      if (entry.connectionProfileId != null) const _ContextMenuSpec.divider(),
       if (entry.connectionProfileId != null)
-        PopupMenuItem(
-          value: _EntryAction.editConnectionProfile,
-          child: Text(language.t('locations.profile.edit')),
+        _menuItem(
+          _EntryAction.editConnectionProfile,
+          language.t('locations.profile.edit'),
         ),
       if (entry.connectionProfileId != null)
-        PopupMenuItem(
-          value: _EntryAction.deleteConnectionProfile,
-          child: Text(language.t('locations.profile.delete')),
+        _menuItem(
+          _EntryAction.deleteConnectionProfile,
+          language.t('locations.profile.delete'),
         ),
-      PopupMenuItem(
-        value: _EntryAction.send,
+      _menuItem(
+        _EntryAction.send,
+        language.t('explorer.send'),
         enabled: entry.exists && !isVirtual && !isProfileLocation,
-        child: Text(language.t('explorer.send')),
       ),
-      if (!entry.isDirectory) const PopupMenuDivider(),
+      if (!entry.isDirectory) const _ContextMenuSpec.divider(),
       if (!entry.isDirectory &&
           {'.zip', '.rar', '.cbr', '.rev'}.contains(extension))
-        PopupMenuItem(
-          value: _EntryAction.unzip,
-          enabled: entry.exists && !isVirtual && !isProfileLocation,
-          child: Text(language.t('explorer.unzip')),
+        _menuItem(
+          _EntryAction.unzip,
+          language.t('explorer.unzip'),
+          enabled: canChangeFile,
         ),
       if (!entry.isDirectory && ocrCandidate)
-        PopupMenuItem(
-          value: _EntryAction.ocrExtract,
+        _menuItem(
+          _EntryAction.ocrExtract,
+          language.t('ocr.extract'),
           enabled: entry.exists,
-          child: Text(language.t('ocr.extract')),
         ),
       if (!entry.isDirectory && extension == '.swf')
-        PopupMenuItem(
-          value: _EntryAction.openSwf,
+        _menuItem(
+          _EntryAction.openSwf,
+          language.t('preview.swf.open'),
           enabled: entry.exists,
-          child: Text(language.t('preview.swf.open')),
         ),
       if (!entry.isDirectory && !entry.isEncrypted)
-        PopupMenuItem(
-          value: _EntryAction.encrypt,
-          enabled: entry.exists && !isVirtual && !isProfileLocation,
-          child: Text(language.t('explorer.encrypt')),
+        _menuItem(
+          _EntryAction.encrypt,
+          language.t('explorer.encrypt'),
+          enabled: canChangeFile,
         ),
       if (!entry.isDirectory && entry.isEncrypted)
-        PopupMenuItem(
-          value: _EntryAction.decrypt,
-          enabled: entry.exists && !isVirtual && !isProfileLocation,
-          child: Text(language.t('decrypt.action')),
+        _menuItem(
+          _EntryAction.decrypt,
+          language.t('decrypt.action'),
+          enabled: canChangeFile,
         ),
-      if (entry.isDirectory) const PopupMenuDivider(),
+      if (entry.isDirectory) const _ContextMenuSpec.divider(),
       if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.folderSettings,
+        _menuItem(
+          _EntryAction.folderSettings,
+          language.t('folder.settings.title'),
           enabled: entry.exists,
-          child: Text(language.t('folder.settings.title')),
         ),
       if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.openAllImages,
+        _menuItem(
+          _EntryAction.openAllImages,
+          language.t('explorer.open.all.images'),
           enabled: entry.exists,
-          child: Text(language.t('explorer.open.all.images')),
         ),
       if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.openAllVideos,
+        _menuItem(
+          _EntryAction.openAllVideos,
+          language.t('explorer.open.all.videos'),
           enabled: entry.exists,
-          child: Text(language.t('explorer.open.all.videos')),
         ),
       if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.openAllAudio,
+        _menuItem(
+          _EntryAction.openAllAudio,
+          language.t('explorer.open.all.audio'),
           enabled: entry.exists,
-          child: Text(language.t('explorer.open.all.audio')),
         ),
-      if (entry.isDirectory) const PopupMenuDivider(),
+      if (entry.isDirectory) const _ContextMenuSpec.divider(),
       if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.folderContainer,
-          enabled: entry.exists && !isVirtual && !isProfileLocation,
-          child: Text(language.t('explorer.folder.container')),
-        ),
-      if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.folderEncryptName,
-          enabled: entry.exists && !isVirtual && !isProfileLocation,
-          child: Text(language.t('explorer.folder.encrypt.name')),
+        _parentItem(
+          _EntryAction.encryptMenu,
+          language.t('explorer.encrypt.menu'),
+          enabled: canChangeFile,
+          children: _folderEncryptSubmenuSpecs(),
         ),
       if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.folderDecryptName,
-          enabled: entry.exists && !isVirtual && !isProfileLocation,
-          child: Text(language.t('explorer.folder.decrypt.name')),
-        ),
-      if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.folderEncrypt,
-          enabled: entry.exists && !isVirtual && !isProfileLocation,
-          child: Text(language.t('explorer.folder.encrypt')),
-        ),
-      if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.folderDecrypt,
+        _parentItem(
+          _EntryAction.decryptMenu,
+          language.t('explorer.decrypt.menu'),
           enabled: entry.exists && !isProfileLocation,
-          child: Text(language.t('explorer.folder.decrypt')),
+          children: _folderDecryptSubmenuSpecs(),
         ),
-      if (entry.isDirectory) const PopupMenuDivider(),
+      if (entry.isDirectory) const _ContextMenuSpec.divider(),
       if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.useAsGallery,
+        _parentItem(
+          _EntryAction.useAs,
+          language.t('explorer.use.as'),
           enabled: entry.exists,
-          child: Text(
-              '${language.t('explorer.use.as')} > ${language.t('explorer.use.as.gallery')}'),
-        ),
-      if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.useAsVideo,
-          enabled: entry.exists,
-          child: Text(
-              '${language.t('explorer.use.as')} > ${language.t('explorer.use.as.video')}'),
-        ),
-      if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.useAsMusic,
-          enabled: entry.exists,
-          child: Text(
-              '${language.t('explorer.use.as')} > ${language.t('explorer.use.as.music')}'),
-        ),
-      if (entry.isDirectory)
-        PopupMenuItem(
-          value: _EntryAction.useAsMultimedia,
-          enabled: entry.exists,
-          child: Text(
-              '${language.t('explorer.use.as')} > ${language.t('explorer.use.as.multimedia')}'),
+          children: _useAsSubmenuSpecs(),
         ),
     ];
   }
@@ -8889,6 +9396,10 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.edit:
         onEntryAction(entry, action);
       case _EntryAction.create:
+      case _EntryAction.openAs:
+      case _EntryAction.encryptMenu:
+      case _EntryAction.decryptMenu:
+      case _EntryAction.useAs:
         return;
       case _EntryAction.createFolder:
       case _EntryAction.createPlain:
@@ -8897,6 +9408,10 @@ class _EntryList extends StatelessWidget {
       case _EntryAction.createEncryptedCsv:
       case _EntryAction.createImage:
       case _EntryAction.createEncryptedImage:
+      case _EntryAction.openAsText:
+      case _EntryAction.openAsImage:
+      case _EntryAction.openAsAudio:
+      case _EntryAction.openAsVideo:
       case _EntryAction.encrypt:
       case _EntryAction.decrypt:
       case _EntryAction.copy:
@@ -9261,105 +9776,58 @@ class _EmptyExplorerArea extends StatelessWidget {
   Future<void> _showMenu(BuildContext context, Offset? position) async {
     final path = currentPath;
     if (path == null) return;
-    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final selected = await showMenu<_EntryAction>(
+    final selected = await _showCascadingContextMenu(
       context: context,
-      position: position == null
-          ? RelativeRect.fromLTRB(
-              overlay.size.width / 2,
-              overlay.size.height / 2,
-              overlay.size.width / 2,
-              overlay.size.height / 2,
-            )
-          : RelativeRect.fromRect(
-              Rect.fromLTWH(position.dx, position.dy, 1, 1),
-              Offset.zero & overlay.size,
-            ),
+      position: position,
       items: [
-        PopupMenuItem(
-          value: _EntryAction.paste,
+        _ContextMenuSpec(
+          action: _EntryAction.paste,
+          label: language.t('explorer.paste'),
           enabled: canPaste,
-          child: Text(language.t('explorer.paste')),
         ),
-        const PopupMenuDivider(),
-        PopupMenuItem(
-          value: _EntryAction.create,
-          child: Row(children: [
-            Expanded(child: Text(language.t('explorer.create'))),
-            const Icon(Icons.chevron_right, size: 18),
-          ]),
+        const _ContextMenuSpec.divider(),
+        _ContextMenuSpec(
+          action: _EntryAction.create,
+          label: language.t('explorer.create'),
+          children: _createSubmenuSpecs(),
         ),
       ],
     );
-    if (selected != null) {
-      if (selected == _EntryAction.create) {
-        if (!context.mounted) return;
-        final child = await _showCreateSubmenu(context, position);
-        if (child != null) {
-          await onAction(path, child);
-        }
-        return;
-      }
+    if (selected != null && selected != _EntryAction.create) {
       await onAction(path, selected);
     }
   }
 
-  Future<_EntryAction?> _showCreateSubmenu(
-    BuildContext context,
-    Offset? position,
-  ) {
-    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
-    final contextBox = context.findRenderObject();
-    final fallback = contextBox is RenderBox
-        ? contextBox.localToGlobal(Offset(
-            contextBox.size.width,
-            math.min(48, contextBox.size.height) / 2,
-          ))
-        : Offset(overlay.size.width / 2, overlay.size.height / 2);
-    final source =
-        position == null ? fallback : position + const Offset(24, 24);
-    final anchor = Offset(
-      source.dx.clamp(8.0, overlay.size.width - 8).toDouble(),
-      source.dy.clamp(8.0, overlay.size.height - 8).toDouble(),
-    );
-    return showMenu<_EntryAction>(
-      context: context,
-      position: RelativeRect.fromRect(
-        Rect.fromLTWH(anchor.dx, anchor.dy, 1, 1),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        PopupMenuItem(
-          value: _EntryAction.createFolder,
-          child: Text(language.t('create.folder')),
+  List<_ContextMenuSpec> _createSubmenuSpecs() => [
+        _ContextMenuSpec(
+          action: _EntryAction.createFolder,
+          label: language.t('create.folder'),
         ),
-        PopupMenuItem(
-          value: _EntryAction.createPlain,
-          child: Text(language.t('create.plain')),
+        _ContextMenuSpec(
+          action: _EntryAction.createPlain,
+          label: language.t('create.plain'),
         ),
-        PopupMenuItem(
-          value: _EntryAction.createEncryptedPlain,
-          child: Text(language.t('create.encrypted.plain')),
+        _ContextMenuSpec(
+          action: _EntryAction.createEncryptedPlain,
+          label: language.t('create.encrypted.plain'),
         ),
-        PopupMenuItem(
-          value: _EntryAction.createCsv,
-          child: Text(language.t('create.csv')),
+        _ContextMenuSpec(
+          action: _EntryAction.createCsv,
+          label: language.t('create.csv'),
         ),
-        PopupMenuItem(
-          value: _EntryAction.createEncryptedCsv,
-          child: Text(language.t('create.encrypted.csv')),
+        _ContextMenuSpec(
+          action: _EntryAction.createEncryptedCsv,
+          label: language.t('create.encrypted.csv'),
         ),
-        PopupMenuItem(
-          value: _EntryAction.createImage,
-          child: Text(language.t('create.image')),
+        _ContextMenuSpec(
+          action: _EntryAction.createImage,
+          label: language.t('create.image'),
         ),
-        PopupMenuItem(
-          value: _EntryAction.createEncryptedImage,
-          child: Text(language.t('create.encrypted.image')),
+        _ContextMenuSpec(
+          action: _EntryAction.createEncryptedImage,
+          label: language.t('create.encrypted.image'),
         ),
-      ],
-    );
-  }
+      ];
 }
 
 class _PreviewPane extends StatelessWidget {
@@ -9642,23 +10110,7 @@ class _PreviewContent extends StatelessWidget {
           initialDelimiter: extension == '.tsv' ? '\t' : null,
         );
       }
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: const Color(0xFF101923),
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: SelectableText(
-          preview.text!,
-          style: const TextStyle(
-            color: Color(0xFFE8F0F7),
-            fontFamily: 'Consolas',
-            fontSize: 13,
-            height: 1.35,
-          ),
-        ),
-      );
+      return _CodePreview(text: preview.text!, fileName: preview.title);
     }
 
     return Card(
@@ -9815,7 +10267,7 @@ class _EbookPreviewState extends State<_EbookPreview> {
     final text = FileViewerService.normalizeReadableText(raw);
     if (text.isEmpty) return const <String>[];
     final paragraphs = text
-        .split(RegExp(r'\n{2,}|(?<=\.)\s+(?=[A-ZА-ЯЁ])'))
+        .split(RegExp(r'\n{2,}|(?<=\.)\s+(?=[A-Z\u0410-\u042F\u0401])'))
         .map((part) => part.trim())
         .where((part) => part.isNotEmpty);
     final pages = <String>[];
@@ -10374,12 +10826,19 @@ class _CsvPreviewState extends State<_CsvPreview> {
 }
 
 class _CodePreview extends StatelessWidget {
-  const _CodePreview({required this.text});
+  const _CodePreview({required this.text, this.fileName});
 
   final String text;
+  final String? fileName;
 
   @override
   Widget build(BuildContext context) {
+    const style = TextStyle(
+      color: Color(0xFFE8F0F7),
+      fontFamily: 'Consolas',
+      fontSize: 13,
+      height: 1.35,
+    );
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(14),
@@ -10387,16 +10846,397 @@ class _CodePreview extends StatelessWidget {
         color: const Color(0xFF101923),
         borderRadius: BorderRadius.circular(16),
       ),
-      child: SelectableText(
-        text,
-        style: const TextStyle(
-          color: Color(0xFFE8F0F7),
-          fontFamily: 'Consolas',
-          fontSize: 13,
-          height: 1.35,
+      child: SelectableText.rich(
+        TextSpan(
+          style: style,
+          children: _SyntaxHighlighter.highlight(
+            text,
+            fileName: fileName,
+            baseStyle: style,
+          ),
         ),
       ),
     );
+  }
+}
+
+class _SyntaxHighlighter {
+  _SyntaxHighlighter._();
+
+  static final _token = RegExp(
+    r'(/\*[\s\S]*?\*/|//[^\r\n]*|#[^\r\n]*|"(?:\\.|[^"\\])*"|'
+    r"'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b|[$@]?[A-Za-z_][A-Za-z0-9_#]*\b)",
+    multiLine: true,
+  );
+
+  static const _languages = {
+    '.c': 'cpp',
+    '.cc': 'cpp',
+    '.cpp': 'cpp',
+    '.cxx': 'cpp',
+    '.h': 'cpp',
+    '.hpp': 'cpp',
+    '.cs': 'csharp',
+    '.py': 'python',
+    '.pyw': 'python',
+    '.kt': 'kotlin',
+    '.kts': 'kotlin',
+    '.cmd': 'cmd',
+    '.bat': 'cmd',
+    '.ps1': 'powershell',
+    '.psm1': 'powershell',
+    '.psd1': 'powershell',
+    '.json': 'json',
+    '.yaml': 'yaml',
+    '.yml': 'yaml',
+    '.xml': 'xml',
+    '.html': 'html',
+    '.htm': 'html',
+    '.js': 'javascript',
+    '.ts': 'javascript',
+    '.dart': 'dart',
+  };
+
+  static const _keywords = {
+    'cpp': {
+      'alignas',
+      'alignof',
+      'auto',
+      'bool',
+      'break',
+      'case',
+      'catch',
+      'class',
+      'const',
+      'constexpr',
+      'continue',
+      'default',
+      'delete',
+      'do',
+      'double',
+      'else',
+      'enum',
+      'explicit',
+      'export',
+      'extern',
+      'false',
+      'float',
+      'for',
+      'friend',
+      'if',
+      'inline',
+      'int',
+      'long',
+      'namespace',
+      'new',
+      'noexcept',
+      'nullptr',
+      'operator',
+      'private',
+      'protected',
+      'public',
+      'return',
+      'short',
+      'sizeof',
+      'static',
+      'struct',
+      'switch',
+      'template',
+      'this',
+      'throw',
+      'true',
+      'try',
+      'typedef',
+      'typename',
+      'using',
+      'virtual',
+      'void',
+      'while',
+    },
+    'csharp': {
+      'abstract',
+      'async',
+      'await',
+      'base',
+      'bool',
+      'break',
+      'case',
+      'catch',
+      'class',
+      'const',
+      'decimal',
+      'default',
+      'delegate',
+      'do',
+      'double',
+      'else',
+      'enum',
+      'event',
+      'false',
+      'finally',
+      'float',
+      'for',
+      'foreach',
+      'if',
+      'int',
+      'interface',
+      'internal',
+      'is',
+      'lock',
+      'namespace',
+      'new',
+      'null',
+      'object',
+      'override',
+      'private',
+      'protected',
+      'public',
+      'readonly',
+      'return',
+      'sealed',
+      'static',
+      'string',
+      'struct',
+      'switch',
+      'this',
+      'throw',
+      'true',
+      'try',
+      'using',
+      'var',
+      'virtual',
+      'void',
+      'while',
+    },
+    'python': {
+      'and',
+      'as',
+      'assert',
+      'async',
+      'await',
+      'break',
+      'class',
+      'continue',
+      'def',
+      'del',
+      'elif',
+      'else',
+      'except',
+      'False',
+      'finally',
+      'for',
+      'from',
+      'global',
+      'if',
+      'import',
+      'in',
+      'is',
+      'lambda',
+      'None',
+      'nonlocal',
+      'not',
+      'or',
+      'pass',
+      'raise',
+      'return',
+      'True',
+      'try',
+      'while',
+      'with',
+      'yield',
+    },
+    'kotlin': {
+      'as',
+      'break',
+      'class',
+      'companion',
+      'continue',
+      'data',
+      'do',
+      'else',
+      'false',
+      'for',
+      'fun',
+      'if',
+      'in',
+      'interface',
+      'is',
+      'null',
+      'object',
+      'override',
+      'package',
+      'private',
+      'protected',
+      'public',
+      'return',
+      'sealed',
+      'super',
+      'this',
+      'throw',
+      'true',
+      'try',
+      'typealias',
+      'val',
+      'var',
+      'when',
+      'while',
+    },
+    'cmd': {
+      'echo',
+      'set',
+      'if',
+      'else',
+      'for',
+      'in',
+      'do',
+      'call',
+      'goto',
+      'exit',
+      'rem',
+      'shift',
+      'start',
+    },
+    'powershell': {
+      'begin',
+      'break',
+      'catch',
+      'class',
+      'continue',
+      'data',
+      'do',
+      'dynamicparam',
+      'else',
+      'elseif',
+      'end',
+      'exit',
+      'filter',
+      'finally',
+      'for',
+      'foreach',
+      'from',
+      'function',
+      'if',
+      'in',
+      'param',
+      'process',
+      'return',
+      'switch',
+      'throw',
+      'trap',
+      'try',
+      'until',
+      'using',
+      'var',
+      'while',
+    },
+    'dart': {
+      'abstract',
+      'async',
+      'await',
+      'break',
+      'case',
+      'catch',
+      'class',
+      'const',
+      'continue',
+      'default',
+      'deferred',
+      'do',
+      'dynamic',
+      'else',
+      'enum',
+      'export',
+      'extends',
+      'extension',
+      'false',
+      'final',
+      'finally',
+      'for',
+      'if',
+      'implements',
+      'import',
+      'in',
+      'is',
+      'late',
+      'new',
+      'null',
+      'operator',
+      'part',
+      'return',
+      'static',
+      'super',
+      'switch',
+      'this',
+      'throw',
+      'true',
+      'try',
+      'typedef',
+      'var',
+      'void',
+      'while',
+      'with',
+      'yield',
+    },
+  };
+
+  static List<TextSpan> highlight(
+    String text, {
+    String? fileName,
+    required TextStyle baseStyle,
+  }) {
+    final lang = _languageFor(fileName);
+    if (lang == null) return [TextSpan(text: text)];
+    final spans = <TextSpan>[];
+    var offset = 0;
+    for (final match in _token.allMatches(text)) {
+      if (match.start > offset) {
+        spans.add(TextSpan(text: text.substring(offset, match.start)));
+      }
+      final token = match.group(0)!;
+      spans.add(TextSpan(text: token, style: _styleFor(token, lang)));
+      offset = match.end;
+    }
+    if (offset < text.length) spans.add(TextSpan(text: text.substring(offset)));
+    return spans;
+  }
+
+  static String? _languageFor(String? fileName) {
+    if (fileName == null) return null;
+    final extension = FileViewerService.extensionForName(fileName);
+    return _languages[extension];
+  }
+
+  static TextStyle? _styleFor(String token, String lang) {
+    if (token.startsWith('//') ||
+        token.startsWith('/*') ||
+        token.startsWith('#') ||
+        token.toLowerCase().startsWith('rem ')) {
+      return const TextStyle(color: Color(0xFF7DCB85));
+    }
+    if (token.startsWith('"') || token.startsWith("'")) {
+      return const TextStyle(color: Color(0xFFFFD479));
+    }
+    if (RegExp(r'^\d').hasMatch(token)) {
+      return const TextStyle(color: Color(0xFF9CDCFE));
+    }
+    final normalized = token.startsWith(r'$') || token.startsWith('@')
+        ? token.substring(1)
+        : token;
+    final words = _keywords[lang] ?? const <String>{};
+    if (words.contains(normalized) ||
+        words.contains(normalized.toLowerCase())) {
+      return const TextStyle(
+        color: Color(0xFFB794F4),
+        fontWeight: FontWeight.w700,
+      );
+    }
+    if (token.startsWith(r'$')) {
+      return const TextStyle(color: Color(0xFF80CBC4));
+    }
+    if (token.startsWith('@')) {
+      return const TextStyle(color: Color(0xFFFFB86C));
+    }
+    return null;
   }
 }
 
@@ -10429,16 +11269,20 @@ class _PathTextField extends StatelessWidget {
           icon: Icon(pickDirectory
               ? Icons.create_new_folder_outlined
               : Icons.file_open_outlined),
-          onPressed: () => unawaited(_pick()),
+          onPressed: () => unawaited(_pick(context)),
         ),
       ),
     );
   }
 
-  Future<void> _pick() async {
-    final selected = pickDirectory
-        ? await PlatformServices.pickDirectory()
-        : await PlatformServices.pickFile();
+  Future<void> _pick(BuildContext context) async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (context) => _InAppPathPickerDialog(
+        pickDirectory: pickDirectory,
+        title: label,
+      ),
+    );
     if (selected == null || selected.trim().isEmpty) return;
     if (multiLine && controller.text.trim().isNotEmpty) {
       controller.text = '${controller.text.trimRight()}\n${selected.trim()}';
@@ -10446,6 +11290,316 @@ class _PathTextField extends StatelessWidget {
       controller.text = selected.trim();
     }
   }
+}
+
+class _SaveTextPathDialog extends StatefulWidget {
+  const _SaveTextPathDialog({
+    required this.language,
+    required this.suggestedName,
+  });
+
+  final AppLanguage language;
+  final String suggestedName;
+
+  @override
+  State<_SaveTextPathDialog> createState() => _SaveTextPathDialogState();
+}
+
+class _SaveTextPathDialogState extends State<_SaveTextPathDialog> {
+  late final TextEditingController _directoryController;
+  late final TextEditingController _nameController;
+
+  @override
+  void initState() {
+    super.initState();
+    _directoryController = TextEditingController();
+    _nameController = TextEditingController(text: widget.suggestedName);
+  }
+
+  @override
+  void dispose() {
+    _directoryController.dispose();
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.language.t('ocr.save.text')),
+      content: SizedBox(
+        width: 520,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          _PathTextField(
+            controller: _directoryController,
+            label: widget.language.t('picker.title.folder'),
+            pickDirectory: true,
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _nameController,
+            decoration: InputDecoration(
+              labelText: widget.language.t('explorer.name'),
+            ),
+          ),
+        ]),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text(widget.language.t('common.cancel')),
+        ),
+        FilledButton(
+          onPressed: () {
+            final dir = _directoryController.text.trim();
+            final name = _nameController.text.trim();
+            if (dir.isEmpty || name.isEmpty) return;
+            Navigator.pop(context,
+                '${dir.replaceAll(RegExp(r'[\\/]+$'), '')}${Platform.pathSeparator}$name');
+          },
+          child: Text(widget.language.t('picker.select')),
+        ),
+      ],
+    );
+  }
+}
+
+class _InAppPathPickerDialog extends StatefulWidget {
+  const _InAppPathPickerDialog({
+    required this.pickDirectory,
+    required this.title,
+  });
+
+  final bool pickDirectory;
+  final String title;
+
+  @override
+  State<_InAppPathPickerDialog> createState() => _InAppPathPickerDialogState();
+}
+
+class _InAppPathPickerDialogState extends State<_InAppPathPickerDialog> {
+  final _pathController = TextEditingController();
+  final _locations = <_PickerLocation>[];
+  var _entries = <FileSystemEntity>[];
+  String? _selectedPath;
+  String? _error;
+  var _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadLocations());
+  }
+
+  @override
+  void dispose() {
+    _pathController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadLocations() async {
+    final locations = <_PickerLocation>[];
+    if (Platform.isWindows) {
+      for (var code = 65; code <= 90; code++) {
+        final letter = String.fromCharCode(code);
+        final root = '$letter:\\';
+        if (await Directory(root).exists()) {
+          locations.add(_PickerLocation('Р”РёСЃРє $letter:', root));
+        }
+      }
+    } else {
+      locations.add(const _PickerLocation(
+          'РљРѕСЂРµРЅСЊ С„Р°Р№Р»РѕРІРѕР№ СЃРёСЃС‚РµРјС‹', '/'));
+      final home = Platform.environment['HOME'];
+      if (home != null && home.isNotEmpty && await Directory(home).exists()) {
+        locations.add(_PickerLocation('Р”РѕРјР°С€РЅСЏСЏ РїР°РїРєР°', home));
+      }
+      if (Platform.isAndroid) {
+        for (final path in const [
+          '/storage/emulated/0',
+          '/sdcard',
+          '/storage/self/primary',
+        ]) {
+          if (await Directory(path).exists()) {
+            locations
+                .add(_PickerLocation('РџР°РјСЏС‚СЊ С‚РµР»РµС„РѕРЅР°', path));
+            break;
+          }
+        }
+      }
+    }
+    try {
+      final hidden = await AppPaths.hiddenVaultDirectory();
+      locations.add(_PickerLocation(
+          'РЎРєСЂС‹С‚РѕРµ С…СЂР°РЅРёР»РёС‰Рµ РїСЂРѕРіСЂР°РјРјС‹', hidden.path));
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _locations
+        ..clear()
+        ..addAll(locations);
+      _loading = false;
+    });
+    if (locations.isNotEmpty) {
+      await _openPath(locations.first.path);
+    }
+  }
+
+  Future<void> _openPath(String path) async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final directory = Directory(path);
+      if (!await directory.exists()) {
+        throw FileSystemException('Path is not available', path);
+      }
+      final entries = await directory
+          .list(followLinks: false)
+          .where((entity) => entity is Directory || !widget.pickDirectory)
+          .toList();
+      entries.sort((a, b) {
+        final ad = a is Directory ? 0 : 1;
+        final bd = b is Directory ? 0 : 1;
+        if (ad != bd) return ad.compareTo(bd);
+        return _pickerName(a.path).toLowerCase().compareTo(
+              _pickerName(b.path).toLowerCase(),
+            );
+      });
+      if (!mounted) return;
+      setState(() {
+        _selectedPath = widget.pickDirectory ? path : null;
+        _pathController.text = path;
+        _entries = entries;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '$error';
+        _entries = const [];
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final narrow = MediaQuery.sizeOf(context).width < 720;
+    final locations = ListView(
+      shrinkWrap: narrow,
+      children: [
+        for (final location in _locations)
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.storage_outlined),
+            title: Text(location.name),
+            subtitle: Text(
+              location.path,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () => unawaited(_openPath(location.path)),
+          ),
+      ],
+    );
+    final files = _loading
+        ? const Center(child: CircularProgressIndicator())
+        : _error != null
+            ? Center(child: SelectableText(_error!))
+            : ListView.builder(
+                itemCount: _entries.length,
+                itemBuilder: (context, index) {
+                  final entity = _entries[index];
+                  final isDir = entity is Directory;
+                  final path = entity.path;
+                  final selected = path == _selectedPath;
+                  return ListTile(
+                    selected: selected,
+                    dense: true,
+                    leading: Icon(isDir
+                        ? Icons.folder_outlined
+                        : Icons.insert_drive_file_outlined),
+                    title: Text(_pickerName(path)),
+                    subtitle: Text(
+                      path,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () {
+                      if (isDir) {
+                        unawaited(_openPath(path));
+                      } else {
+                        setState(() => _selectedPath = path);
+                      }
+                    },
+                  );
+                },
+              );
+    return AlertDialog(
+      title: Text(widget.title),
+      content: SizedBox(
+        width: 860,
+        height: 560,
+        child: Column(children: [
+          TextField(
+            controller: _pathController,
+            decoration: InputDecoration(
+              labelText: 'РџСѓС‚СЊ',
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.arrow_forward),
+                onPressed: () => unawaited(_openPath(_pathController.text)),
+              ),
+            ),
+            onSubmitted: (value) => unawaited(_openPath(value)),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: narrow
+                ? Column(children: [
+                    SizedBox(height: 150, child: locations),
+                    const Divider(height: 1),
+                    Expanded(child: files),
+                  ])
+                : Row(children: [
+                    SizedBox(width: 260, child: locations),
+                    const VerticalDivider(width: 1),
+                    Expanded(child: files),
+                  ]),
+          ),
+        ]),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('РћС‚РјРµРЅР°'),
+        ),
+        FilledButton(
+          onPressed: _selectedPath == null
+              ? null
+              : () => Navigator.pop(context, _selectedPath),
+          child: const Text('Р’С‹Р±СЂР°С‚СЊ'),
+        ),
+      ],
+    );
+  }
+}
+
+class _PickerLocation {
+  const _PickerLocation(this.name, this.path);
+
+  final String name;
+  final String path;
+}
+
+String _pickerName(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final trimmed = normalized.endsWith('/') && normalized.length > 1
+      ? normalized.substring(0, normalized.length - 1)
+      : normalized;
+  final slash = trimmed.lastIndexOf('/');
+  return slash == -1 ? trimmed : trimmed.substring(slash + 1);
 }
 
 class _ImagePreviewNavigator extends StatefulWidget {
@@ -11303,6 +12457,7 @@ class _FloatingMediaDock extends StatefulWidget {
     required this.enableMiniVideo,
     required this.enableMiniAudio,
     required this.continueInBackground,
+    required this.externalFloatingPlayer,
     required this.onOpenFullScreen,
   });
 
@@ -11311,6 +12466,7 @@ class _FloatingMediaDock extends StatefulWidget {
   final bool enableMiniVideo;
   final bool enableMiniAudio;
   final bool continueInBackground;
+  final bool externalFloatingPlayer;
   final void Function(FilePreview preview, List<MediaPreviewItem> playlist)
       onOpenFullScreen;
 
@@ -11553,6 +12709,7 @@ class _BackgroundJobsPanelState extends State<_BackgroundJobsPanel> {
 
 class _FloatingMediaDockState extends State<_FloatingMediaDock> {
   Offset _offset = const Offset(24, 92);
+  bool _topMost = false;
 
   @override
   Widget build(BuildContext context) {
@@ -11577,12 +12734,20 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
         final videoHeight = math.min(190.0, size.height * 0.32);
         final height =
             isVideo && !widget.session.collapsed ? videoHeight + 58.0 : 92.0;
-        final left = _offset.dx
-            .clamp(8.0, math.max(8.0, size.width - width - 8))
-            .toDouble();
-        final top = _offset.dy
-            .clamp(8.0, math.max(8.0, size.height - height - 8))
-            .toDouble();
+        final canFloatOutside =
+            Platform.isWindows && widget.externalFloatingPlayer;
+        final minLeft = canFloatOutside ? -width + 72.0 : 8.0;
+        final maxLeft = canFloatOutside
+            ? size.width - 72.0
+            : math.max(8.0, size.width - width - 8);
+        final minTop = canFloatOutside ? -height + 48.0 : 8.0;
+        final maxTop = canFloatOutside
+            ? size.height - 48.0
+            : math.max(8.0, size.height - height - 8);
+        final left =
+            _offset.dx.clamp(minLeft, math.max(minLeft, maxLeft)).toDouble();
+        final top =
+            _offset.dy.clamp(minTop, math.max(minTop, maxTop)).toDouble();
         return Positioned(
           left: left,
           top: top,
@@ -11650,6 +12815,14 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
                       icon: const Icon(Icons.fullscreen),
                       tooltip: widget.language.t('preview.window'),
                     ),
+                    if (Platform.isWindows)
+                      IconButton(
+                        onPressed: () => unawaited(_toggleTopMost()),
+                        icon: Icon(_topMost
+                            ? Icons.push_pin
+                            : Icons.push_pin_outlined),
+                        tooltip: widget.language.t('media.pin.topmost'),
+                      ),
                     IconButton(
                       onPressed: () => unawaited(widget.session.close()),
                       icon: const Icon(Icons.close),
@@ -11663,6 +12836,12 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
         );
       },
     );
+  }
+
+  Future<void> _toggleTopMost() async {
+    final next = !_topMost;
+    await PlatformServices.setWindowAlwaysOnTop(next);
+    if (mounted) setState(() => _topMost = next);
   }
 }
 
@@ -12941,11 +14120,26 @@ class _ImageEditorDialogState extends State<_ImageEditorDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return Dialog.fullscreen(
       child: Scaffold(
+        endDrawer: compact
+            ? Drawer(
+                width: math.min(360, MediaQuery.sizeOf(context).width * 0.9),
+                child: SafeArea(child: _toolPanel()),
+              )
+            : null,
         appBar: AppBar(
           title: Text(widget.language.t('editor.image.title')),
           actions: [
+            if (compact)
+              Builder(
+                builder: (context) => IconButton(
+                  onPressed: () => Scaffold.of(context).openEndDrawer(),
+                  icon: const Icon(Icons.tune_outlined),
+                  tooltip: widget.language.t('editor.image.title'),
+                ),
+              ),
             IconButton(
               onPressed: _busy ? null : _save,
               icon: const Icon(Icons.save_outlined),
@@ -12953,132 +14147,135 @@ class _ImageEditorDialogState extends State<_ImageEditorDialog> {
             ),
           ],
         ),
-        body: Row(children: [
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Center(
-                child: AspectRatio(
-                  aspectRatio: _image.width / math.max(_image.height, 1),
-                  child: LayoutBuilder(builder: (context, constraints) {
-                    return GestureDetector(
-                      onPanStart: (details) {
-                        final box = context.findRenderObject() as RenderBox;
-                        _activeStroke =
-                            _DrawStroke(color: _brushColor, width: _brushWidth);
-                        _activeStroke!.points.add(_normalizePoint(
-                          box.globalToLocal(details.globalPosition),
-                          box.size,
-                        ));
-                        setState(() => _strokes.add(_activeStroke!));
-                      },
-                      onPanUpdate: (details) {
-                        final stroke = _activeStroke;
-                        if (stroke == null) return;
-                        final box = context.findRenderObject() as RenderBox;
-                        setState(() => stroke.points.add(_normalizePoint(
-                              box.globalToLocal(details.globalPosition),
-                              box.size,
-                            )));
-                      },
-                      onPanEnd: (_) => _activeStroke = null,
-                      child: Stack(fit: StackFit.expand, children: [
-                        Image.memory(_baseBytes, fit: BoxFit.contain),
-                        CustomPaint(painter: _StrokePainter(_strokes)),
-                      ]),
-                    );
-                  }),
-                ),
-              ),
-            ),
+        body: compact
+            ? _canvasPane()
+            : Row(children: [
+                Expanded(child: _canvasPane()),
+                SizedBox(width: 360, child: _toolPanel()),
+              ]),
+      ),
+    );
+  }
+
+  Widget _canvasPane() {
+    return Padding(
+      padding: EdgeInsets.all(MediaQuery.sizeOf(context).width < 520 ? 8 : 16),
+      child: Center(
+        child: AspectRatio(
+          aspectRatio: _image.width / math.max(_image.height, 1),
+          child: LayoutBuilder(builder: (context, constraints) {
+            return GestureDetector(
+              onPanStart: (details) {
+                final box = context.findRenderObject() as RenderBox;
+                _activeStroke =
+                    _DrawStroke(color: _brushColor, width: _brushWidth);
+                _activeStroke!.points.add(_normalizePoint(
+                  box.globalToLocal(details.globalPosition),
+                  box.size,
+                ));
+                setState(() => _strokes.add(_activeStroke!));
+              },
+              onPanUpdate: (details) {
+                final stroke = _activeStroke;
+                if (stroke == null) return;
+                final box = context.findRenderObject() as RenderBox;
+                setState(() => stroke.points.add(_normalizePoint(
+                      box.globalToLocal(details.globalPosition),
+                      box.size,
+                    )));
+              },
+              onPanEnd: (_) => _activeStroke = null,
+              child: Stack(fit: StackFit.expand, children: [
+                Image.memory(_baseBytes, fit: BoxFit.contain),
+                CustomPaint(painter: _StrokePainter(_strokes)),
+              ]),
+            );
+          }),
+        ),
+      ),
+    );
+  }
+
+  Widget _toolPanel() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _PathTextField(
+            controller: _outputController,
+            label: widget.language.t('editor.output.path'),
+            pickDirectory: false,
           ),
-          SizedBox(
-            width: 360,
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  TextField(
-                    controller: _outputController,
-                    decoration: InputDecoration(
-                      labelText: widget.language.t('editor.output.path'),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    initialValue: _format,
-                    decoration: InputDecoration(
-                      labelText: widget.language.t('editor.output.format'),
-                    ),
-                    items: const [
-                      DropdownMenuItem(value: 'png', child: Text('PNG')),
-                      DropdownMenuItem(value: 'jpg', child: Text('JPG')),
-                      DropdownMenuItem(value: 'bmp', child: Text('BMP')),
-                    ],
-                    onChanged: (value) =>
-                        setState(() => _format = value ?? 'png'),
-                  ),
-                  const Divider(height: 28),
-                  Wrap(spacing: 8, runSpacing: 8, children: [
-                    OutlinedButton.icon(
-                      onPressed: _rotateRight,
-                      icon: const Icon(Icons.rotate_right),
-                      label: Text(widget.language.t('editor.rotate.right')),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: _cropCenter,
-                      icon: const Icon(Icons.crop),
-                      label: Text(widget.language.t('editor.crop.center')),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: _undoLayer,
-                      icon: const Icon(Icons.undo),
-                      label: Text(widget.language.t('editor.layer.undo')),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: _clearLayers,
-                      icon: const Icon(Icons.layers_clear),
-                      label: Text(widget.language.t('editor.layer.clear')),
-                    ),
-                  ]),
-                  const SizedBox(height: 12),
-                  Text(widget.language.t('editor.draw.hint')),
-                  Slider(
-                    value: _brushWidth,
-                    min: 2,
-                    max: 24,
-                    label: _brushWidth.round().toString(),
-                    onChanged: (value) => setState(() => _brushWidth = value),
-                  ),
-                  SegmentedButton<Color>(
-                    segments: const [
-                      ButtonSegment(value: Colors.red, label: Text('Red')),
-                      ButtonSegment(value: Colors.blue, label: Text('Blue')),
-                      ButtonSegment(value: Colors.black, label: Text('Black')),
-                      ButtonSegment(value: Colors.white, label: Text('Erase')),
-                    ],
-                    selected: {_brushColor},
-                    onSelectionChanged: (value) =>
-                        setState(() => _brushColor = value.first),
-                  ),
-                  const SizedBox(height: 12),
-                  FilledButton.icon(
-                    onPressed: _busy ? null : _save,
-                    icon: _busy
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.save_outlined),
-                    label: Text(widget.language.t('editor.save.as')),
-                  ),
-                ],
-              ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            initialValue: _format,
+            decoration: InputDecoration(
+              labelText: widget.language.t('editor.output.format'),
             ),
+            items: const [
+              DropdownMenuItem(value: 'png', child: Text('PNG')),
+              DropdownMenuItem(value: 'jpg', child: Text('JPG')),
+              DropdownMenuItem(value: 'bmp', child: Text('BMP')),
+            ],
+            onChanged: (value) => setState(() => _format = value ?? 'png'),
           ),
-        ]),
+          const Divider(height: 28),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            OutlinedButton.icon(
+              onPressed: _rotateRight,
+              icon: const Icon(Icons.rotate_right),
+              label: Text(widget.language.t('editor.rotate.right')),
+            ),
+            OutlinedButton.icon(
+              onPressed: _cropCenter,
+              icon: const Icon(Icons.crop),
+              label: Text(widget.language.t('editor.crop.center')),
+            ),
+            OutlinedButton.icon(
+              onPressed: _undoLayer,
+              icon: const Icon(Icons.undo),
+              label: Text(widget.language.t('editor.layer.undo')),
+            ),
+            OutlinedButton.icon(
+              onPressed: _clearLayers,
+              icon: const Icon(Icons.layers_clear),
+              label: Text(widget.language.t('editor.layer.clear')),
+            ),
+          ]),
+          const SizedBox(height: 12),
+          Text(widget.language.t('editor.draw.hint')),
+          Slider(
+            value: _brushWidth,
+            min: 2,
+            max: 24,
+            label: _brushWidth.round().toString(),
+            onChanged: (value) => setState(() => _brushWidth = value),
+          ),
+          SegmentedButton<Color>(
+            segments: const [
+              ButtonSegment(value: Colors.red, label: Text('Red')),
+              ButtonSegment(value: Colors.blue, label: Text('Blue')),
+              ButtonSegment(value: Colors.black, label: Text('Black')),
+              ButtonSegment(value: Colors.white, label: Text('Erase')),
+            ],
+            selected: {_brushColor},
+            onSelectionChanged: (value) =>
+                setState(() => _brushColor = value.first),
+          ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: _busy ? null : _save,
+            icon: _busy
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.save_outlined),
+            label: Text(widget.language.t('editor.save.as')),
+          ),
+        ],
       ),
     );
   }

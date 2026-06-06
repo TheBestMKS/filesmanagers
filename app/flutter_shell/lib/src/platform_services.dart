@@ -86,6 +86,12 @@ class PlatformServices {
     }
   }
 
+  static Future<void> setWindowAlwaysOnTop(bool enabled) async {
+    if (Platform.isWindows) {
+      await _windowChannel.invokeMethod<void>('setTopMost', enabled);
+    }
+  }
+
   static Future<void> setScreenProtection(bool enabled) async {
     if (Platform.isAndroid) {
       await _channel.invokeMethod<void>('setScreenProtection', enabled);
