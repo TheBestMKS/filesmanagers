@@ -147,6 +147,7 @@ class CloudPluginRegistry {
   Future<List<CloudPluginDefinition>> loadPlugins() async {
     final pluginsDir = await AppPaths.pluginsDirectory();
     final deleted = await _deletedPluginIds(pluginsDir);
+    deleted.add('zvooq-music');
     await _removeObsoleteSamplePlugin(pluginsDir);
     await _ensureWebDavTemplates(pluginsDir, deleted);
     await _ensureRaidTemplates(pluginsDir, deleted);
@@ -165,6 +166,9 @@ class CloudPluginRegistry {
       try {
         final decoded = jsonDecode(await manifest.readAsString());
         if (decoded is Map<String, Object?>) {
+          if (decoded['id'] == 'zvooq-music') {
+            continue;
+          }
           plugins.add(
             CloudPluginDefinition.fromJson(
               decoded,

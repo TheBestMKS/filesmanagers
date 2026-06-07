@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
@@ -30,18 +31,35 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.15';
+const _appVersion = '0.12.16';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
-  WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
-  final initialSettings = await SecuritySettingsRepository()
-      .load()
-      .catchError((_) => const SecuritySettings());
-  AppLog.enabled = initialSettings.loggingEnabled;
-  unawaited(AppLog.write('Application start ${args.join(' ')}'));
-  runApp(SecureVaultApp(initialPath: args.isEmpty ? null : args.first));
+  await runZonedGuarded<Future<void>>(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+      unawaited(AppLog.write(
+        'Flutter error',
+        '${details.exceptionAsString()}\n${details.stack ?? ''}',
+      ));
+    };
+    ui.PlatformDispatcher.instance.onError = (error, stack) {
+      unawaited(AppLog.write('Platform dispatcher error', '$error\n$stack'));
+      return false;
+    };
+    MediaKit.ensureInitialized();
+    final initialSettings =
+        await SecuritySettingsRepository().load().catchError((error, stack) {
+      unawaited(AppLog.write('Failed to load settings', '$error\n$stack'));
+      return const SecuritySettings();
+    });
+    AppLog.enabled = initialSettings.loggingEnabled;
+    unawaited(AppLog.write('Application start ${args.join(' ')}'));
+    runApp(SecureVaultApp(initialPath: args.isEmpty ? null : args.first));
+  }, (error, stack) {
+    unawaited(AppLog.write('Uncaught zone error', '$error\n$stack'));
+  });
 }
 
 class SecureVaultApp extends StatelessWidget {
@@ -596,6 +614,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
 
   void _openPath(String path, {bool recordHistory = true}) {
     final previousPath = _currentPath;
+    final changedPath = previousPath == null ||
+        _normalizePath(previousPath) != _normalizePath(path);
     unawaited(_rememberOpenedFolder(path));
     unawaited(_applyFolderRuntimeProtection(path));
     setState(() {
@@ -618,6 +638,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _mediaPlaylist = const [];
       _imagePlaylist = const [];
       _selectedPaths = const <String>{};
+      if (changedPath) {
+        _searchQuery = '';
+        _searchFilters = const _SearchFilters();
+        _searchRecursive = false;
+      }
       _snapshot = _directorySnapshot(path);
     });
   }
@@ -1914,8 +1939,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       return [selectedItem];
     }
 
+    final sortedEntries = _sortModeForPath(parent).sort(snapshot.entries);
     final items = <MediaPreviewItem>[];
-    for (final entry in snapshot.entries) {
+    for (final entry in sortedEntries) {
       if (!entry.exists || entry.isDirectory) continue;
       final displayedKind = FileViewerService.kindForName(entry.name);
       final pathKind = FileViewerService.kindForName(entry.path);
@@ -2721,6 +2747,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   _FolderSortMode _sortModeForCurrentPath() {
     final path = _currentPath;
     if (path == null || _showingRecent) return _FolderSortMode.defaultMode;
+    return _sortModeForPath(path);
+  }
+
+  _FolderSortMode _sortModeForPath(String path) {
     return _FolderSortMode.parse(_settings.folderSortModes[path]);
   }
 
@@ -6750,8 +6780,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                               ),
                             _ExplorerOverflowMenu(
                               language: _language,
-                              sortLabel:
-                                  _sortModeForCurrentPath().label(_language),
+                              sortLabel: _language.t('sort.action'),
                               showHiddenFiles: _effectiveShowHiddenFiles,
                               showSystemFiles: _effectiveShowSystemFiles,
                               iconScale: 1,
@@ -9237,7 +9266,7 @@ class _ExplorerView extends StatelessWidget {
                 ),
                 _ExplorerOverflowMenu(
                   language: language,
-                  sortLabel: sortMode.label(language),
+                  sortLabel: language.t('sort.action'),
                   showHiddenFiles: showHiddenFiles,
                   showSystemFiles: showSystemFiles,
                   iconScale: toolbarIconScale,
@@ -9679,6 +9708,7 @@ class _EntryList extends StatelessWidget {
         }
         final listView = ListView.separated(
           padding: const EdgeInsets.all(12),
+          cacheExtent: 220,
           itemCount: sortedEntries.length + 1,
           separatorBuilder: (_, __) => const Divider(height: 1),
           itemBuilder: (context, i) {
@@ -10280,6 +10310,9 @@ class _EntryLeadingThumbnail extends StatelessWidget {
           child: Image.file(
             File(entry.path),
             fit: BoxFit.cover,
+            cacheWidth: (boxSize * MediaQuery.devicePixelRatioOf(context))
+                .round()
+                .clamp(48, 256),
             errorBuilder: (_, __, ___) => Icon(icon, color: color, size: size),
           ),
         );
@@ -12140,21 +12173,22 @@ class _InAppPathPickerDialogState extends State<_InAppPathPickerDialog> {
   }
 
   Future<void> _loadLocations() async {
+    final language = _pickerLanguage(context);
     final locations = <_PickerLocation>[];
     if (Platform.isWindows) {
       for (var code = 65; code <= 90; code++) {
         final letter = String.fromCharCode(code);
         final root = '$letter:\\';
         if (await Directory(root).exists()) {
-          locations.add(_PickerLocation('Р”РёСЃРє $letter:', root));
+          locations.add(
+              _PickerLocation('${language.t('picker.drive')} $letter:', root));
         }
       }
     } else {
-      locations.add(const _PickerLocation(
-          'РљРѕСЂРµРЅСЊ С„Р°Р№Р»РѕРІРѕР№ СЃРёСЃС‚РµРјС‹', '/'));
+      locations.add(_PickerLocation(language.t('picker.filesystem.root'), '/'));
       final home = Platform.environment['HOME'];
       if (home != null && home.isNotEmpty && await Directory(home).exists()) {
-        locations.add(_PickerLocation('Р”РѕРјР°С€РЅСЏСЏ РїР°РїРєР°', home));
+        locations.add(_PickerLocation(language.t('picker.home'), home));
       }
       if (Platform.isAndroid) {
         for (final path in const [
@@ -12164,7 +12198,7 @@ class _InAppPathPickerDialogState extends State<_InAppPathPickerDialog> {
         ]) {
           if (await Directory(path).exists()) {
             locations
-                .add(_PickerLocation('РџР°РјСЏС‚СЊ С‚РµР»РµС„РѕРЅР°', path));
+                .add(_PickerLocation(language.t('picker.phone.storage'), path));
             break;
           }
         }
@@ -12172,8 +12206,8 @@ class _InAppPathPickerDialogState extends State<_InAppPathPickerDialog> {
     }
     try {
       final hidden = await AppPaths.hiddenVaultDirectory();
-      locations.add(_PickerLocation(
-          'РЎРєСЂС‹С‚РѕРµ С…СЂР°РЅРёР»РёС‰Рµ РїСЂРѕРіСЂР°РјРјС‹', hidden.path));
+      locations.add(
+          _PickerLocation(language.t('location.hidden.vault'), hidden.path));
     } catch (_) {}
     if (!mounted) return;
     setState(() {
@@ -12228,6 +12262,7 @@ class _InAppPathPickerDialogState extends State<_InAppPathPickerDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final language = _pickerLanguage(context);
     final narrow = MediaQuery.sizeOf(context).width < 720;
     final locations = ListView(
       shrinkWrap: narrow,
@@ -12288,7 +12323,7 @@ class _InAppPathPickerDialogState extends State<_InAppPathPickerDialog> {
           TextField(
             controller: _pathController,
             decoration: InputDecoration(
-              labelText: 'РџСѓС‚СЊ',
+              labelText: language.t('common.path'),
               suffixIcon: IconButton(
                 icon: const Icon(Icons.arrow_forward),
                 onPressed: () => unawaited(_openPath(_pathController.text)),
@@ -12315,17 +12350,22 @@ class _InAppPathPickerDialogState extends State<_InAppPathPickerDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: const Text('РћС‚РјРµРЅР°'),
+          child: Text(language.t('common.cancel')),
         ),
         FilledButton(
           onPressed: _selectedPath == null
               ? null
               : () => Navigator.pop(context, _selectedPath),
-          child: const Text('Р’С‹Р±СЂР°С‚СЊ'),
+          child: Text(language.t('picker.select')),
         ),
       ],
     );
   }
+}
+
+AppLanguage _pickerLanguage(BuildContext context) {
+  final code = Localizations.localeOf(context).languageCode;
+  return AppLanguage.builtIn(code == 'en' ? 'en' : 'ru');
 }
 
 class _PickerLocation {
@@ -13451,7 +13491,6 @@ class _BackgroundJobsPanelState extends State<_BackgroundJobsPanel> {
 
 class _FloatingMediaDockState extends State<_FloatingMediaDock> {
   Offset _offset = const Offset(24, 92);
-  bool _topMost = false;
 
   @override
   Widget build(BuildContext context) {
@@ -13514,9 +13553,10 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
                   )
                 else
                   _MiniAudioHeader(item: item),
+                if (!isVideo || widget.session.collapsed)
+                  _MiniPositionSlider(player: widget.session.player),
                 Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 2),
                   child: Row(children: [
                     Expanded(
                       child: _MarqueeText(
@@ -13557,14 +13597,6 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
                       icon: const Icon(Icons.fullscreen),
                       tooltip: widget.language.t('preview.window'),
                     ),
-                    if (Platform.isWindows)
-                      IconButton(
-                        onPressed: () => unawaited(_toggleTopMost()),
-                        icon: Icon(_topMost
-                            ? Icons.push_pin
-                            : Icons.push_pin_outlined),
-                        tooltip: widget.language.t('media.pin.topmost'),
-                      ),
                     IconButton(
                       onPressed: () => unawaited(widget.session.close()),
                       icon: const Icon(Icons.close),
@@ -13579,11 +13611,53 @@ class _FloatingMediaDockState extends State<_FloatingMediaDock> {
       },
     );
   }
+}
 
-  Future<void> _toggleTopMost() async {
-    final next = !_topMost;
-    await PlatformServices.setWindowAlwaysOnTop(next);
-    if (mounted) setState(() => _topMost = next);
+class _MiniPositionSlider extends StatelessWidget {
+  const _MiniPositionSlider({required this.player});
+
+  final Player player;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 12,
+      child: StreamBuilder<Duration>(
+        stream: player.stream.duration,
+        initialData: player.state.duration,
+        builder: (context, durationSnapshot) {
+          final duration = durationSnapshot.data ?? Duration.zero;
+          return StreamBuilder<Duration>(
+            stream: player.stream.position,
+            initialData: player.state.position,
+            builder: (context, positionSnapshot) {
+              final position = positionSnapshot.data ?? Duration.zero;
+              final maxMs = math.max(duration.inMilliseconds, 1);
+              final value = position.inMilliseconds.clamp(0, maxMs).toDouble();
+              return SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 2,
+                  thumbShape:
+                      const RoundSliderThumbShape(enabledThumbRadius: 4),
+                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 9),
+                  tickMarkShape: SliderTickMarkShape.noTickMark,
+                ),
+                child: Slider(
+                  value: value,
+                  min: 0,
+                  max: maxMs.toDouble(),
+                  onChanged: duration == Duration.zero
+                      ? null
+                      : (value) => player.seek(
+                            Duration(milliseconds: value.round()),
+                          ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
   }
 }
 
@@ -13600,7 +13674,7 @@ class _MiniAudioHeader extends StatelessWidget {
       builder: (context, snapshot) {
         final bytes = snapshot.data;
         return Container(
-          height: 34,
+          height: 30,
           color: Theme.of(context).colorScheme.secondaryContainer,
           child: Row(children: [
             const SizedBox(width: 10),
@@ -13608,10 +13682,10 @@ class _MiniAudioHeader extends StatelessWidget {
               ClipRRect(
                 borderRadius: BorderRadius.circular(6),
                 child: Image.memory(bytes,
-                    width: 28, height: 28, fit: BoxFit.cover),
+                    width: 24, height: 24, fit: BoxFit.cover),
               )
             else
-              const Icon(Icons.graphic_eq, size: 28),
+              const Icon(Icons.graphic_eq, size: 24),
             const SizedBox(width: 10),
             Expanded(
               child: _MarqueeText(
@@ -13746,7 +13820,10 @@ class _MediaTransportControls extends StatelessWidget {
                 children: [
                   ..._primaryControls(),
                   const SizedBox(width: 8),
-                  if (compact) _combinedControls() else ..._expandedControls(),
+                  if (compact)
+                    _combinedControls(context)
+                  else
+                    ..._expandedControls(context),
                 ],
               );
             },
@@ -13820,7 +13897,7 @@ class _MediaTransportControls extends StatelessWidget {
         ),
       ];
 
-  List<Widget> _expandedControls() => [
+  List<Widget> _expandedControls(BuildContext context) => [
         IconButton(
           onPressed: onShuffle,
           icon: Icon(shuffle ? Icons.shuffle_on : Icons.shuffle),
@@ -13852,7 +13929,7 @@ class _MediaTransportControls extends StatelessWidget {
           },
         ),
         _tracksMenuButton(),
-        _equalizerMenuButton(),
+        _equalizerMenuButton(context),
       ];
 
   Widget _tracksMenuButton() => StreamBuilder<Tracks>(
@@ -13869,18 +13946,20 @@ class _MediaTransportControls extends StatelessWidget {
         },
       );
 
-  Widget _equalizerMenuButton() => PopupMenuButton<String>(
+  Widget _equalizerMenuButton(BuildContext context) => PopupMenuButton<String>(
         tooltip: language.t('media.equalizer'),
         icon: const Icon(Icons.equalizer_outlined),
-        onSelected: (preset) =>
-            unawaited(_applyEqualizerPreset(player, preset)),
+        onSelected: (preset) => preset == 'custom'
+            ? unawaited(_showCustomEqualizerDialog(context))
+            : unawaited(_applyEqualizerPreset(player, preset)),
         itemBuilder: (_) => [
           for (final preset in const [
             'flat',
             'bass',
             'voice',
             'treble',
-            'loudness'
+            'loudness',
+            'custom',
           ])
             PopupMenuItem(
               value: preset,
@@ -13889,7 +13968,7 @@ class _MediaTransportControls extends StatelessWidget {
         ],
       );
 
-  Widget _combinedControls() => StreamBuilder<Tracks>(
+  Widget _combinedControls(BuildContext menuContext) => StreamBuilder<Tracks>(
         stream: player.stream.tracks,
         initialData: player.state.tracks,
         builder: (context, snapshot) {
@@ -13898,7 +13977,7 @@ class _MediaTransportControls extends StatelessWidget {
           return PopupMenuButton<Object>(
             tooltip: language.t('media.more.controls'),
             icon: const Icon(Icons.tune_outlined),
-            onSelected: _selectExtraControl,
+            onSelected: (value) => _selectExtraControl(value, menuContext),
             itemBuilder: (_) => [
               CheckedPopupMenuItem<Object>(
                 value: 'shuffle',
@@ -13933,7 +14012,8 @@ class _MediaTransportControls extends StatelessWidget {
                 'bass',
                 'voice',
                 'treble',
-                'loudness'
+                'loudness',
+                'custom',
               ])
                 PopupMenuItem<Object>(
                   value: 'eq:$preset',
@@ -13966,7 +14046,7 @@ class _MediaTransportControls extends StatelessWidget {
           ),
       ];
 
-  void _selectExtraControl(Object value) {
+  void _selectExtraControl(Object value, [BuildContext? context]) {
     if (value == 'shuffle') {
       onShuffle();
       return;
@@ -13981,7 +14061,12 @@ class _MediaTransportControls extends StatelessWidget {
       return;
     }
     if (value is String && value.startsWith('eq:')) {
-      unawaited(_applyEqualizerPreset(player, value.substring(3)));
+      final preset = value.substring(3);
+      if (preset == 'custom') {
+        if (context != null) unawaited(_showCustomEqualizerDialog(context));
+      } else {
+        unawaited(_applyEqualizerPreset(player, preset));
+      }
       return;
     }
     if (value is AudioTrack) {
@@ -14021,6 +14106,154 @@ class _MediaTransportControls extends StatelessWidget {
     };
     try {
       await (player.platform as dynamic).setProperty('af', filter);
+    } catch (_) {
+      // Some platform backends do not expose mpv audio filters.
+    }
+  }
+
+  Future<void> _showCustomEqualizerDialog(BuildContext context) async {
+    var bandCount = 10;
+    var preamp = 0.0;
+    var gains = List<double>.filled(bandCount, 0);
+    final result = await showDialog<({double preamp, List<double> gains})>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          void resize(int count) {
+            setDialogState(() {
+              bandCount = count;
+              gains = List<double>.generate(
+                count,
+                (index) => index < gains.length ? gains[index] : 0,
+              );
+            });
+          }
+
+          final frequencies = _equalizerFrequencies(bandCount);
+          return AlertDialog(
+            title: Text(language.t('media.equalizer.custom')),
+            content: SizedBox(
+              width: 560,
+              child: SingleChildScrollView(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  DropdownButtonFormField<int>(
+                    initialValue: bandCount,
+                    decoration: InputDecoration(
+                      labelText: language.t('media.equalizer.bands'),
+                    ),
+                    items: [
+                      for (final value in const [5, 10, 15, 20, 31])
+                        DropdownMenuItem(value: value, child: Text('$value')),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) resize(value);
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  _dbSlider(
+                    context,
+                    label: language.t('media.equalizer.preamp'),
+                    value: preamp,
+                    onChanged: (value) => setDialogState(() => preamp = value),
+                  ),
+                  const Divider(),
+                  for (var i = 0; i < gains.length; i++)
+                    _dbSlider(
+                      context,
+                      label: _frequencyLabel(frequencies[i]),
+                      value: gains[i],
+                      onChanged: (value) =>
+                          setDialogState(() => gains[i] = value),
+                    ),
+                ]),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(language.t('common.cancel')),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(
+                  context,
+                  (preamp: 0.0, gains: List<double>.filled(bandCount, 0)),
+                ),
+                child: Text(language.t('search.clear')),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(
+                  context,
+                  (preamp: preamp, gains: List<double>.from(gains)),
+                ),
+                child: Text(language.t('search.apply')),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (result == null) return;
+    await _applyCustomEqualizer(player, result.preamp, result.gains);
+  }
+
+  Widget _dbSlider(
+    BuildContext context, {
+    required String label,
+    required double value,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Row(children: [
+      SizedBox(width: 82, child: Text(label)),
+      Expanded(
+        child: Slider(
+          min: -12,
+          max: 12,
+          divisions: 48,
+          value: value.clamp(-12, 12).toDouble(),
+          label: '${value.toStringAsFixed(1)} dB',
+          onChanged: onChanged,
+        ),
+      ),
+      SizedBox(
+        width: 58,
+        child: Text(
+          '${value.toStringAsFixed(1)} dB',
+          textAlign: TextAlign.end,
+          style: Theme.of(context).textTheme.labelSmall,
+        ),
+      ),
+    ]);
+  }
+
+  List<double> _equalizerFrequencies(int count) {
+    const min = 32.0;
+    const max = 16000.0;
+    if (count <= 1) return const [1000];
+    return [
+      for (var i = 0; i < count; i++)
+        min * math.pow(max / min, i / (count - 1)),
+    ];
+  }
+
+  String _frequencyLabel(double frequency) {
+    if (frequency >= 1000) return '${(frequency / 1000).toStringAsFixed(1)}k';
+    return frequency.round().toString();
+  }
+
+  Future<void> _applyCustomEqualizer(
+    Player player,
+    double preamp,
+    List<double> gains,
+  ) async {
+    final frequencies = _equalizerFrequencies(gains.length);
+    final filters = <String>[
+      if (preamp.abs() >= .05) 'volume=${preamp.toStringAsFixed(1)}dB',
+      for (var i = 0; i < gains.length; i++)
+        if (gains[i].abs() >= .05)
+          'equalizer=f=${frequencies[i].round()}:t=q:w=1:g=${gains[i].toStringAsFixed(1)}',
+    ];
+    try {
+      await (player.platform as dynamic).setProperty('af', filters.join(','));
     } catch (_) {
       // Some platform backends do not expose mpv audio filters.
     }

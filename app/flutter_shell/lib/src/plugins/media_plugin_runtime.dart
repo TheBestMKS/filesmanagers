@@ -238,9 +238,7 @@ class WebMusicPluginService {
     final trimmed = value.trim();
     final withScheme =
         Uri.tryParse(trimmed)?.hasScheme == true ? trimmed : 'https://$trimmed';
-    final uri = Uri.parse(withScheme);
-    if (uri.path.isEmpty || uri.path.endsWith('/')) return uri;
-    return uri.replace(path: '${uri.path}/');
+    return Uri.parse(withScheme);
   }
 
   List<String> _searchPathCandidates(PluginMediaSection section, Uri base) {

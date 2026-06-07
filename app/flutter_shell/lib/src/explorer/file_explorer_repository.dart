@@ -786,12 +786,7 @@ Get-PnpDevice -Class WPD -Status OK |
     }
     final mtpPath = _MtpVirtualPath.tryParse(path);
     if (mtpPath != null) {
-      return FilePreview(
-        title: _displayNameForPath(path),
-        subtitle:
-            'MTP files are browsed through the Windows device bridge. Copy the file locally or open it externally to preview it.',
-        contentKind: FileContentKind.unknown,
-      );
+      return _previewMtpFile(mtpPath);
     }
 
     final file = File(path);
@@ -1600,6 +1595,117 @@ Get-PnpDevice -Class WPD -Status OK |
       bytes: bytes,
       sourcePath: remote.fullPath,
     );
+  }
+
+  Future<FilePreview> _previewMtpFile(_MtpVirtualPath mtp) async {
+    final name = mtp.segments.isEmpty ? mtp.deviceName : mtp.segments.last;
+    if (!Platform.isWindows) {
+      return FilePreview(
+        title: name,
+        subtitle: 'MTP preview is available through the Windows WPD bridge.',
+        contentKind: FileContentKind.unknown,
+      );
+    }
+    final tempDir = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}'
+      'securevault_mtp_${DateTime.now().microsecondsSinceEpoch}',
+    );
+    try {
+      await tempDir.create(recursive: true);
+      final copiedPath = await _copyMtpFileToTemporary(mtp, tempDir);
+      final file = File(copiedPath);
+      final bytes = await file.readAsBytes();
+      return FileViewerService.previewBytes(
+        name: name,
+        subtitle: 'MTP file, ${bytes.length} bytes',
+        bytes: bytes,
+        sourcePath: mtp.fullPath,
+      );
+    } catch (error) {
+      return FilePreview(
+        title: name,
+        subtitle: 'MTP preview failed: $error',
+        contentKind: FileContentKind.unknown,
+      );
+    } finally {
+      await tempDir.delete(recursive: true).catchError((_) => tempDir);
+    }
+  }
+
+  Future<String> _copyMtpFileToTemporary(
+    _MtpVirtualPath mtp,
+    Directory targetDir,
+  ) async {
+    if (mtp.segments.isEmpty) {
+      throw const FileSystemException('MTP device root is not a file.');
+    }
+    const script = r'''
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$deviceName = $env:SV_MTP_DEVICE
+$segments = @()
+$decoded = ConvertFrom-Json -InputObject $env:SV_MTP_SEGMENTS
+if ($decoded -is [array]) { $segments = @($decoded) } else { $segments = @($decoded) }
+$targetDir = $env:SV_MTP_TARGET
+New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+$shell = New-Object -ComObject Shell.Application
+$root = $shell.NameSpace(17)
+if (-not $root) { throw 'Windows portable devices namespace is unavailable.' }
+$device = $root.Items() | Where-Object { $_.Name -eq $deviceName } | Select-Object -First 1
+if (-not $device) { throw "MTP device not found: $deviceName" }
+$folder = $device.GetFolder
+for ($i = 0; $i -lt ($segments.Count - 1); $i++) {
+  $segment = [string]$segments[$i]
+  $child = $folder.Items() | Where-Object { $_.Name -eq $segment } | Select-Object -First 1
+  if (-not $child -or -not $child.IsFolder) { throw "MTP folder not found: $segment" }
+  $folder = $child.GetFolder
+}
+$fileName = [string]$segments[$segments.Count - 1]
+$item = $folder.Items() | Where-Object { $_.Name -eq $fileName } | Select-Object -First 1
+if (-not $item) { throw "MTP file not found: $fileName" }
+if ($item.IsFolder) { throw "MTP item is a folder: $fileName" }
+$target = $shell.NameSpace($targetDir)
+if (-not $target) { throw "Target folder is unavailable: $targetDir" }
+$target.CopyHere($item, 16)
+$deadline = (Get-Date).AddSeconds(90)
+$copied = Join-Path $targetDir $item.Name
+while ((Get-Date) -lt $deadline) {
+  if (Test-Path -LiteralPath $copied) {
+    $info = Get-Item -LiteralPath $copied
+    if ($info.Length -gt 0 -or $item.Size -eq 0) {
+      [pscustomobject]@{ path = $copied } | ConvertTo-Json -Compress
+      exit 0
+    }
+  }
+  Start-Sleep -Milliseconds 250
+}
+throw "Timed out copying MTP file: $fileName"
+''';
+    final result = await Process.run(
+      'powershell',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      environment: <String, String>{
+        'SV_MTP_DEVICE': mtp.deviceName,
+        'SV_MTP_SEGMENTS': jsonEncode(mtp.segments),
+        'SV_MTP_TARGET': targetDir.path,
+      },
+      stdoutEncoding: utf8,
+      stderrEncoding: utf8,
+      runInShell: false,
+    ).timeout(const Duration(seconds: 100));
+    if (result.exitCode != 0) {
+      throw ProcessException(
+        'powershell',
+        const <String>[],
+        result.stderr.toString(),
+        result.exitCode,
+      );
+    }
+    final decoded = jsonDecode(result.stdout.toString().trim());
+    if (decoded is Map && decoded['path'] != null) {
+      return decoded['path'].toString();
+    }
+    throw const FormatException('MTP bridge did not return copied file path.');
   }
 
   Future<DirectorySnapshot> _listMtpDirectory(_MtpVirtualPath mtp) async {

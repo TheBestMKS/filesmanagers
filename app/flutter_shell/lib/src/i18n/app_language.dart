@@ -96,6 +96,7 @@ class AppLanguage {
     'favorites.open.all': 'Show all favorites',
     'locations.heading': 'LOCATIONS',
     'locations.add': 'Add location',
+    'location.hidden.vault': 'Program hidden vault',
     'locations.add.empty':
         'Install or configure a network/cloud plugin to add a new location.',
     'locations.open.all': 'Show all locations',
@@ -133,6 +134,7 @@ class AppLanguage {
     'locations.connection.available': 'Connection available',
     'locations.connection.unavailable': 'Connection unavailable',
     'sort.title': 'Folder sorting',
+    'sort.action': 'Sorting',
     'sort.by': 'Sort by',
     'sort.name': 'Name',
     'sort.modified': 'Modified',
@@ -235,6 +237,10 @@ class AppLanguage {
     'picker.title.file': 'Choose file',
     'picker.title.folder': 'Choose folder',
     'picker.select': 'Choose',
+    'picker.drive': 'Drive',
+    'picker.filesystem.root': 'File system root',
+    'picker.home': 'Home folder',
+    'picker.phone.storage': 'Phone storage',
     'security.account': 'User or group',
     'security.read': 'Read',
     'security.write': 'Write',
@@ -631,6 +637,9 @@ class AppLanguage {
     'media.equalizer.voice': 'Voice',
     'media.equalizer.treble': 'Treble boost',
     'media.equalizer.loudness': 'Loudness',
+    'media.equalizer.custom': 'Custom',
+    'media.equalizer.bands': 'Number of bands',
+    'media.equalizer.preamp': 'Preamp',
     'about.features.media.session':
         'Audio and video share one media session across preview, full-window mode and mini-player, with resume positions and media-key control.',
     'about.features.plugins':
@@ -777,6 +786,7 @@ class AppLanguage {
     'favorites.open.all': 'Показать все избранное',
     'locations.heading': 'РАСПОЛОЖЕНИЯ',
     'locations.add': 'Добавить расположение',
+    'location.hidden.vault': 'Скрытое хранилище программы',
     'locations.add.empty':
         'Установите или настройте сетевой/облачный плагин, чтобы добавить расположение.',
     'locations.open.all': 'Показать все расположения',
@@ -814,6 +824,7 @@ class AppLanguage {
     'locations.connection.available': 'Подключение доступно',
     'locations.connection.unavailable': 'Подключение недоступно',
     'sort.title': 'Сортировка папки',
+    'sort.action': 'Сортировка',
     'sort.by': 'Сортировать по',
     'sort.name': 'Имя',
     'sort.modified': 'Дата изменения',
@@ -921,6 +932,10 @@ class AppLanguage {
     'picker.title.file': 'Выбор файла',
     'picker.title.folder': 'Выбор папки',
     'picker.select': 'Выбрать',
+    'picker.drive': 'Диск',
+    'picker.filesystem.root': 'Корень файловой системы',
+    'picker.home': 'Домашняя папка',
+    'picker.phone.storage': 'Память телефона',
     'security.account': 'Пользователь или группа',
     'security.read': 'Чтение',
     'security.write': 'Запись',
@@ -1327,6 +1342,9 @@ class AppLanguage {
     'media.equalizer.voice': 'Голос',
     'media.equalizer.treble': 'Больше высоких',
     'media.equalizer.loudness': 'Громкость/плотность',
+    'media.equalizer.custom': 'Пользовательский',
+    'media.equalizer.bands': 'Количество полос',
+    'media.equalizer.preamp': 'Усиление',
     'about.features.media.session':
         'Аудио и видео используют одну media-сессию для preview, режима во все окно и мини-плеера, с позициями продолжения и управлением media-клавишами.',
     'about.features.plugins':
