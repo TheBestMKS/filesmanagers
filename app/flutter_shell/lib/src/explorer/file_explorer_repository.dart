@@ -1323,14 +1323,26 @@ Get-PnpDevice -Class WPD -Status OK |
 
   Future<FileSystemEntity> copyEntityToDirectory(
     String sourcePath,
-    String targetDirectory,
-  ) async {
+    String targetDirectory, {
+    void Function(int completedBytes, int totalBytes)? onProgress,
+    bool Function()? shouldCancel,
+  }) async {
     final type = await FileSystemEntity.type(sourcePath, followLinks: false);
     final targetDir = Directory(targetDirectory);
     await targetDir.create(recursive: true);
     if (type == FileSystemEntityType.directory) {
       final target = await _availableDirectory(targetDir, basename(sourcePath));
-      await _copyDirectory(Directory(sourcePath), target);
+      final total = await _directorySize(Directory(sourcePath));
+      var completed = 0;
+      await _copyDirectory(
+        Directory(sourcePath),
+        target,
+        shouldCancel: shouldCancel,
+        onBytesCopied: (bytes) {
+          completed += bytes;
+          onProgress?.call(completed, total);
+        },
+      );
       return target;
     }
     if (type == FileSystemEntityType.file) {
@@ -1338,6 +1350,8 @@ Get-PnpDevice -Class WPD -Status OK |
         File(sourcePath),
         targetDir,
         preferredName: basename(sourcePath),
+        onProgress: onProgress,
+        shouldCancel: shouldCancel,
       );
     }
     throw FileSystemException('Path not found', sourcePath);
@@ -3037,17 +3051,52 @@ $items | ConvertTo-Json -Compress -Depth 4
     return candidate;
   }
 
-  Future<void> _copyDirectory(Directory source, Directory target) async {
+  Future<void> _copyDirectory(
+    Directory source,
+    Directory target, {
+    void Function(int bytes)? onBytesCopied,
+    bool Function()? shouldCancel,
+  }) async {
     await target.create(recursive: true);
     await for (final entity in source.list(followLinks: false)) {
+      if (shouldCancel?.call() == true) {
+        throw const FileSystemException('Cancelled');
+      }
       final name = basename(entity.path);
       final nextPath = '${target.path}${Platform.pathSeparator}$name';
       if (entity is Directory) {
-        await _copyDirectory(entity, Directory(nextPath));
+        await _copyDirectory(
+          entity,
+          Directory(nextPath),
+          onBytesCopied: onBytesCopied,
+          shouldCancel: shouldCancel,
+        );
       } else if (entity is File) {
-        await entity.copy(nextPath);
+        var lastCompleted = 0;
+        await _copyFileToDirectory(
+          entity,
+          target,
+          preferredName: name,
+          shouldCancel: shouldCancel,
+          onProgress: (completed, _) {
+            final delta = completed - lastCompleted;
+            lastCompleted = completed;
+            if (delta > 0) onBytesCopied?.call(delta);
+          },
+        );
       }
     }
+  }
+
+  Future<int> _directorySize(Directory source) async {
+    var total = 0;
+    await for (final entity
+        in source.list(recursive: true, followLinks: false)) {
+      if (entity is File) {
+        total += await entity.length().catchError((_) => 0);
+      }
+    }
+    return math.max(1, total);
   }
 
   Future<bool> _fileContentMatches(

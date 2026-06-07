@@ -1,6 +1,6 @@
 # Защищенное хранилище файлов - Flutter Shell
 
-Flutter-оболочка SecureVault версии `0.12.17`.
+Flutter-оболочка SecureVault версии `0.12.18`.
 
 ## Что делает оболочка
 

@@ -31,7 +31,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.17';
+const _appVersion = '0.12.18';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -337,6 +337,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Set<String> _selectedPaths = const <String>{};
   bool _lockOnNextResume = false;
   final List<_BackgroundJob> _backgroundJobs = <_BackgroundJob>[];
+  OverlayEntry? _backgroundJobsOverlayEntry;
+  bool _backgroundJobsOverlayUpdateQueued = false;
   _ReadingSession? _readingSession;
   Timer? _readingTimer;
   Timer? _locationsRefreshTimer;
@@ -358,6 +360,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     WidgetsBinding.instance.removeObserver(this);
     _readingTimer?.cancel();
     _locationsRefreshTimer?.cancel();
+    _backgroundJobsOverlayEntry?.remove();
+    _backgroundJobsOverlayEntry = null;
     unawaited(PlatformServices.stopSpeaking());
     super.dispose();
   }
@@ -832,13 +836,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   void _handleExplorerMenuAction(_ExplorerMenuAction action) {
     switch (action) {
       case _ExplorerMenuAction.upload:
-        _importFile();
+        unawaited(_importFile());
       case _ExplorerMenuAction.download:
-        _exportFile();
+        unawaited(_exportFile());
       case _ExplorerMenuAction.downloadUrl:
-        _showYtDlpDownloadDialog(_currentPath);
+        unawaited(_showYtDlpDownloadDialog(_currentPath));
       case _ExplorerMenuAction.sort:
-        _sortDialog();
+        unawaited(_sortDialog());
       case _ExplorerMenuAction.toggleHidden:
         unawaited(_toggleHiddenFiles());
       case _ExplorerMenuAction.toggleSystem:
@@ -2881,6 +2885,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       plainText: _language.t('transfer.upload.plain'),
     );
     if (options == null) return;
+    unawaited(_runImportFile(options));
+  }
+
+  Future<void> _runImportFile(TransferOptions options) async {
     final sourceSize = options.sourcePath == null
         ? 1
         : await File(options.sourcePath!).length().catchError((_) => 1);
@@ -2934,6 +2942,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       plainText: _language.t('transfer.download.plain'),
     );
     if (options == null) return;
+    unawaited(_runExportFile(selected, options));
+  }
+
+  Future<void> _runExportFile(
+    ExplorerEntry selected,
+    TransferOptions options,
+  ) async {
     final totalBytes = math.max(1, selected.sizeBytes);
     final job = _startBackgroundJob(
       _language.t('transfer.download.title'),
@@ -3008,9 +3023,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       case _EntryAction.openAsVideo:
         await _openEntryAs(entry, 'video');
       case _EntryAction.encrypt:
-        await _encryptSelectedFile(entry);
+        unawaited(_encryptSelectedFile(entry));
       case _EntryAction.decrypt:
-        await _decryptSelectedFile(entry);
+        unawaited(_decryptSelectedFile(entry));
       case _EntryAction.copy:
         setState(() {
           _clipboardPaths = [entry.path];
@@ -3026,7 +3041,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         });
         _snack(_language.t('snack.cut'));
       case _EntryAction.paste:
-        await _pasteClipboard(entry.isDirectory ? entry.path : _currentPath);
+        unawaited(
+          _pasteClipboard(entry.isDirectory ? entry.path : _currentPath),
+        );
       case _EntryAction.delete:
         await _deleteEntry(entry);
       case _EntryAction.rename:
@@ -3036,7 +3053,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       case _EntryAction.send:
         _snack(_language.t('snack.send.next'));
       case _EntryAction.unzip:
-        await _unzipEntry(entry);
+        unawaited(_unzipEntry(entry));
       case _EntryAction.addFavorite:
       case _EntryAction.removeFavorite:
         await _toggleFavorite(entry);
@@ -3092,6 +3109,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   _BackgroundJob _startBackgroundJob(String title, {int total = 1}) {
     final job = _BackgroundJob(title: title, total: math.max(1, total));
     setState(() => _backgroundJobs.add(job));
+    _queueBackgroundJobsOverlayUpdate();
     return job;
   }
 
@@ -3109,11 +3127,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       if (done != null) job.done = done;
       if (failed != null) job.failed = failed;
     });
+    _queueBackgroundJobsOverlayUpdate();
     if (done == true || failed == true) {
       Timer(const Duration(seconds: 3), () {
         if (!mounted || !_backgroundJobs.contains(job)) return;
         if (job.done || job.failed) {
           setState(() => _backgroundJobs.remove(job));
+          _queueBackgroundJobsOverlayUpdate();
         }
       });
     }
@@ -3122,11 +3142,49 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   void _cancelBackgroundJob(_BackgroundJob job) {
     if (!mounted || !_backgroundJobs.contains(job)) return;
     setState(() => job.cancelled = true);
+    _queueBackgroundJobsOverlayUpdate();
   }
 
   void _removeBackgroundJob(_BackgroundJob job) {
     if (!mounted) return;
     setState(() => _backgroundJobs.remove(job));
+    _queueBackgroundJobsOverlayUpdate();
+  }
+
+  void _queueBackgroundJobsOverlayUpdate() {
+    if (!mounted || _backgroundJobsOverlayUpdateQueued) return;
+    _backgroundJobsOverlayUpdateQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _backgroundJobsOverlayUpdateQueued = false;
+      if (!mounted) {
+        _backgroundJobsOverlayEntry?.remove();
+        _backgroundJobsOverlayEntry = null;
+        return;
+      }
+      if (_backgroundJobs.isEmpty) {
+        _backgroundJobsOverlayEntry?.remove();
+        _backgroundJobsOverlayEntry = null;
+        return;
+      }
+      final overlay = Overlay.maybeOf(context, rootOverlay: true);
+      if (overlay == null) return;
+      final entry = _backgroundJobsOverlayEntry ??= OverlayEntry(
+        builder: (_) => _BackgroundJobsPanel(
+          jobs: _backgroundJobs,
+          language: _language,
+          autoCollapseSeconds: _settings.progressAutoCollapseSeconds,
+          onCancel: _cancelBackgroundJob,
+          onRemove: _removeBackgroundJob,
+          onToggleCollapsed: (job) {
+            if (!mounted) return;
+            setState(() => job.collapsed = !job.collapsed);
+            _queueBackgroundJobsOverlayUpdate();
+          },
+        ),
+      );
+      if (!entry.mounted) overlay.insert(entry);
+      entry.markNeedsBuild();
+    });
   }
 
   Future<void> _handleEmptyAreaAction(
@@ -3219,7 +3277,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _snack(_language.t('snack.deleted'));
         await _refresh();
       case _EntryAction.zipSelected:
-        await _archiveSelected(paths);
+        unawaited(_archiveSelected(paths));
       default:
         _snack(_language.t('selection.unsupported.bulk'));
     }
@@ -3255,7 +3313,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       ),
     );
     if (archiveName == null || archiveName.trim().isEmpty) return;
+    final job = _startBackgroundJob(
+      _language.t('selection.zip'),
+      total: math.max(1, paths.length),
+    );
     try {
+      _updateBackgroundJob(job, status: archiveName.trim());
       final file = await _explorer.createZipFromPaths(
         paths,
         Directory(targetPath),
@@ -3263,10 +3326,17 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
             ? archiveName.trim()
             : '${archiveName.trim()}.zip',
       );
+      _updateBackgroundJob(
+        job,
+        completed: math.max(1, paths.length),
+        done: true,
+        status: file.path,
+      );
       _clearSelection();
       _snack('${_language.t('snack.created')} ${file.path}');
       await _refresh();
     } catch (error) {
+      _updateBackgroundJob(job, failed: true, status: '$error');
       _snack('${_language.t('snack.operation.error')} $error');
     }
   }
@@ -3274,16 +3344,29 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   Future<void> _pasteClipboard(String? targetDirectory) async {
     final sources = _clipboardPaths;
     if (sources.isEmpty || targetDirectory == null) return;
+    final job = _startBackgroundJob(
+      _language.t('explorer.paste'),
+      total: math.max(1, sources.length),
+    );
     try {
       final results = <FileSystemEntity>[];
+      var completed = 0;
       for (final source in sources) {
+        if (job.cancelled) break;
+        _updateBackgroundJob(job, completed: completed, status: source);
         if (_isHttpMedia(source)) {
           results.add(await _pasteHttpMedia(source, targetDirectory));
+          _updateBackgroundJob(job, completed: ++completed, status: source);
           continue;
         }
         results.add(_clipboardCut
             ? await _explorer.moveEntityToDirectory(source, targetDirectory)
-            : await _explorer.copyEntityToDirectory(source, targetDirectory));
+            : await _explorer.copyEntityToDirectory(
+                source,
+                targetDirectory,
+                shouldCancel: () => job.cancelled,
+              ));
+        _updateBackgroundJob(job, completed: ++completed, status: source);
       }
       if (_clipboardCut) {
         setState(() {
@@ -3292,9 +3375,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
           _clipboardCut = false;
         });
       }
+      _updateBackgroundJob(
+        job,
+        completed: math.max(1, completed),
+        done: true,
+        status: _language.t('jobs.done'),
+      );
       _snack('${_language.t('snack.pasted')} ${results.length}');
       await _refresh();
     } catch (error) {
+      _updateBackgroundJob(job, failed: true, status: '$error');
       _snack('${_language.t('snack.operation.error')} $error');
     }
   }
@@ -6893,16 +6983,6 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                     Expanded(child: body)
                   ]);
                 },
-              ),
-              _BackgroundJobsPanel(
-                jobs: _backgroundJobs,
-                language: _language,
-                autoCollapseSeconds: _settings.progressAutoCollapseSeconds,
-                onCancel: _cancelBackgroundJob,
-                onRemove: _removeBackgroundJob,
-                onToggleCollapsed: (job) => setState(
-                  () => job.collapsed = !job.collapsed,
-                ),
               ),
               _FloatingMediaDock(
                 session: _sharedMediaSession,
@@ -13397,42 +13477,46 @@ class _BackgroundJobsPanelState extends State<_BackgroundJobsPanel> {
   @override
   Widget build(BuildContext context) {
     if (widget.jobs.isEmpty) return const SizedBox.shrink();
-    return LayoutBuilder(builder: (context, constraints) {
-      final visibleJobs = widget.jobs.where((job) => !job.collapsed).toList();
-      final panelHeight = _compact
-          ? 72.0
-          : math.min(
-              constraints.maxHeight - 24,
-              92.0 + math.max(1, visibleJobs.length) * 78.0,
-            );
-      final panelWidth = _compact
-          ? 72.0
-          : math.min(680.0, math.max(280.0, constraints.maxWidth - 32));
-      final initial = Offset(
-        16,
-        math.max(8, constraints.maxHeight - panelHeight - 16),
-      );
-      final rawOffset = _offset ?? initial;
-      final left = rawOffset.dx
-          .clamp(8.0, math.max(8.0, constraints.maxWidth - panelWidth - 8))
-          .toDouble();
-      final top = rawOffset.dy
-          .clamp(8.0, math.max(8.0, constraints.maxHeight - panelHeight - 8))
-          .toDouble();
-      return Positioned(
-        left: left,
-        top: top,
-        width: panelWidth,
-        child: GestureDetector(
-          onPanUpdate: (details) => setState(() {
-            _offset = Offset(left, top) + details.delta;
-          }),
-          child: _compact
-              ? _buildCompact(context)
-              : _buildExpanded(context, visibleJobs, panelHeight),
-        ),
-      );
-    });
+    return Positioned.fill(
+      child: LayoutBuilder(builder: (context, constraints) {
+        final visibleJobs = widget.jobs.where((job) => !job.collapsed).toList();
+        final panelHeight = _compact
+            ? 72.0
+            : math.min(
+                constraints.maxHeight - 24,
+                92.0 + math.max(1, visibleJobs.length) * 78.0,
+              );
+        final panelWidth = _compact
+            ? 72.0
+            : math.min(680.0, math.max(280.0, constraints.maxWidth - 32));
+        final initial = Offset(
+          16,
+          math.max(8, constraints.maxHeight - panelHeight - 16),
+        );
+        final rawOffset = _offset ?? initial;
+        final left = rawOffset.dx
+            .clamp(8.0, math.max(8.0, constraints.maxWidth - panelWidth - 8))
+            .toDouble();
+        final top = rawOffset.dy
+            .clamp(8.0, math.max(8.0, constraints.maxHeight - panelHeight - 8))
+            .toDouble();
+        return Stack(children: [
+          Positioned(
+            left: left,
+            top: top,
+            width: panelWidth,
+            child: GestureDetector(
+              onPanUpdate: (details) => setState(() {
+                _offset = Offset(left, top) + details.delta;
+              }),
+              child: _compact
+                  ? _buildCompact(context)
+                  : _buildExpanded(context, visibleJobs, panelHeight),
+            ),
+          ),
+        ]);
+      }),
+    );
   }
 
   Widget _buildCompact(BuildContext context) {
