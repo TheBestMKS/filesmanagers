@@ -176,8 +176,9 @@ class TorrentService {
     TorrentFileEntry file, {
     Duration waitForFirstBytes = const Duration(seconds: 10),
   }) async {
-    final local = await downloadedFile(metadata, file);
-    if (await _hasPlayableBytes(local, file)) return local;
+    final candidates = await downloadedFileCandidates(metadata, file);
+    final ready = await _firstPlayableCandidate(candidates, file);
+    if (ready != null) return ready;
 
     try {
       await _startDownloadDetached(metadata, selectedFiles: [file]);
@@ -187,23 +188,27 @@ class TorrentService {
 
     final deadline = DateTime.now().add(waitForFirstBytes);
     while (DateTime.now().isBefore(deadline)) {
-      if (await _hasPlayableBytes(local, file)) return local;
+      final ready = await _firstPlayableCandidate(candidates, file);
+      if (ready != null) return ready;
       await Future<void>.delayed(const Duration(milliseconds: 350));
     }
-    return await local.exists() ? local : null;
+    for (final candidate in candidates) {
+      if (await candidate.exists()) return candidate;
+    }
+    return null;
   }
 
   Future<Uri> streamingUri(
     TorrentMetadata metadata,
     TorrentFileEntry file,
   ) async {
-    final local = await downloadedFile(metadata, file);
+    final candidates = await downloadedFileCandidates(metadata, file);
     final streamer = _streamer ??= await _TorrentHttpStreamer.start();
     return streamer.add(
       _TorrentStreamSource(
         metadata: metadata,
         file: file,
-        localFile: local,
+        localCandidates: candidates,
         startDownload: () => _startDownloadDetached(
           metadata,
           selectedFiles: [file],
@@ -248,6 +253,16 @@ class TorrentService {
     final length = await local.length().catchError((_) => 0);
     if (file.sizeBytes <= 0) return length > 0;
     return length >= math.min(file.sizeBytes, 256 * 1024);
+  }
+
+  Future<File?> _firstPlayableCandidate(
+    List<File> candidates,
+    TorrentFileEntry file,
+  ) async {
+    for (final candidate in candidates) {
+      if (await _hasPlayableBytes(candidate, file)) return candidate;
+    }
+    return null;
   }
 
   Future<String> _aria2Executable() async {
@@ -307,13 +322,13 @@ class _TorrentStreamSource {
   _TorrentStreamSource({
     required this.metadata,
     required this.file,
-    required this.localFile,
+    required this.localCandidates,
     required this.startDownload,
   });
 
   final TorrentMetadata metadata;
   final TorrentFileEntry file;
-  final File localFile;
+  final List<File> localCandidates;
   final Future<void> Function() startDownload;
   Future<void>? _downloadStart;
 
@@ -442,7 +457,7 @@ class _TorrentHttpStreamer {
         return;
       }
       await response.flush();
-      await _writeRange(response, source.localFile, start, end);
+      await _writeRange(response, source, start, end);
     } catch (error) {
       try {
         response.statusCode = HttpStatus.internalServerError;
@@ -482,7 +497,7 @@ class _TorrentHttpStreamer {
 
   Future<void> _writeRange(
     HttpResponse response,
-    File file,
+    _TorrentStreamSource source,
     int start,
     int end,
   ) async {
@@ -490,6 +505,7 @@ class _TorrentHttpStreamer {
     var idleTicks = 0;
     const maxIdleTicks = 2400; // 10 minutes at 250 ms, enough for slow peers.
     while (position <= end) {
+      final file = await _bestAvailableFile(source, position);
       if (!await file.exists()) {
         await Future<void>.delayed(const Duration(milliseconds: 250));
         if (++idleTicks > maxIdleTicks) break;
@@ -508,6 +524,23 @@ class _TorrentHttpStreamer {
       await response.flush();
     }
     await response.close();
+  }
+
+  Future<File> _bestAvailableFile(
+    _TorrentStreamSource source,
+    int position,
+  ) async {
+    File? firstExisting;
+    for (final candidate in source.localCandidates) {
+      if (!await candidate.exists()) continue;
+      firstExisting ??= candidate;
+      final length = await candidate.length().catchError((_) => 0);
+      if (length > position) return candidate;
+    }
+    return firstExisting ??
+        (source.localCandidates.isNotEmpty
+            ? source.localCandidates.first
+            : File(source.file.name));
   }
 
   ContentType _contentTypeFor(String name) {

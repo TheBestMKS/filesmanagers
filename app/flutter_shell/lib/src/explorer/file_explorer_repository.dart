@@ -853,7 +853,11 @@ Get-PnpDevice -Class WPD -Status OK |
     return _readCryptParameters(await _readCryptHeaderBytes(file));
   }
 
-  Future<File> importFile(TransferOptions options) async {
+  Future<File> importFile(
+    TransferOptions options, {
+    void Function(int completedBytes, int totalBytes)? onProgress,
+    bool Function()? shouldCancel,
+  }) async {
     final sourcePath = options.sourcePath;
     if (sourcePath == null || sourcePath.isEmpty) {
       throw ArgumentError('Не указан исходный файл.');
@@ -870,9 +874,13 @@ Get-PnpDevice -Class WPD -Status OK |
             source,
             targetDir,
             password: _requirePassword(options.password),
+            onProgress: onProgress,
+            shouldCancel: shouldCancel,
           )
         : await _copyFileToDirectory(source, targetDir,
-            preferredName: basename(source.path));
+            preferredName: basename(source.path),
+            onProgress: onProgress,
+            shouldCancel: shouldCancel);
 
     if (options.deleteSourceAfter) {
       await source.delete();
@@ -880,7 +888,12 @@ Get-PnpDevice -Class WPD -Status OK |
     return result;
   }
 
-  Future<File> exportFile(String sourcePath, TransferOptions options) async {
+  Future<File> exportFile(
+    String sourcePath,
+    TransferOptions options, {
+    void Function(int completedBytes, int totalBytes)? onProgress,
+    bool Function()? shouldCancel,
+  }) async {
     final source = File(sourcePath);
     if (!await source.exists()) {
       throw FileSystemException('Файл не найден', sourcePath);
@@ -893,19 +906,26 @@ Get-PnpDevice -Class WPD -Status OK |
     if (options.asEncrypted) {
       result = sourceKind == ExplorerEntryKind.encryptedFile
           ? await _copyFileToDirectory(source, targetDir,
-              preferredName: basename(source.path))
+              preferredName: basename(source.path),
+              onProgress: onProgress,
+              shouldCancel: shouldCancel)
           : await encryptFileToDirectory(source, targetDir,
-              password: _requirePassword(options.password));
+              password: _requirePassword(options.password),
+              onProgress: onProgress,
+              shouldCancel: shouldCancel);
     } else {
       if (sourceKind == ExplorerEntryKind.encryptedFile) {
         final opened = await _decryptAppCrypt(await source.readAsBytes(),
             password: _requirePassword(options.password));
         final target = await _availableFile(targetDir, opened.name);
         await target.writeAsBytes(opened.payload);
+        onProgress?.call(opened.payload.length, opened.payload.length);
         result = target;
       } else {
         result = await _copyFileToDirectory(source, targetDir,
-            preferredName: basename(source.path));
+            preferredName: basename(source.path),
+            onProgress: onProgress,
+            shouldCancel: shouldCancel);
       }
     }
 
@@ -2947,10 +2967,43 @@ $items | ConvertTo-Json -Compress -Depth 4
     return out.toBytes();
   }
 
-  Future<File> _copyFileToDirectory(File source, Directory targetDir,
-      {required String preferredName}) async {
+  Future<File> _copyFileToDirectory(
+    File source,
+    Directory targetDir, {
+    required String preferredName,
+    void Function(int completedBytes, int totalBytes)? onProgress,
+    bool Function()? shouldCancel,
+  }) async {
     final target = await _availableFile(targetDir, preferredName);
-    return source.copy(target.path);
+    final total = await source.length();
+    var completed = 0;
+    final input = source.openRead();
+    final output = target.openWrite();
+    try {
+      await for (final chunk in input) {
+        if (shouldCancel?.call() == true) {
+          throw const FileSystemException('Cancelled');
+        }
+        output.add(chunk);
+        completed += chunk.length;
+        onProgress?.call(completed, total);
+        await Future<void>.delayed(Duration.zero);
+      }
+      await output.flush();
+      await output.close();
+      onProgress?.call(total, total);
+      return target;
+    } catch (_) {
+      try {
+        await output.close();
+      } catch (_) {}
+      if (await target.exists()) {
+        try {
+          await target.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
   }
 
   Future<File> _availableFile(Directory targetDir, String preferredName) async {

@@ -31,7 +31,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.16';
+const _appVersion = '0.12.17';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -835,6 +835,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _importFile();
       case _ExplorerMenuAction.download:
         _exportFile();
+      case _ExplorerMenuAction.downloadUrl:
+        _showYtDlpDownloadDialog(_currentPath);
       case _ExplorerMenuAction.sort:
         _sortDialog();
       case _ExplorerMenuAction.toggleHidden:
@@ -1595,11 +1597,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         _imagePlaylist = const [];
         _flashPlaylist = const [];
       });
-      if (_shouldOpenMediaFullscreen(preview, forceFullScreen)) {
-        _showPreviewWindow(preview);
-      } else if (_shouldPlayInExistingMini(preview) ||
+      if (_shouldPlayInLocationMini(preview, forceFullScreen) ||
+          _shouldPlayInExistingMini(preview) ||
           (_isMediaLibraryPage && _isPlayablePreview(preview))) {
         await _playMediaPreviewInSession(preview, playlist);
+      } else if (_shouldOpenMediaFullscreen(preview, forceFullScreen)) {
+        _showPreviewWindow(preview);
       }
       if (_rememberRecentForEntry(entry)) {
         final next =
@@ -1705,13 +1708,14 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     }
     if (mounted &&
         openedPreview != null &&
-        _shouldOpenMediaFullscreen(openedPreview, forceFullScreen)) {
-      _showPreviewWindow(openedPreview);
-    } else if (mounted &&
-        openedPreview != null &&
-        (_shouldPlayInExistingMini(openedPreview) ||
+        (_shouldPlayInLocationMini(openedPreview, forceFullScreen) ||
+            _shouldPlayInExistingMini(openedPreview) ||
             (_isMediaLibraryPage && _isPlayablePreview(openedPreview)))) {
       await _playMediaPreviewInSession(openedPreview, _mediaPlaylist);
+    } else if (mounted &&
+        openedPreview != null &&
+        _shouldOpenMediaFullscreen(openedPreview, forceFullScreen)) {
+      _showPreviewWindow(openedPreview);
     }
     if (_rememberRecentForEntry(entry)) {
       final next = await _settingsRepo.recordRecentFile(_settings, entry.path);
@@ -2877,11 +2881,41 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       plainText: _language.t('transfer.upload.plain'),
     );
     if (options == null) return;
+    final sourceSize = options.sourcePath == null
+        ? 1
+        : await File(options.sourcePath!).length().catchError((_) => 1);
+    final job = _startBackgroundJob(
+      _language.t('transfer.upload.title'),
+      total: math.max(1, sourceSize),
+    );
+    var lastUiProgress = DateTime.fromMillisecondsSinceEpoch(0);
     try {
-      final file = await _explorer.importFile(options);
+      final file = await _explorer.importFile(
+        options,
+        shouldCancel: () => job.cancelled,
+        onProgress: (completed, total) {
+          final now = DateTime.now();
+          if (completed >= total ||
+              now.difference(lastUiProgress).inMilliseconds >= 220) {
+            lastUiProgress = now;
+            _updateBackgroundJob(
+              job,
+              completed: completed.clamp(0, math.max(1, total)).toInt(),
+              status: options.sourcePath ?? '',
+            );
+          }
+        },
+      );
+      _updateBackgroundJob(
+        job,
+        completed: math.max(1, sourceSize),
+        done: true,
+        status: file.path,
+      );
       _snack('${_language.t('snack.uploaded')} ${file.path}');
       await _refresh();
     } catch (error) {
+      _updateBackgroundJob(job, failed: true, status: '$error');
       _snack('${_language.t('snack.upload.error')} $error');
     }
   }
@@ -2900,11 +2934,40 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       plainText: _language.t('transfer.download.plain'),
     );
     if (options == null) return;
+    final totalBytes = math.max(1, selected.sizeBytes);
+    final job = _startBackgroundJob(
+      _language.t('transfer.download.title'),
+      total: totalBytes,
+    );
+    var lastUiProgress = DateTime.fromMillisecondsSinceEpoch(0);
     try {
-      final file = await _explorer.exportFile(selected.path, options);
+      final file = await _explorer.exportFile(
+        selected.path,
+        options,
+        shouldCancel: () => job.cancelled,
+        onProgress: (completed, total) {
+          final now = DateTime.now();
+          if (completed >= total ||
+              now.difference(lastUiProgress).inMilliseconds >= 220) {
+            lastUiProgress = now;
+            _updateBackgroundJob(
+              job,
+              completed: completed.clamp(0, math.max(1, totalBytes)).toInt(),
+              status: selected.path,
+            );
+          }
+        },
+      );
+      _updateBackgroundJob(
+        job,
+        completed: totalBytes,
+        done: true,
+        status: file.path,
+      );
       _snack('${_language.t('snack.downloaded')} ${file.path}');
       await _refresh();
     } catch (error) {
+      _updateBackgroundJob(job, failed: true, status: '$error');
       _snack('${_language.t('snack.download.error')} $error');
     }
   }
@@ -3737,7 +3800,12 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _snack(_language.t('selection.zip.local.only'));
       return;
     }
+    final job = _startBackgroundJob(
+      _language.t('explorer.unzip'),
+      total: math.max(1, entry.sizeBytes),
+    );
     try {
+      _updateBackgroundJob(job, status: entry.path);
       final file = File(entry.path);
       final extension = FileViewerService.extensionForName(entry.path);
       final target = extension == '.zip'
@@ -3749,9 +3817,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
               file,
               Directory(file.parent.path),
             );
+      _updateBackgroundJob(
+        job,
+        completed: math.max(1, entry.sizeBytes),
+        done: true,
+        status: target.path,
+      );
       _snack('${_language.t('snack.unzipped')} ${target.path}');
       await _refresh();
     } catch (error) {
+      _updateBackgroundJob(job, failed: true, status: '$error');
       _snack('${_language.t('snack.operation.error')} $error');
     }
   }
@@ -5558,6 +5633,16 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       _sharedMediaSession.active &&
       _sharedMediaSession.collapsed;
 
+  bool _shouldPlayInLocationMini(FilePreview preview, bool forceFullScreen) {
+    if (forceFullScreen ||
+        _isMediaLibraryPage ||
+        !_isPlayablePreview(preview)) {
+      return false;
+    }
+    if (!_settings.continueMediaInBackground) return false;
+    return _isMiniPlaybackAllowedForPath(preview.sourcePath);
+  }
+
   bool _shouldOpenMediaFullscreen(FilePreview preview, bool forceFullScreen) {
     if (_shouldPlayInExistingMini(preview)) return false;
     if (forceFullScreen) return true;
@@ -6783,6 +6868,10 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
                               sortLabel: _language.t('sort.action'),
                               showHiddenFiles: _effectiveShowHiddenFiles,
                               showSystemFiles: _effectiveShowSystemFiles,
+                              ytDlpEnabled: _pluginRuntime().plugins.any(
+                                    (plugin) =>
+                                        plugin.id == 'yt-dlp-downloader',
+                                  ),
                               iconScale: 1,
                               onSelected: _handleExplorerMenuAction,
                             ),
@@ -7348,6 +7437,7 @@ enum _PreviewAction {
 enum _ExplorerMenuAction {
   upload,
   download,
+  downloadUrl,
   sort,
   toggleHidden,
   toggleSystem,
@@ -9269,6 +9359,7 @@ class _ExplorerView extends StatelessWidget {
                   sortLabel: language.t('sort.action'),
                   showHiddenFiles: showHiddenFiles,
                   showSystemFiles: showSystemFiles,
+                  ytDlpEnabled: ytDlpEnabled,
                   iconScale: toolbarIconScale,
                   onSelected: onExplorerMenuAction,
                 ),
@@ -9362,6 +9453,7 @@ class _ExplorerOverflowMenu extends StatelessWidget {
     required this.sortLabel,
     required this.showHiddenFiles,
     required this.showSystemFiles,
+    required this.ytDlpEnabled,
     required this.iconScale,
     required this.onSelected,
   });
@@ -9370,6 +9462,7 @@ class _ExplorerOverflowMenu extends StatelessWidget {
   final String sortLabel;
   final bool showHiddenFiles;
   final bool showSystemFiles;
+  final bool ytDlpEnabled;
   final double iconScale;
   final ValueChanged<_ExplorerMenuAction> onSelected;
 
@@ -9387,6 +9480,11 @@ class _ExplorerOverflowMenu extends StatelessWidget {
           value: _ExplorerMenuAction.download,
           child: Text(language.t('explorer.download')),
         ),
+        if (ytDlpEnabled)
+          PopupMenuItem(
+            value: _ExplorerMenuAction.downloadUrl,
+            child: Text(language.t('plugin.ytdlp.download.url')),
+          ),
         PopupMenuItem(
           value: _ExplorerMenuAction.sort,
           child: Text(sortLabel),
