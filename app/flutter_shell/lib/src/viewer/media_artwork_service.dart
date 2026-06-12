@@ -134,7 +134,7 @@ class MediaArtworkService {
   }
 
   static List<int> _cacheSalt(String key) => sha256
-      .convert(utf8.encode('securevault.thumbnail.salt:$key'))
+      .convert(utf8.encode('filesmanagers.thumbnail.salt:$key'))
       .bytes
       .take(16)
       .toList();
@@ -142,11 +142,21 @@ class MediaArtworkService {
   static Future<String> _deviceSecret() async {
     final appData = await AppPaths.appDataDirectory();
     final file = File(
+      '${appData.path}${Platform.pathSeparator}filesmanagers_device_secret.key',
+    );
+    final legacyFile = File(
       '${appData.path}${Platform.pathSeparator}securevault_device_secret.key',
     );
     if (await file.exists()) {
       final existing = (await file.readAsString()).trim();
       if (existing.isNotEmpty) return existing;
+    }
+    if (await legacyFile.exists()) {
+      final existing = (await legacyFile.readAsString()).trim();
+      if (existing.isNotEmpty) {
+        await file.writeAsString(existing, flush: true);
+        return existing;
+      }
     }
     final secret = base64UrlEncode(VaultCrypto.randomBytes(32));
     await file.writeAsString(secret, flush: true);

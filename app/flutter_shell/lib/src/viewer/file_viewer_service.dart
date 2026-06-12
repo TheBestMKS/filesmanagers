@@ -387,9 +387,9 @@ class FileViewerService {
   static String _fallbackText(FileContentKind kind) {
     return switch (kind) {
       FileContentKind.video =>
-        'Video preview is protected in memory. Native playback plugins require Windows symlink support on this machine, so SecureVault does not write decrypted video to disk automatically.',
+        'Video preview is protected in memory. Native playback plugins require Windows symlink support on this machine, so filesmanagers does not write decrypted video to disk automatically.',
       FileContentKind.audio =>
-        'Audio preview is protected in memory. Native playback plugins require Windows symlink support on this machine, so SecureVault does not write decrypted audio to disk automatically.',
+        'Audio preview is protected in memory. Native playback plugins require Windows symlink support on this machine, so filesmanagers does not write decrypted audio to disk automatically.',
       FileContentKind.document =>
         'This document type is recognized. Text extraction is built in for PDF, DOCX, ODT, XLSX, PPTX, and RTF where possible.',
       FileContentKind.ebook =>

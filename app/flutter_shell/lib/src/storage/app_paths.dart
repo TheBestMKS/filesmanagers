@@ -4,8 +4,10 @@ import 'dart:io';
 class AppPaths {
   const AppPaths._();
 
-  static const _storageFileName = 'securevault_storage.json';
-  static const _programDataFolder = 'SecureVaultData';
+  static const _storageFileName = 'filesmanagers_storage.json';
+  static const _legacyStorageFileName = 'securevault_storage.json';
+  static const _programDataFolder = 'filesmanagersData';
+  static const _legacyProgramDataFolder = 'SecureVaultData';
   static const _pluginsFolder = 'plugins';
 
   static Future<Directory> appDataDirectory() async {
@@ -16,13 +18,14 @@ class AppPaths {
   }
 
   static Future<Directory> programDataDirectory() async {
-    final override = Platform.environment['SECUREVAULT_DATA_DIR'];
+    final override = Platform.environment['FILESMANAGERS_DATA_DIR'] ??
+        Platform.environment['SECUREVAULT_DATA_DIR'];
     if (override != null && override.trim().isNotEmpty) {
       return _ensureDirectory(Directory(override.trim()));
     }
     if (Platform.isAndroid) {
       return _ensureDirectory(
-        Directory('/data/user/0/com.securevault.app/files'),
+        Directory('/data/user/0/com.filesmanagers.app/files'),
       );
     }
     final dir = Directory(
@@ -37,22 +40,19 @@ class AppPaths {
 
   static Future<Directory> userDataDirectory() async {
     final basePath = switch (Platform.operatingSystem) {
-      'android' => '/data/user/0/com.securevault.app/files',
+      'android' => '/data/user/0/com.filesmanagers.app/files',
       'windows' =>
         _firstEnvironmentPath(['APPDATA', 'LOCALAPPDATA', 'USERPROFILE']),
       'linux' => _linuxDataPath(),
       _ => Directory.systemTemp.path,
     };
     return _ensureDirectory(
-      Directory('$basePath${Platform.pathSeparator}SecureVault'),
+      Directory('$basePath${Platform.pathSeparator}filesmanagers'),
     );
   }
 
   static Future<bool> useUserDataDirectory() async {
-    final file = File(
-      '${_programDirectory()}${Platform.pathSeparator}$_programDataFolder'
-      '${Platform.pathSeparator}$_storageFileName',
-    );
+    final file = await _storageConfigFile();
     if (!await file.exists()) {
       return false;
     }
@@ -75,7 +75,7 @@ class AppPaths {
     final file = File('${dir.path}${Platform.pathSeparator}$_storageFileName');
     await file.writeAsString(
       const JsonEncoder.withIndent('  ').convert(<String, Object?>{
-        'schema': 'securevault.storage.v1',
+        'schema': 'filesmanagers.storage.v1',
         'storage': value ? 'user' : 'program',
       }),
       flush: true,
@@ -107,7 +107,8 @@ class AppPaths {
   }
 
   static Future<Directory> pluginsDirectory() async {
-    final override = Platform.environment['SECUREVAULT_PLUGINS_DIR'];
+    final override = Platform.environment['FILESMANAGERS_PLUGINS_DIR'] ??
+        Platform.environment['SECUREVAULT_PLUGINS_DIR'];
     if (override != null && override.trim().isNotEmpty) {
       return _ensureDirectory(Directory(override.trim()));
     }
@@ -120,7 +121,7 @@ class AppPaths {
       return ensured;
     } on FileSystemException {
       // Some desktop installs can be read-only. Keep the fallback outside of
-      // SecureVaultData so plugins are still separated from encrypted data.
+      // filesmanagersData so plugins are still separated from encrypted data.
       final userData = await userDataDirectory();
       return _ensureDirectory(
         Directory('${userData.path}${Platform.pathSeparator}$_pluginsFolder'),
@@ -144,6 +145,21 @@ class AppPaths {
       await dir.create(recursive: true);
     }
     return dir;
+  }
+
+  static Future<File> _storageConfigFile() async {
+    final programDir = _programDirectory();
+    final current = File(
+      '$programDir${Platform.pathSeparator}$_programDataFolder'
+      '${Platform.pathSeparator}$_storageFileName',
+    );
+    if (await current.exists()) {
+      return current;
+    }
+    return File(
+      '$programDir${Platform.pathSeparator}$_legacyProgramDataFolder'
+      '${Platform.pathSeparator}$_legacyStorageFileName',
+    );
   }
 
   static String _firstEnvironmentPath(List<String> keys) {
@@ -180,6 +196,10 @@ class AppPaths {
     final legacyRoots = <Directory>[
       Directory(
         '${_programDirectory()}${Platform.pathSeparator}$_programDataFolder'
+        '${Platform.pathSeparator}$_pluginsFolder',
+      ),
+      Directory(
+        '${_programDirectory()}${Platform.pathSeparator}$_legacyProgramDataFolder'
         '${Platform.pathSeparator}$_pluginsFolder',
       ),
     ];
@@ -231,7 +251,7 @@ class AppPaths {
 
   static String _programDirectory() {
     if (Platform.isAndroid) {
-      return '/data/user/0/com.securevault.app/files';
+      return '/data/user/0/com.filesmanagers.app/files';
     }
     final current = Directory.current.path;
     if (File('$current${Platform.pathSeparator}pubspec.yaml').existsSync()) {

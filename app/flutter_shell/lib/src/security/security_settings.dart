@@ -916,7 +916,8 @@ class SecuritySettingsRepository {
     if (decoded is! Map<String, Object?>) {
       return const SecuritySettings();
     }
-    if (decoded['schema'] == 'securevault.settingsFile.v1') {
+    if (decoded['schema'] == 'filesmanagers.settingsFile.v1' ||
+        decoded['schema'] == 'securevault.settingsFile.v1') {
       final envelope = decoded['envelope'];
       if (envelope is! Map) {
         return const SecuritySettings();
@@ -947,7 +948,7 @@ class SecuritySettingsRepository {
     );
     await file.writeAsString(
       const JsonEncoder.withIndent('  ').convert(<String, Object?>{
-        'schema': 'securevault.settingsFile.v1',
+        'schema': 'filesmanagers.settingsFile.v1',
         'key': 'device',
         'envelope': envelope,
       }),
@@ -1159,11 +1160,12 @@ class SecuritySettingsRepository {
     final target = File(
       targetPath?.trim().isNotEmpty == true
           ? targetPath!.trim()
-          : '${exportDir.path}${Platform.pathSeparator}securevault_configuration_$timestamp.zip',
+          : '${exportDir.path}${Platform.pathSeparator}filesmanagers_configuration_$timestamp.zip',
     );
     await target.parent.create(recursive: true);
     final archive = Archive();
-    await _addDirectoryToArchive(archive, appData, rootName: 'SecureVaultData');
+    await _addDirectoryToArchive(archive, appData,
+        rootName: 'filesmanagersData');
     final bytes = ZipEncoder().encode(archive);
     await target.writeAsBytes(bytes, flush: true);
     return target;
@@ -1584,10 +1586,19 @@ class SecuritySettingsRepository {
   Future<String> _deviceSecret() async {
     final appData = await AppPaths.appDataDirectory();
     final file = File(
+        '${appData.path}${Platform.pathSeparator}filesmanagers_device_secret.key');
+    final legacyFile = File(
         '${appData.path}${Platform.pathSeparator}securevault_device_secret.key');
     if (await file.exists()) {
       final existing = (await file.readAsString()).trim();
       if (existing.isNotEmpty) {
+        return existing;
+      }
+    }
+    if (await legacyFile.exists()) {
+      final existing = (await legacyFile.readAsString()).trim();
+      if (existing.isNotEmpty) {
+        await file.writeAsString(existing, flush: true);
         return existing;
       }
     }

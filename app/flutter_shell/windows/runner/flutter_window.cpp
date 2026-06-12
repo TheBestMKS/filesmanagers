@@ -12,7 +12,7 @@
 namespace {
 
 constexpr wchar_t kWindowRegistryPath[] =
-    L"Software\\SecureVault\\FileManager";
+    L"Software\\filesmanagers\\FileManager";
 constexpr UINT kTrayMessage = WM_APP + 42;
 constexpr UINT_PTR kTrayIconId = 1001;
 constexpr UINT kTrayExitCommand = 40001;
@@ -88,7 +88,7 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   window_channel_ =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-          flutter_controller_->engine()->messenger(), "secure_vault/window",
+          flutter_controller_->engine()->messenger(), "filesmanagers/window",
           &flutter::StandardMethodCodec::GetInstance());
   window_channel_->SetMethodCallHandler(
       [this](const flutter::MethodCall<flutter::EncodableValue>& call,
@@ -164,7 +164,7 @@ void FlutterWindow::AddTrayIcon() {
   nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
   nid.uCallbackMessage = kTrayMessage;
   nid.hIcon = LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON));
-  wcscpy_s(nid.szTip, L"File Manager");
+  wcscpy_s(nid.szTip, L"filesmanagers");
   if (Shell_NotifyIconW(NIM_ADD, &nid)) {
     tray_icon_added_ = true;
   }

@@ -25,7 +25,7 @@
         </provider>
 
         <activity
-            android:name="com.securevault.app.MainActivity"
+            android:name="com.filesmanagers.app.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""

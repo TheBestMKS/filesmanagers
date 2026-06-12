@@ -30,7 +30,7 @@ The current workstation uses:
 
 ```properties
 sdk.dir=C:/Users/thebe/AppData/Local/Android/Sdk
-flutter.sdk=N:/Codex/SecureVault/tooling/flutter/flutter
+flutter.sdk=N:/Codex/filesmanagers/tooling/flutter/flutter
 ```
 
 ## Build Commands

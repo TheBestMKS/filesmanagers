@@ -1,4 +1,0 @@
-﻿Tesseract OCR Windows runtime
-Source: UB Mannheim Tesseract Windows build v5.4.0.20240606
-Upstream: https://github.com/UB-Mannheim/tesseract
-SecureVault ships this runtime inside the tesseract_ocr_search plugin for offline OCR on Windows.

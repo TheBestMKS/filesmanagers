@@ -23,8 +23,8 @@ class AppLanguage {
 
   String t(String key) => strings[key] ?? _englishStrings[key] ?? key;
 
-  static const russianTitle = 'Файловый менеджер';
-  static const englishTitle = 'File Manager';
+  static const russianTitle = 'filesmanagers';
+  static const englishTitle = 'filesmanagers';
 
   static const _englishStrings = <String, String>{
     'app.title': englishTitle,
@@ -34,7 +34,7 @@ class AppLanguage {
     'about.description':
         'Protected explorer, encrypted previews, language packs, and native vault core details.',
     'about.contacts':
-        'Contacts: SecureVault local build. Add maintainer contacts in the project settings when publishing.',
+        'Contacts: filesmanagers local build. Add maintainer contacts in the project settings when publishing.',
     'about.crypto.test': 'Cryptography speed test',
     'about.crypto.test.result': 'Result',
     'about.memory.info': 'Memory usage information',
@@ -293,7 +293,7 @@ class AppLanguage {
     'preview.external.temp': 'Decrypted copy prepared for external opening.',
     'preview.unsupported.title': 'Unsupported file type',
     'preview.unsupported.body':
-        'SecureVault does not have a built-in viewer for this extension. Open it in another application?',
+        'filesmanagers does not have a built-in viewer for this extension. Open it in another application?',
     'preview.speak': 'Read aloud',
     'csv.view.table': 'Table',
     'csv.view.raw': 'Raw file',
@@ -368,7 +368,7 @@ class AppLanguage {
     'encrypt.mode.unique': 'Unique key',
     'encrypt.common.autokey': 'Common key will be used automatically',
     'encrypt.common.autokey.note':
-        'No separate encrypted-file password is configured, so SecureVault does not ask for the common key again.',
+        'No separate encrypted-file password is configured, so filesmanagers does not ask for the common key again.',
     'encrypt.password.common': 'Common encryption password',
     'encrypt.password.unique': 'Unique encryption password',
     'encrypt.delete.source': 'Delete original file after encryption',
@@ -391,7 +391,7 @@ class AppLanguage {
     'settings.storage': 'Storage and navigation',
     'settings.storage.user': 'Store settings in the user profile folder',
     'settings.storage.note':
-        'When disabled, settings, languages, exports, and hidden storage are kept near the program in SecureVaultData; plugins are kept in the program plugins folder.',
+        'When disabled, settings, languages, exports, and hidden storage are kept near the program in filesmanagersData; plugins are kept in the program plugins folder.',
     'settings.export.config': 'Export configuration and plugins',
     'settings.export.done': 'Configuration archive exported:',
     'settings.remember.last.folder': 'Remember the last opened folder',
@@ -464,7 +464,7 @@ class AppLanguage {
     'settings.android.storage.request': 'Request Android file access again',
     'android.storage.title': 'File access is limited',
     'android.storage.body':
-        'SecureVault can show more folders and media if Android grants media or all-files access. You can decline now and request it later in settings.',
+        'filesmanagers can show more folders and media if Android grants media or all-files access. You can decline now and request it later in settings.',
     'android.storage.open': 'Open permissions',
     'android.storage.requested': 'Android permission request opened.',
     'settings.wipe.failed': 'Delete remembered passwords on failed login',
@@ -473,7 +473,7 @@ class AppLanguage {
     'settings.block.capture':
         'Block screenshots and screen recording where the platform allows it',
     'settings.block.capture.note':
-        'Android uses FLAG_SECURE. Windows/Linux cannot reliably detect screen capture from Flutter, so SecureVault warns before external disclosure.',
+        'Android uses FLAG_SECURE. Windows/Linux cannot reliably detect screen capture from Flutter, so filesmanagers warns before external disclosure.',
     'settings.language': 'Language',
     'settings.language.select': 'Interface language',
     'settings.language.ru': 'Russian',
@@ -654,7 +654,7 @@ class AppLanguage {
     'common.extension': 'Extension',
     'settings.logging.enabled': 'Write program log',
     'settings.logging.note':
-        'When disabled, SecureVault stops adding new records to the program log.',
+        'When disabled, filesmanagers stops adding new records to the program log.',
     'settings.interface.scale': 'Overall interface scale',
     'settings.interface.scale.note':
         'Applies to all major UI areas and is useful on high-DPI phones.',
@@ -724,7 +724,7 @@ class AppLanguage {
     'about.description':
         'Защищенный проводник, просмотр зашифрованных файлов, языковые пакеты и сведения о нативном ядре хранилища.',
     'about.contacts':
-        'Контакты: локальная сборка SecureVault. При публикации укажите контакты сопровождающего в настройках проекта.',
+        'Контакты: локальная сборка filesmanagers. При публикации укажите контакты сопровождающего в настройках проекта.',
     'about.crypto.test': 'Тест скорости криптографии',
     'about.crypto.test.result': 'Результат',
     'about.memory.info': 'Информация об используемой памяти',
@@ -1010,7 +1010,7 @@ class AppLanguage {
         'Расшифрованная копия подготовлена для внешнего открытия.',
     'preview.unsupported.title': 'Неподдерживаемый тип файла',
     'preview.unsupported.body':
-        'Для этого расширения нет встроенного просмотрщика SecureVault. Открыть файл в другой программе?',
+        'Для этого расширения нет встроенного просмотрщика filesmanagers. Открыть файл в другой программе?',
     'preview.speak': 'Читать вслух',
     'csv.view.table': 'Таблица',
     'csv.view.raw': 'Обычный файл',
@@ -1110,7 +1110,7 @@ class AppLanguage {
     'settings.storage': 'Хранение и навигация',
     'settings.storage.user': 'Хранить настройки в папке пользователя',
     'settings.storage.note':
-        'Если выключено, настройки, языки, экспорт и скрытое хранилище находятся рядом с программой в SecureVaultData; плагины хранятся в папке plugins рядом с программой.',
+        'Если выключено, настройки, языки, экспорт и скрытое хранилище находятся рядом с программой в filesmanagersData; плагины хранятся в папке plugins рядом с программой.',
     'settings.export.config': 'Экспортировать конфигурацию и плагины',
     'settings.export.done': 'Архив конфигурации выгружен:',
     'settings.remember.last.folder': 'Запоминать последнюю открытую папку',
@@ -1188,7 +1188,7 @@ class AppLanguage {
         'Повторно запросить доступ к файлам Android',
     'android.storage.title': 'Доступ к файлам ограничен',
     'android.storage.body':
-        'SecureVault сможет показать больше папок и медиафайлов, если Android предоставит доступ к медиа или ко всем файлам. Можно отказаться сейчас и повторно запросить доступ в настройках.',
+        'filesmanagers сможет показать больше папок и медиафайлов, если Android предоставит доступ к медиа или ко всем файлам. Можно отказаться сейчас и повторно запросить доступ в настройках.',
     'android.storage.open': 'Открыть разрешения',
     'android.storage.requested': 'Запрос разрешений Android открыт.',
     'settings.wipe.failed': 'Удалять сохранённые пароли при неправильном входе',
@@ -1197,7 +1197,7 @@ class AppLanguage {
     'settings.block.capture':
         'Блокировать скриншоты и запись экрана там, где это позволяет платформа',
     'settings.block.capture.note':
-        'На Android используется FLAG_SECURE. Windows/Linux из Flutter не умеют надежно определять запись экрана, поэтому SecureVault предупреждает перед внешним раскрытием файлов.',
+        'На Android используется FLAG_SECURE. Windows/Linux из Flutter не умеют надежно определять запись экрана, поэтому filesmanagers предупреждает перед внешним раскрытием файлов.',
     'settings.language': 'Язык',
     'settings.language.select': 'Язык интерфейса',
     'settings.language.ru': 'Русский',
@@ -1509,7 +1509,7 @@ class AppLanguage {
   static Future<String> exportEnglishSample() async {
     final appData = await AppPaths.appDataDirectory();
     final file = File(
-      '${appData.path}${Platform.pathSeparator}securevault_language_en_sample.json',
+      '${appData.path}${Platform.pathSeparator}filesmanagers_language_en_sample.json',
     );
     await file.writeAsString(sampleJson(), flush: true);
     return file.path;

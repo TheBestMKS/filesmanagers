@@ -779,7 +779,7 @@ class SftpRemoteClient implements RemoteFileSystemClient {
               ? null
               : (request) =>
                   List<String>.filled(request.prompts.length, password),
-          ident: 'SecureVaultEmbeddedSSH_1.0',
+          ident: 'FilesManagersEmbeddedSSH_1.0',
         );
         try {
           return await body(client, variables);
@@ -828,7 +828,7 @@ class SftpRemoteClient implements RemoteFileSystemClient {
               ? null
               : (request) =>
                   List<String>.filled(request.prompts.length, password),
-          ident: 'SecureVaultEmbeddedSSH_1.0',
+          ident: 'FilesManagersEmbeddedSSH_1.0',
         );
         final sftp = await client.sftp();
         try {
@@ -1587,12 +1587,18 @@ Map<String, String> _variables(CloudPluginDefinition plugin) {
   }
 
   readMap(plugin.variables);
-  final envPrefix =
-      'SECUREVAULT_${plugin.id.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]+'), '_')}';
-  for (final entry in Platform.environment.entries) {
-    if (entry.key.startsWith('${envPrefix}_')) {
-      final key = entry.key.substring(envPrefix.length + 1).toLowerCase();
-      result[key] = entry.value;
+  final normalizedPluginId =
+      plugin.id.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]+'), '_');
+  final envPrefixes = <String>[
+    'FILESMANAGERS_$normalizedPluginId',
+    'SECUREVAULT_$normalizedPluginId',
+  ];
+  for (final prefix in envPrefixes) {
+    for (final entry in Platform.environment.entries) {
+      if (entry.key.startsWith('${prefix}_')) {
+        final key = entry.key.substring(prefix.length + 1).toLowerCase();
+        result[key] = entry.value;
+      }
     }
   }
   return result;

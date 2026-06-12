@@ -1,4 +1,4 @@
-﻿package com.securevault.app
+package com.filesmanagers.app
 
 import android.Manifest
 import android.app.Activity
@@ -32,7 +32,7 @@ import java.util.UUID
 
 class MainActivity : FlutterActivity() {
     companion object {
-        private const val CHANNEL = "secure_vault/platform"
+        private const val CHANNEL = "filesmanagers/platform"
         private const val STORAGE_PERMISSION_REQUEST = 7301
         private const val PICK_FILE_REQUEST = 7401
         private const val PICK_DIRECTORY_REQUEST = 7402
@@ -380,13 +380,13 @@ class MainActivity : FlutterActivity() {
     private fun speakText(text: String) {
         val current = textToSpeech
         if (current != null) {
-            current.speak(text, TextToSpeech.QUEUE_FLUSH, null, "securevault-tts")
+            current.speak(text, TextToSpeech.QUEUE_FLUSH, null, "filesmanagers-tts")
             return
         }
         textToSpeech = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 textToSpeech?.language = Locale.getDefault()
-                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "securevault-tts")
+                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "filesmanagers-tts")
             }
         }
     }

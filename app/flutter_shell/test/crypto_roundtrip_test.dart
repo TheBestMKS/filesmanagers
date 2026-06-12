@@ -1,12 +1,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:secure_vault_shell/src/explorer/file_explorer_repository.dart';
-import 'package:secure_vault_shell/src/ffi/crypt_bindings.dart';
+import 'package:filesmanagers/src/explorer/file_explorer_repository.dart';
+import 'package:filesmanagers/src/ffi/crypt_bindings.dart';
 
 void main() {
   test('app-created crypt file can be preview-decrypted', () async {
-    final temp = await Directory.systemTemp.createTemp('secure_vault_test_');
+    final temp = await Directory.systemTemp.createTemp('filesmanagers_test_');
     addTearDown(() async {
       if (await temp.exists()) {
         await temp.delete(recursive: true);

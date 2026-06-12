@@ -1,10 +1,10 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.14)
-project(secure_vault_shell LANGUAGES C CXX)
+project(filesmanagers LANGUAGES C CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "secure_vault_shell")
+set(BINARY_NAME "filesmanagers")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -90,24 +90,24 @@ install(FILES "${FLUTTER_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
 install(TARGETS crypt_core RUNTIME DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
-set(SECUREVAULT_ARIA2C "${CMAKE_CURRENT_SOURCE_DIR}/runner/resources/aria2c.exe")
-if(EXISTS "${SECUREVAULT_ARIA2C}")
-  set(SECUREVAULT_TORRENT_PLUGIN_DIR
-    "${CMAKE_INSTALL_PREFIX}/plugins/securevault_torrent/components/aria2/windows-x64")
-  install(FILES "${SECUREVAULT_ARIA2C}"
-    DESTINATION "${SECUREVAULT_TORRENT_PLUGIN_DIR}"
+set(FILESMANAGERS_ARIA2C "${CMAKE_CURRENT_SOURCE_DIR}/runner/resources/aria2c.exe")
+if(EXISTS "${FILESMANAGERS_ARIA2C}")
+  set(FILESMANAGERS_TORRENT_PLUGIN_DIR
+    "${CMAKE_INSTALL_PREFIX}/plugins/filesmanagers_torrent/components/aria2/windows-x64")
+  install(FILES "${FILESMANAGERS_ARIA2C}"
+    DESTINATION "${FILESMANAGERS_TORRENT_PLUGIN_DIR}"
     COMPONENT Runtime)
   install(FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/runner/resources/aria2_COPYING.txt"
     "${CMAKE_CURRENT_SOURCE_DIR}/runner/resources/aria2_LICENSE.OpenSSL.txt"
-    DESTINATION "${SECUREVAULT_TORRENT_PLUGIN_DIR}"
+    DESTINATION "${FILESMANAGERS_TORRENT_PLUGIN_DIR}"
     COMPONENT Runtime)
 endif()
 
-set(SECUREVAULT_TESSERACT_DIR
+set(FILESMANAGERS_TESSERACT_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/runner/resources/tesseract/windows-x64")
-if(EXISTS "${SECUREVAULT_TESSERACT_DIR}/tesseract.exe")
-  install(DIRECTORY "${SECUREVAULT_TESSERACT_DIR}/"
+if(EXISTS "${FILESMANAGERS_TESSERACT_DIR}/tesseract.exe")
+  install(DIRECTORY "${FILESMANAGERS_TESSERACT_DIR}/"
     DESTINATION "${CMAKE_INSTALL_PREFIX}/plugins/tesseract_ocr_search/components/tesseract/windows-x64"
     COMPONENT Runtime)
 endif()

@@ -67,9 +67,9 @@ class EmbeddedWebSession {
 class PlatformServices {
   PlatformServices._();
 
-  static const MethodChannel _channel = MethodChannel('secure_vault/platform');
+  static const MethodChannel _channel = MethodChannel('filesmanagers/platform');
   static const MethodChannel _windowChannel =
-      MethodChannel('secure_vault/window');
+      MethodChannel('filesmanagers/window');
   static final List<HttpServer> _swfServers = <HttpServer>[];
 
   static const List<String> _ruffleRuntimeFiles = <String>[
@@ -520,7 +520,7 @@ $speaker.Speak($Text)
     if (Platform.isWindows) {
       return _runPowerShellPicker(r'''
 Add-Type -AssemblyName System.Windows.Forms
-function Write-SecureVaultPath([string]$Path) {
+function Write-filesmanagersPath([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) { return }
   [Console]::OutputEncoding = [System.Text.Encoding]::ASCII
   [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Path))
@@ -528,7 +528,7 @@ function Write-SecureVaultPath([string]$Path) {
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
 $dialog.Multiselect = $false
 if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  Write-SecureVaultPath $dialog.FileName
+  Write-filesmanagersPath $dialog.FileName
 }
 ''');
     }
@@ -547,14 +547,14 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     if (Platform.isWindows) {
       return _runPowerShellPicker(r'''
 Add-Type -AssemblyName System.Windows.Forms
-function Write-SecureVaultPath([string]$Path) {
+function Write-filesmanagersPath([string]$Path) {
   if ([string]::IsNullOrWhiteSpace($Path)) { return }
   [Console]::OutputEncoding = [System.Text.Encoding]::ASCII
   [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Path))
 }
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  Write-SecureVaultPath $dialog.SelectedPath
+  Write-filesmanagersPath $dialog.SelectedPath
 }
 ''');
     }

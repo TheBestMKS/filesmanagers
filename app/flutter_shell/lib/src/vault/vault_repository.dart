@@ -87,13 +87,13 @@ class VaultRepository {
 
   Future<Directory> _applicationDataDirectory() async {
     final basePath = switch (Platform.operatingSystem) {
-      'android' => '/data/user/0/com.securevault.app/files',
+      'android' => '/data/user/0/com.filesmanagers.app/files',
       'windows' =>
         _firstEnvironmentPath(['APPDATA', 'LOCALAPPDATA', 'USERPROFILE']),
       'linux' => _linuxDataPath(),
       _ => Directory.systemTemp.path,
     };
-    final dir = Directory('$basePath${Platform.pathSeparator}SecureVault');
+    final dir = Directory('$basePath${Platform.pathSeparator}filesmanagers');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }

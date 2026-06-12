@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.securevault" "\0"
-            VALUE "FileDescription", "File Manager" "\\0"
+            VALUE "CompanyName", "com.filesmanagers" "\0"
+            VALUE "FileDescription", "filesmanagers" "\\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "secure_vault_shell" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.securevault. All rights reserved." "\0"
-            VALUE "OriginalFilename", "secure_vault_shell.exe" "\0"
-            VALUE "ProductName", "File Manager" "\\0"
+            VALUE "InternalName", "filesmanagers" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.filesmanagers. All rights reserved." "\0"
+            VALUE "OriginalFilename", "filesmanagers.exe" "\0"
+            VALUE "ProductName", "filesmanagers" "\\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

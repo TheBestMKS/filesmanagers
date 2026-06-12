@@ -31,7 +31,7 @@ import 'src/storage/app_paths.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.18';
+const _appVersion = '0.12.19';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -56,14 +56,14 @@ Future<void> main(List<String> args) async {
     });
     AppLog.enabled = initialSettings.loggingEnabled;
     unawaited(AppLog.write('Application start ${args.join(' ')}'));
-    runApp(SecureVaultApp(initialPath: args.isEmpty ? null : args.first));
+    runApp(FilesManagersApp(initialPath: args.isEmpty ? null : args.first));
   }, (error, stack) {
     unawaited(AppLog.write('Uncaught zone error', '$error\n$stack'));
   });
 }
 
-class SecureVaultApp extends StatelessWidget {
-  const SecureVaultApp({super.key, this.initialPath});
+class FilesManagersApp extends StatelessWidget {
+  const FilesManagersApp({super.key, this.initialPath});
 
   final String? initialPath;
 
@@ -3405,7 +3405,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     );
     final isVirtualTarget = _explorer.isVirtualPath(targetDirectory);
     final targetDir = isVirtualTarget
-        ? await Directory.systemTemp.createTemp('securevault_http_paste_')
+        ? await Directory.systemTemp.createTemp('filesmanagers_http_paste_')
         : Directory(targetDirectory);
     final downloaded = await _webMusicPlugins.download(entry, targetDir);
     if (!isVirtualTarget) {
@@ -3438,7 +3438,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         if (password == null || password.isEmpty) {
           return;
         }
-        final tempDir = await Directory.systemTemp.createTemp('securevault_');
+        final tempDir = await Directory.systemTemp.createTemp('filesmanagers_');
         try {
           final plain =
               File('${tempDir.path}${Platform.pathSeparator}${spec.name}');
@@ -4807,7 +4807,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     try {
       var path = selected.path;
       if (preview.decrypted && preview.bytes != null) {
-        final tempDir = await Directory.systemTemp.createTemp('secure_vault_');
+        final tempDir = await Directory.systemTemp.createTemp('filesmanagers_');
         final tempFile = File(
           '${tempDir.path}${Platform.pathSeparator}${_safeFileName(preview.title)}',
         );
@@ -6247,7 +6247,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     final executable = await _ytDlpExecutablePath();
     final isVirtualTarget = _explorer.isVirtualPath(targetDirectory);
     final localTarget = isVirtualTarget
-        ? await Directory.systemTemp.createTemp('securevault_ytdlp_')
+        ? await Directory.systemTemp.createTemp('filesmanagers_ytdlp_')
         : Directory(_expandPathVariables(targetDirectory));
     await localTarget.create(recursive: true);
     final before = await _safeDirectoryFiles(localTarget);
@@ -6616,7 +6616,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     final stopwatch = Stopwatch()..start();
     final salt = VaultCrypto.randomBytes(16);
     for (var i = 0; i < 24; i++) {
-      await VaultCrypto.passwordDigest('securevault-benchmark-$i', salt);
+      await VaultCrypto.passwordDigest('filesmanagers-benchmark-$i', salt);
     }
     stopwatch.stop();
     if (!mounted) return;
@@ -15880,7 +15880,7 @@ class _FfmpegEditorDialogState extends State<_FfmpegEditorDialog> {
       var sourcePath = widget.preview.sourcePath;
       if (widget.preview.decrypted && widget.preview.bytes != null) {
         final tempDir =
-            await Directory.systemTemp.createTemp('secure_vault_edit_');
+            await Directory.systemTemp.createTemp('filesmanagers_edit_');
         tempSource = File(
           '${tempDir.path}${Platform.pathSeparator}${_safeFileName(widget.preview.title)}',
         );

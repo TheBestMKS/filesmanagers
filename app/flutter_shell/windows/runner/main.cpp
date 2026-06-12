@@ -8,7 +8,7 @@
 namespace {
 
 constexpr wchar_t kWindowRegistryPath[] =
-    L"Software\\SecureVault\\FileManager";
+    L"Software\\filesmanagers\\FileManager";
 
 DWORD ReadWindowDword(HKEY key, const wchar_t* name, DWORD fallback) {
   DWORD value = fallback;

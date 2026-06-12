@@ -16,7 +16,7 @@ class AppLog {
     final file = File('${logDir.path}${Platform.pathSeparator}securevault.log');
     if (!await file.exists()) {
       await file.writeAsString(
-        '[${DateTime.now().toIso8601String()}] SecureVault log created\n',
+        '[${DateTime.now().toIso8601String()}] filesmanagers log created\n',
         flush: true,
       );
     }

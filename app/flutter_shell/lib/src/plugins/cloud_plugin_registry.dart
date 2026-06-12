@@ -314,19 +314,19 @@ class CloudPluginRegistry {
         'version': '1.0.0',
         'pluginType': 'cloud-storage',
         'description': 'Template adapter for Yandex Disk through WebDAV.',
-        'repositoryUrl': 'https://github.com/example/securevault-yandex-disk',
+        'repositoryUrl': 'https://github.com/example/filesmanagers-yandex-disk',
         'updateUrl':
-            'https://raw.githubusercontent.com/example/securevault-yandex-disk/main/plugin.json',
+            'https://raw.githubusercontent.com/example/filesmanagers-yandex-disk/main/plugin.json',
         'authType': 'password-or-app-password',
         'variables': <String, Object?>{
           'username': <String, Object?>{
             'label': 'Yandex login',
-            'env': 'SECUREVAULT_YANDEX_DISK_WEBDAV_USERNAME',
+            'env': 'FILESMANAGERS_YANDEX_DISK_WEBDAV_USERNAME',
           },
           'password': <String, Object?>{
             'label': 'App password or WebDAV password',
             'secret': true,
-            'env': 'SECUREVAULT_YANDEX_DISK_WEBDAV_PASSWORD',
+            'env': 'FILESMANAGERS_YANDEX_DISK_WEBDAV_PASSWORD',
           },
         },
         'capabilities': ['listFiles', 'fileInfo', 'fileStream', 'freeSpace'],
@@ -375,23 +375,23 @@ class CloudPluginRegistry {
         'pluginType': 'cloud-storage',
         'description':
             'Template adapter for Nextcloud/ownCloud compatible WebDAV.',
-        'repositoryUrl': 'https://github.com/example/securevault-nextcloud',
+        'repositoryUrl': 'https://github.com/example/filesmanagers-nextcloud',
         'updateUrl':
-            'https://raw.githubusercontent.com/example/securevault-nextcloud/main/plugin.json',
+            'https://raw.githubusercontent.com/example/filesmanagers-nextcloud/main/plugin.json',
         'authType': 'password-or-app-password',
         'variables': <String, Object?>{
           'baseUrl': <String, Object?>{
             'label': 'Server URL, e.g. https://cloud.example.com',
-            'env': 'SECUREVAULT_NEXTCLOUD_WEBDAV_BASEURL',
+            'env': 'FILESMANAGERS_NEXTCLOUD_WEBDAV_BASEURL',
           },
           'username': <String, Object?>{
             'label': 'Username',
-            'env': 'SECUREVAULT_NEXTCLOUD_WEBDAV_USERNAME',
+            'env': 'FILESMANAGERS_NEXTCLOUD_WEBDAV_USERNAME',
           },
           'password': <String, Object?>{
             'label': 'App password',
             'secret': true,
-            'env': 'SECUREVAULT_NEXTCLOUD_WEBDAV_PASSWORD',
+            'env': 'FILESMANAGERS_NEXTCLOUD_WEBDAV_PASSWORD',
           },
         },
         'capabilities': ['listFiles', 'fileInfo', 'fileStream', 'freeSpace'],
@@ -452,23 +452,23 @@ class CloudPluginRegistry {
         'variables': <String, Object?>{
           'host': <String, Object?>{
             'label': 'FTP host',
-            'env': 'SECUREVAULT_FTP_RESOURCE_HOST',
+            'env': 'FILESMANAGERS_FTP_RESOURCE_HOST',
           },
           'port': <String, Object?>{
             'label': 'FTP port',
             'default': '21',
-            'env': 'SECUREVAULT_FTP_RESOURCE_PORT',
+            'env': 'FILESMANAGERS_FTP_RESOURCE_PORT',
           },
           'username': <String, Object?>{
             'label': 'Username',
             'default': 'anonymous',
-            'env': 'SECUREVAULT_FTP_RESOURCE_USERNAME',
+            'env': 'FILESMANAGERS_FTP_RESOURCE_USERNAME',
           },
           'password': <String, Object?>{
             'label': 'Password',
             'secret': true,
             'default': 'anonymous@',
-            'env': 'SECUREVAULT_FTP_RESOURCE_PASSWORD',
+            'env': 'FILESMANAGERS_FTP_RESOURCE_PASSWORD',
           },
         },
         'components': <String, Object?>{'executor': 'ftp'},
@@ -503,35 +503,35 @@ class CloudPluginRegistry {
         'variables': <String, Object?>{
           'host': <String, Object?>{
             'label': 'SSH host',
-            'env': 'SECUREVAULT_SFTP_RESOURCE_HOST',
+            'env': 'FILESMANAGERS_SFTP_RESOURCE_HOST',
           },
           'port': <String, Object?>{
             'label': 'SSH port',
             'default': '22',
-            'env': 'SECUREVAULT_SFTP_RESOURCE_PORT',
+            'env': 'FILESMANAGERS_SFTP_RESOURCE_PORT',
           },
           'username': <String, Object?>{
             'label': 'Username',
-            'env': 'SECUREVAULT_SFTP_RESOURCE_USERNAME',
+            'env': 'FILESMANAGERS_SFTP_RESOURCE_USERNAME',
           },
           'identityFile': <String, Object?>{
             'label': 'Private key path',
-            'env': 'SECUREVAULT_SFTP_RESOURCE_IDENTITYFILE',
+            'env': 'FILESMANAGERS_SFTP_RESOURCE_IDENTITYFILE',
           },
           'passphrase': <String, Object?>{
             'label': 'Private key passphrase',
             'secret': true,
-            'env': 'SECUREVAULT_SFTP_RESOURCE_PASSPHRASE',
+            'env': 'FILESMANAGERS_SFTP_RESOURCE_PASSPHRASE',
           },
           'password': <String, Object?>{
             'label': 'Password',
             'secret': true,
-            'env': 'SECUREVAULT_SFTP_RESOURCE_PASSWORD',
+            'env': 'FILESMANAGERS_SFTP_RESOURCE_PASSWORD',
           },
           'timeoutSeconds': <String, Object?>{
             'label': 'Connection timeout, seconds',
             'default': '30',
-            'env': 'SECUREVAULT_SFTP_RESOURCE_TIMEOUTSECONDS',
+            'env': 'FILESMANAGERS_SFTP_RESOURCE_TIMEOUTSECONDS',
           },
         },
         'components': <String, Object?>{'executor': 'sftp'},
@@ -566,49 +566,49 @@ class CloudPluginRegistry {
         'variables': <String, Object?>{
           'host': <String, Object?>{
             'label': 'SMB host',
-            'env': 'SECUREVAULT_SMB_RESOURCE_HOST',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_HOST',
           },
           'share': <String, Object?>{
             'label': 'Share name or URL, e.g. Documents or //server/share',
-            'env': 'SECUREVAULT_SMB_RESOURCE_SHARE',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_SHARE',
           },
           'domain': <String, Object?>{
             'label': 'Domain / workgroup',
-            'env': 'SECUREVAULT_SMB_RESOURCE_DOMAIN',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_DOMAIN',
           },
           'username': <String, Object?>{
             'label': 'Username',
-            'env': 'SECUREVAULT_SMB_RESOURCE_USERNAME',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_USERNAME',
           },
           'password': <String, Object?>{
             'label': 'Password',
             'secret': true,
-            'env': 'SECUREVAULT_SMB_RESOURCE_PASSWORD',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_PASSWORD',
           },
           'version': <String, Object?>{
             'label': 'SMB dialect: any, any2, any3, 2.1, 3.0, 3.1.1',
             'default': 'any',
-            'env': 'SECUREVAULT_SMB_RESOURCE_VERSION',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_VERSION',
           },
           'workers': <String, Object?>{
             'label': 'Parallel SMB workers',
             'default': '4',
-            'env': 'SECUREVAULT_SMB_RESOURCE_WORKERS',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_WORKERS',
           },
           'timeoutSeconds': <String, Object?>{
             'label': 'Connection timeout, seconds',
             'default': '30',
-            'env': 'SECUREVAULT_SMB_RESOURCE_TIMEOUTSECONDS',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_TIMEOUTSECONDS',
           },
           'signing': <String, Object?>{
             'label': 'Require SMB signing',
             'default': 'false',
-            'env': 'SECUREVAULT_SMB_RESOURCE_SIGNING',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_SIGNING',
           },
           'seal': <String, Object?>{
             'label': 'Require SMB encryption',
             'default': 'false',
-            'env': 'SECUREVAULT_SMB_RESOURCE_SEAL',
+            'env': 'FILESMANAGERS_SMB_RESOURCE_SEAL',
           },
         },
         'components': <String, Object?>{'executor': 'smb'},
@@ -656,7 +656,7 @@ class CloudPluginRegistry {
           'variables': <String, Object?>{
             'members': <String, Object?>{
               'label':
-                  'Member location runtime plugin ids, selected by SecureVault profile dialog',
+                  'Member location runtime plugin ids, selected by filesmanagers profile dialog',
               'default': '',
             },
           },
@@ -677,7 +677,7 @@ class CloudPluginRegistry {
       name: 'RAID0 combined location',
       executor: 'raid0',
       description:
-          'Combines several configured SecureVault locations into one expandable virtual location. Files are placed on one member by free-space hint or stable path distribution.',
+          'Combines several configured filesmanagers locations into one expandable virtual location. Files are placed on one member by free-space hint or stable path distribution.',
     );
     await write(
       folder: 'raid1_mirror_location',
@@ -685,7 +685,7 @@ class CloudPluginRegistry {
       name: 'RAID1 mirror location',
       executor: 'raid1',
       description:
-          'Mirrors writes and folder creation to all selected SecureVault locations and reads from the first available copy.',
+          'Mirrors writes and folder creation to all selected filesmanagers locations and reads from the first available copy.',
     );
   }
 
@@ -696,10 +696,10 @@ class CloudPluginRegistry {
     final torrentDir = await _writeTemplate(
       pluginsDir,
       deleted: deleted,
-      folder: 'securevault_torrent',
+      folder: 'filesmanagers_torrent',
       manifest: <String, Object?>{
-        'id': 'securevault-torrent',
-        'name': 'SecureVault Torrent',
+        'id': 'filesmanagers-torrent',
+        'name': 'filesmanagers Torrent',
         'version': '1.2.0',
         'pluginType': 'media-extension',
         'description':
@@ -939,7 +939,7 @@ class CloudPluginRegistry {
         'version': '1.0.0',
         'pluginType': 'viewer-extension',
         'description':
-            'Adds interactive SWF/Flash opening through the bundled Ruffle web runtime served from SecureVault memory cache on Windows and Android.',
+            'Adds interactive SWF/Flash opening through the bundled Ruffle web runtime served from filesmanagers memory cache on Windows and Android.',
         'authType': 'none',
         'capabilities': [
           'fileHandler',
@@ -1227,7 +1227,7 @@ class CloudPluginRegistry {
         'version': '1.0.0',
         'pluginType': 'download-extension',
         'description':
-            'Adds a context-menu action to download media by URL through yt-dlp with configurable quality, thread count, self-update and SecureVault background progress reporting.',
+            'Adds a context-menu action to download media by URL through yt-dlp with configurable quality, thread count, self-update and filesmanagers background progress reporting.',
         'authType': 'none',
         'repositoryUrl': 'https://github.com/yt-dlp/yt-dlp',
         'updateUrl':

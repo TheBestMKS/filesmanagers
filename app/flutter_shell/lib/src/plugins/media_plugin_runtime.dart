@@ -37,14 +37,14 @@ class PluginRuntime {
   final Map<String, Map<String, String>> settingsByPluginId;
 
   bool get hasTorrentPlugin => plugins.any((plugin) =>
-      plugin.id == 'securevault-torrent' &&
+      plugin.id == 'filesmanagers-torrent' &&
       plugin.capabilities.contains('torrentStreaming') &&
       _settingBool(plugin.id, 'createTorrentSection', defaultValue: true));
 
   bool handlesFileExtension(String extension) {
     final normalized = extension.toLowerCase();
     for (final plugin in plugins) {
-      if (plugin.id == 'securevault-torrent' &&
+      if (plugin.id == 'filesmanagers-torrent' &&
           !_settingBool(plugin.id, 'handleTorrentFiles', defaultValue: true)) {
         continue;
       }
@@ -1123,4 +1123,4 @@ const _windows1251 = <int>[
 ];
 
 const _userAgent =
-    'SecureVault/0.12.7 plugin-media-parser (+https://localhost/securevault)';
+    'filesmanagers/0.12.7 plugin-media-parser (+https://localhost/filesmanagers)';

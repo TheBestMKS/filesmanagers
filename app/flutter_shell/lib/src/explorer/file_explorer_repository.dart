@@ -836,7 +836,7 @@ Get-PnpDevice -Class WPD -Status OK |
       final info = await _bindings.inspectFolderMeta(bytes);
       return FilePreview(
         title: name,
-        subtitle: 'Метаданные папки Secure Vault',
+        subtitle: 'Метаданные папки filesmanagers',
         containerInfo: info,
         contentKind: FileContentKind.document,
       );
@@ -1642,7 +1642,7 @@ Get-PnpDevice -Class WPD -Status OK |
     }
     final tempDir = Directory(
       '${Directory.systemTemp.path}${Platform.pathSeparator}'
-      'securevault_mtp_${DateTime.now().microsecondsSinceEpoch}',
+      'filesmanagers_mtp_${DateTime.now().microsecondsSinceEpoch}',
     );
     try {
       await tempDir.create(recursive: true);
@@ -2024,7 +2024,7 @@ $items | ConvertTo-Json -Compress -Depth 4
             'Torrent stream, ${(file.sizeBytes / 1024 / 1024).toStringAsFixed(1)} MB',
         sourcePath: streamUri.toString(),
         text:
-            'SecureVault streams this torrent entry through a local range server. '
+            'filesmanagers streams this torrent entry through a local range server. '
             'The torrent engine starts when playback requests the URL.',
         contentKind: kind,
       );
@@ -2045,7 +2045,7 @@ $items | ConvertTo-Json -Compress -Depth 4
             'Torrent streaming was requested, but no local pieces are available yet.',
         sourcePath: torrent.fullPath,
         text:
-            'SecureVault started aria2c in background when available. Open this file again after the first pieces are downloaded.',
+            'filesmanagers started aria2c in background when available. Open this file again after the first pieces are downloaded.',
         contentKind: FileViewerService.kindForName(file.name),
       );
     }
@@ -2347,7 +2347,7 @@ $items | ConvertTo-Json -Compress -Depth 4
       );
       return await file.readAsBytes();
     }
-    final temp = await Directory.systemTemp.createTemp('securevault_rar_');
+    final temp = await Directory.systemTemp.createTemp('filesmanagers_rar_');
     try {
       await _runRarCliExtract(
         archivePath: archivePath,
@@ -3225,7 +3225,7 @@ $items | ConvertTo-Json -Compress -Depth 4
     try {
       if (extension == '.pdf') {
         final cache = await AppPaths.protectedCacheDirectory();
-        tempDir = await cache.createTemp('securevault_ocr_');
+        tempDir = await cache.createTemp('filesmanagers_ocr_');
         final image = await _renderPdfFirstPage(file, tempDir);
         if (image == null) return null;
         inputPath = image.path;
@@ -3343,7 +3343,7 @@ $items | ConvertTo-Json -Compress -Depth 4
     try {
       final extension = FileViewerService.extensionForName(name);
       final cache = await AppPaths.protectedCacheDirectory();
-      tempDir = await cache.createTemp('securevault_ocr_bytes_');
+      tempDir = await cache.createTemp('filesmanagers_ocr_bytes_');
       final source = File(
         '${tempDir.path}${Platform.pathSeparator}source$extension',
       );

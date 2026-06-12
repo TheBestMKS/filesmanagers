@@ -270,32 +270,35 @@ class TorrentService {
     final platform = _torrentEnginePlatform();
     final executableName = Platform.isWindows ? 'aria2c.exe' : 'aria2c';
     final bundledCandidates = <File>[
-      File(
-        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
-        '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
-        '${Platform.pathSeparator}$platform${Platform.pathSeparator}'
-        '$executableName',
-      ),
-      File(
-        '${pluginsDir.path}${Platform.pathSeparator}securevault_torrent'
-        '${Platform.pathSeparator}components${Platform.pathSeparator}torrent'
-        '${Platform.pathSeparator}$platform${Platform.pathSeparator}'
-        '$executableName',
-      ),
+      for (final folder in ['filesmanagers_torrent', 'securevault_torrent'])
+        File(
+          '${pluginsDir.path}${Platform.pathSeparator}$folder'
+          '${Platform.pathSeparator}components${Platform.pathSeparator}aria2'
+          '${Platform.pathSeparator}$platform${Platform.pathSeparator}'
+          '$executableName',
+        ),
+      for (final folder in ['filesmanagers_torrent', 'securevault_torrent'])
+        File(
+          '${pluginsDir.path}${Platform.pathSeparator}$folder'
+          '${Platform.pathSeparator}components${Platform.pathSeparator}torrent'
+          '${Platform.pathSeparator}$platform${Platform.pathSeparator}'
+          '$executableName',
+        ),
     ];
     for (final candidate in bundledCandidates) {
       if (await candidate.exists()) {
         return candidate.path;
       }
     }
-    final override = Platform.environment['SECUREVAULT_ARIA2C'];
+    final override = Platform.environment['FILESMANAGERS_TORRENT_ENGINE'] ??
+        Platform.environment['SECUREVAULT_ARIA2C'];
     if (override != null && override.trim().isNotEmpty) {
       return override.trim();
     }
     throw FileSystemException(
       'Torrent engine not found in plugin components for $platform. '
-      'Place aria2c or another compatible engine in the SecureVault Torrent '
-      'plugin folder, or set SECUREVAULT_ARIA2C for development.',
+      'Place aria2c or another compatible engine in the filesmanagers Torrent '
+      'plugin folder, or set FILESMANAGERS_TORRENT_ENGINE for development.',
       pluginsDir.path,
     );
   }
@@ -428,7 +431,7 @@ class _TorrentHttpStreamer {
           response.headers.contentType = ContentType.text;
           response.write(
             'Torrent engine is unavailable: $error\n'
-            'Install the engine inside the SecureVault Torrent plugin folder.',
+            'Install the engine inside the filesmanagers Torrent plugin folder.',
           );
           await response.close();
           return;

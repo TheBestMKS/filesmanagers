@@ -1,10 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:secure_vault_shell/main.dart';
+import 'package:filesmanagers/main.dart';
 
 void main() {
-  testWidgets('Secure Vault shell boots', (tester) async {
-    await tester.pumpWidget(const SecureVaultApp());
+  testWidgets('filesmanagers shell boots', (tester) async {
+    await tester.pumpWidget(const FilesManagersApp());
     await tester.pump(const Duration(seconds: 1));
 
     expect(find.byType(VaultHomeScreen), findsOneWidget);

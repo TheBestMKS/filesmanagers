@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.securevault.app"
+    namespace = "com.filesmanagers.app"
     compileSdk = 36
     ndkVersion = "28.2.13676358"
 
@@ -19,7 +19,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.securevault.app"
+        applicationId = "com.filesmanagers.app"
         minSdk = 24
         targetSdk = 34
         versionCode = flutter.versionCode

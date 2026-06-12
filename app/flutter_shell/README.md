@@ -1,6 +1,6 @@
 # Защищенное хранилище файлов - Flutter Shell
 
-Flutter-оболочка SecureVault версии `0.12.18`.
+Flutter-оболочка filesmanagers версии `0.12.19`.
 
 ## Что делает оболочка
 
@@ -37,7 +37,7 @@ Flutter-оболочка SecureVault версии `0.12.18`.
 Windows output:
 
 ```text
-build/windows/x64/runner/Release/secure_vault_shell.exe
+build/windows/x64/runner/Release/filesmanagers.exe
 ```
 
 Android output:
