@@ -1,7 +1,12 @@
 package com.filesmanagers.app
 
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Activity
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -17,6 +22,8 @@ import android.provider.DocumentsContract
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.view.WindowManager
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -34,11 +41,29 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "filesmanagers/platform"
         private const val STORAGE_PERMISSION_REQUEST = 7301
+        private const val NOTIFICATION_PERMISSION_REQUEST = 7302
         private const val PICK_FILE_REQUEST = 7401
         private const val PICK_DIRECTORY_REQUEST = 7402
+        private const val MEDIA_NOTIFICATION_ID = 7601
+        private const val MEDIA_CHANNEL_ID = "filesmanagers_media"
+        private const val MEDIA_ACTION = "com.filesmanagers.app.MEDIA_ACTION"
+        private var mediaMethodChannel: MethodChannel? = null
 
         init {
             System.loadLibrary("crypt_core")
+        }
+
+        fun dispatchMediaCommand(context: Context, command: String) {
+            val channel = mediaMethodChannel
+            if (channel != null) {
+                channel.invokeMethod("mediaControl", command)
+                return
+            }
+            val intent = Intent(context, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra("mediaCommand", command)
+            }
+            context.startActivity(intent)
         }
     }
 
@@ -53,7 +78,9 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        mediaMethodChannel = channel
+        channel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "setScreenProtection" -> {
                     val enabled = call.arguments as? Boolean ?: true
@@ -106,6 +133,27 @@ class MainActivity : FlutterActivity() {
                     textToSpeech?.stop()
                     result.success(null)
                 }
+                "updateMediaNotification" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val title = args?.get("title") as? String ?: ""
+                    val subtitle = args?.get("subtitle") as? String ?: ""
+                    val playing = args?.get("playing") as? Boolean ?: false
+                    showMediaNotification(title, subtitle, playing)
+                    result.success(null)
+                }
+                "clearMediaNotification" -> {
+                    NotificationManagerCompat.from(this).cancel(MEDIA_NOTIFICATION_ID)
+                    result.success(null)
+                }
+                "installApk" -> {
+                    val path = call.arguments as? String
+                    if (path.isNullOrBlank()) {
+                        result.error("missing_path", "APK path is empty", null)
+                        return@setMethodCallHandler
+                    }
+                    installApk(path)
+                    result.success(null)
+                }
                 "openExternal" -> {
                     val path = call.arguments as? String
                     if (path.isNullOrBlank()) {
@@ -153,6 +201,9 @@ class MainActivity : FlutterActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        intent.getStringExtra("mediaCommand")?.let {
+            mediaMethodChannel?.invokeMethod("mediaControl", it)
+        }
     }
 
     @Deprecated("Deprecated in Android API, still used for ACTION_OPEN_DOCUMENT compatibility.")
@@ -200,6 +251,93 @@ class MainActivity : FlutterActivity() {
         }
         textToSpeech = null
         super.onDestroy()
+    }
+
+    private fun mediaPendingIntent(command: String): PendingIntent {
+        val intent = Intent(this, MediaActionReceiver::class.java).apply {
+            action = MEDIA_ACTION
+            putExtra("command", command)
+        }
+        return PendingIntent.getBroadcast(
+            this,
+            command.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    private fun showMediaNotification(title: String, subtitle: String, playing: Boolean) {
+        if (title.isBlank()) {
+            NotificationManagerCompat.from(this).cancel(MEDIA_NOTIFICATION_ID)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                NOTIFICATION_PERMISSION_REQUEST
+            )
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
+            val channel = NotificationChannel(
+                MEDIA_CHANNEL_ID,
+                "Files Managers media",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Background media controls"
+                setShowBadge(false)
+            }
+            manager.createNotificationChannel(channel)
+        }
+        val openIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val playPauseIcon = if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+        val notification = NotificationCompat.Builder(this, MEDIA_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(title)
+            .setContentText(subtitle)
+            .setContentIntent(openIntent)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setOngoing(false)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(android.R.drawable.ic_media_previous, "Previous", mediaPendingIntent("previous"))
+            .addAction(playPauseIcon, if (playing) "Pause" else "Play", mediaPendingIntent("playPause"))
+            .addAction(android.R.drawable.ic_media_next, "Next", mediaPendingIntent("next"))
+            .build()
+        NotificationManagerCompat.from(this).notify(MEDIA_NOTIFICATION_ID, notification)
+    }
+
+    private fun installApk(path: String) {
+        val file = File(path)
+        if (!file.exists()) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls()
+        ) {
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    data = Uri.parse("package:$packageName")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+        }
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        startActivity(intent)
     }
 
     private fun resolveIntentToLocalPath(intent: Intent?): String? {
@@ -451,4 +589,12 @@ class MainActivity : FlutterActivity() {
 
     private fun sanitizeFileName(name: String): String =
         name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+}
+
+class MediaActionReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != "com.filesmanagers.app.MEDIA_ACTION") return
+        val command = intent.getStringExtra("command") ?: return
+        MainActivity.dispatchMediaCommand(context, command)
+    }
 }

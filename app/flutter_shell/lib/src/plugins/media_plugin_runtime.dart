@@ -164,7 +164,12 @@ class WebMusicPluginService {
     for (final uri in _candidateUris(section, query)) {
       try {
         final html = await _readHtml(uri);
-        final entries = await _entriesFromHtml(html, uri, section, query);
+        final entries = await _entriesFromHtmlWithPagination(
+          html,
+          uri,
+          section,
+          query,
+        );
         if (entries.isNotEmpty &&
             (query.trim().isEmpty || _htmlMentionsQuery(html, query))) {
           return DirectorySnapshot(path: section.runtimeId, entries: entries);
@@ -181,6 +186,103 @@ class WebMusicPluginService {
       entries: const <ExplorerEntry>[],
       error: errors.isEmpty ? null : errors.join('\n'),
     );
+  }
+
+  Future<List<ExplorerEntry>> _entriesFromHtmlWithPagination(
+    String html,
+    Uri pageUri,
+    PluginMediaSection section,
+    String query,
+  ) async {
+    final merged = <ExplorerEntry>[
+      ...await _entriesFromHtml(html, pageUri, section, query),
+    ];
+    final seenPages = <String>{pageUri.removeFragment().toString()};
+    for (final nextUri in _paginationCandidates(html, pageUri).take(5)) {
+      final normalized = nextUri.removeFragment().toString();
+      if (!seenPages.add(normalized)) continue;
+      try {
+        final nextHtml = await _readHtml(nextUri, referer: pageUri);
+        merged.addAll(
+          await _entriesFromHtml(nextHtml, nextUri, section, query),
+        );
+      } catch (_) {
+        // Catalogue pagination differs across music sites; unsupported pages
+        // should not hide the tracks found on the current page.
+      }
+    }
+    return _dedupeExplorerEntries(merged);
+  }
+
+  Iterable<Uri> _paginationCandidates(String html, Uri pageUri) sync* {
+    final seen = <String>{};
+    for (final match in _anchorTextPattern.allMatches(html)) {
+      final raw = match.group(1);
+      final text = match.group(2);
+      if (raw == null || text == null) continue;
+      final title = _cleanTitle(_stripTags(text)).toLowerCase();
+      final reference = _decodeHtml(raw.trim());
+      if (!_looksLikePaginationReference(reference, title)) continue;
+      final uri = _resolveReference(pageUri, reference);
+      if (uri == null) continue;
+      if (uri.host.isNotEmpty && uri.host != pageUri.host) continue;
+      final normalized = uri.removeFragment().toString();
+      if (seen.add(normalized)) yield uri;
+    }
+
+    for (var page = 2; page <= 5; page++) {
+      final queryParameters = <String, String>{
+        ...pageUri.queryParameters,
+        'page': '$page',
+      };
+      final queryUri = pageUri.replace(queryParameters: queryParameters);
+      final queryKey = queryUri.removeFragment().toString();
+      if (seen.add(queryKey)) yield queryUri;
+
+      if (pageUri.queryParameters.isEmpty) {
+        final normalizedPath =
+            pageUri.path.endsWith('/') ? pageUri.path : '${pageUri.path}/';
+        final pathUri = pageUri.replace(path: '$normalizedPath$page');
+        final pathKey = pathUri.removeFragment().toString();
+        if (seen.add(pathKey)) yield pathUri;
+      }
+    }
+  }
+
+  bool _looksLikePaginationReference(String reference, String title) {
+    final lower = reference.toLowerCase();
+    if (lower.startsWith('#') ||
+        lower.startsWith('mailto:') ||
+        lower.startsWith('javascript:') ||
+        lower.contains('.css') ||
+        lower.contains('.js') ||
+        lower.contains('.jpg') ||
+        lower.contains('.png') ||
+        lower.contains('.svg')) {
+      return false;
+    }
+    if (RegExp(r'^\d{1,3}$').hasMatch(title)) return true;
+    if (title.contains('next') ||
+        title.contains('more') ||
+        title.contains(_ru('0435 0449 0435')) ||
+        title.contains(_ru('0434 0430 043b 0435 0435')) ||
+        title.contains(_ru('0441 043b 0435 0434'))) {
+      return true;
+    }
+    return lower.contains('page=') ||
+        lower.contains('/page/') ||
+        RegExp(r'/\d{1,3}/?$').hasMatch(lower);
+  }
+
+  List<ExplorerEntry> _dedupeExplorerEntries(List<ExplorerEntry> entries) {
+    final byKey = <String, ExplorerEntry>{};
+    for (final entry in entries) {
+      final key = entry.kind == ExplorerEntryKind.directory
+          ? 'dir:${entry.path}'
+          : 'file:${entry.path.isEmpty ? entry.name : entry.path}';
+      byKey.putIfAbsent(key, () => entry);
+    }
+    return byKey.values.toList();
   }
 
   Future<File> download(

@@ -71,6 +71,7 @@ class PlatformServices {
   static const MethodChannel _windowChannel =
       MethodChannel('filesmanagers/window');
   static final List<HttpServer> _swfServers = <HttpServer>[];
+  static FutureOr<void> Function(String command)? _mediaControlHandler;
 
   static const List<String> _ruffleRuntimeFiles = <String>[
     'ruffle.js',
@@ -83,6 +84,52 @@ class PlatformServices {
   static Future<void> setWindowTitle(String title) async {
     if (Platform.isWindows) {
       await _windowChannel.invokeMethod<void>('setTitle', title);
+    }
+  }
+
+  static void setMediaControlHandler(
+    FutureOr<void> Function(String command)? handler,
+  ) {
+    _mediaControlHandler = handler;
+    _channel.setMethodCallHandler(_handlePlatformMethodCall);
+    _windowChannel.setMethodCallHandler(_handlePlatformMethodCall);
+  }
+
+  static Future<void> _handlePlatformMethodCall(MethodCall call) async {
+    if (call.method == 'mediaControl') {
+      final command = call.arguments?.toString() ?? '';
+      if (command.isNotEmpty) {
+        await _mediaControlHandler?.call(command);
+      }
+      return;
+    }
+    throw MissingPluginException('No Dart handler for ${call.method}');
+  }
+
+  static Future<void> updateMediaNotification({
+    required bool enabled,
+    required bool playing,
+    required String title,
+    required String subtitle,
+  }) async {
+    if (!enabled || title.trim().isEmpty) {
+      await clearMediaNotification();
+      return;
+    }
+    if (Platform.isAndroid) {
+      await _channel.invokeMethod<void>('updateMediaNotification', {
+        'playing': playing,
+        'title': title,
+        'subtitle': subtitle,
+      }).catchError((_) {});
+    }
+  }
+
+  static Future<void> clearMediaNotification() async {
+    if (Platform.isAndroid) {
+      await _channel
+          .invokeMethod<void>('clearMediaNotification')
+          .catchError((_) {});
     }
   }
 
@@ -450,6 +497,63 @@ class PlatformServices {
       runInShell: Platform.isWindows,
     );
   }
+
+  static Future<void> installDownloadedUpdate(String path) async {
+    if (Platform.isAndroid) {
+      await _channel.invokeMethod<void>('installApk', path);
+      return;
+    }
+    if (Platform.isWindows) {
+      await _installWindowsZipUpdate(path);
+      return;
+    }
+    await openExternal(path);
+  }
+
+  static Future<void> _installWindowsZipUpdate(String zipPath) async {
+    final executable = Platform.resolvedExecutable;
+    final installDir = File(executable).parent.path;
+    final scriptFile = File(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}'
+      'filesmanagers_update_${DateTime.now().microsecondsSinceEpoch}.ps1',
+    );
+    final zip64 = base64.encode(utf8.encode(zipPath));
+    final install64 = base64.encode(utf8.encode(installDir));
+    final exe64 = base64.encode(utf8.encode(executable));
+    final pid = pidSafe();
+    final script = '''
+\$ErrorActionPreference = 'Stop'
+\$Zip = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$zip64'))
+\$InstallDir = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$install64'))
+\$Exe = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$exe64'))
+\$ProcessIdToWait = $pid
+try {
+  Wait-Process -Id \$ProcessIdToWait -Timeout 60 -ErrorAction SilentlyContinue
+} catch {}
+\$Temp = Join-Path ([System.IO.Path]::GetTempPath()) ('filesmanagers_update_' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path \$Temp | Out-Null
+Expand-Archive -LiteralPath \$Zip -DestinationPath \$Temp -Force
+Copy-Item -Path (Join-Path \$Temp '*') -Destination \$InstallDir -Recurse -Force
+Remove-Item -LiteralPath \$Temp -Recurse -Force
+Start-Process -FilePath \$Exe -WorkingDirectory \$InstallDir
+''';
+    await scriptFile.writeAsString(script, flush: true);
+    await Process.start(
+      'powershell',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptFile.path,
+      ],
+      mode: ProcessStartMode.detached,
+      runInShell: false,
+    );
+    exit(0);
+  }
+
+  static int pidSafe() => pid;
 
   static Future<void> speakText(String text) async {
     final value = text.trim();

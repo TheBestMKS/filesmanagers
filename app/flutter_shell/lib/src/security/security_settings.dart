@@ -229,6 +229,8 @@ class SecuritySettings {
     this.videoEqualizerPreset = 'flat',
     this.perFileEqualizerPresets = const <String, String>{},
     this.lastPlayedMediaKey,
+    this.updateDismissedTag,
+    this.updateRemindLaterUntil,
     this.connectionProfiles = const <PluginConnectionProfile>[],
   });
 
@@ -324,6 +326,8 @@ class SecuritySettings {
   final String videoEqualizerPreset;
   final Map<String, String> perFileEqualizerPresets;
   final String? lastPlayedMediaKey;
+  final String? updateDismissedTag;
+  final DateTime? updateRemindLaterUntil;
   final List<PluginConnectionProfile> connectionProfiles;
 
   bool get hasAppPassword =>
@@ -436,6 +440,10 @@ class SecuritySettings {
     Map<String, String>? perFileEqualizerPresets,
     String? lastPlayedMediaKey,
     bool clearLastPlayedMediaKey = false,
+    String? updateDismissedTag,
+    bool clearUpdateDismissedTag = false,
+    DateTime? updateRemindLaterUntil,
+    bool clearUpdateRemindLaterUntil = false,
     List<PluginConnectionProfile>? connectionProfiles,
   }) {
     return SecuritySettings(
@@ -587,6 +595,12 @@ class SecuritySettings {
       lastPlayedMediaKey: clearLastPlayedMediaKey
           ? null
           : lastPlayedMediaKey ?? this.lastPlayedMediaKey,
+      updateDismissedTag: clearUpdateDismissedTag
+          ? null
+          : updateDismissedTag ?? this.updateDismissedTag,
+      updateRemindLaterUntil: clearUpdateRemindLaterUntil
+          ? null
+          : updateRemindLaterUntil ?? this.updateRemindLaterUntil,
       connectionProfiles: connectionProfiles ?? this.connectionProfiles,
     );
   }
@@ -606,6 +620,7 @@ class SecuritySettings {
     final folderBehavior = json['folderBehaviorByPath'];
     final perFileEqualizer = json['perFileEqualizerPresets'];
     final connectionProfiles = json['connectionProfiles'];
+    final remindLaterRaw = json['updateRemindLaterUntil'] as String?;
     List<String> listField(String key) {
       final value = json[key];
       return value is List
@@ -784,6 +799,10 @@ class SecuritySettings {
               .map((key, value) => MapEntry(key.toString(), value.toString()))
           : const <String, String>{},
       lastPlayedMediaKey: json['lastPlayedMediaKey'] as String?,
+      updateDismissedTag: json['updateDismissedTag'] as String?,
+      updateRemindLaterUntil: remindLaterRaw == null
+          ? null
+          : DateTime.tryParse(remindLaterRaw)?.toUtc(),
       connectionProfiles: connectionProfiles is List
           ? connectionProfiles
               .whereType<Map>()
@@ -894,6 +913,8 @@ class SecuritySettings {
       'videoEqualizerPreset': videoEqualizerPreset,
       'perFileEqualizerPresets': perFileEqualizerPresets,
       'lastPlayedMediaKey': lastPlayedMediaKey,
+      'updateDismissedTag': updateDismissedTag,
+      'updateRemindLaterUntil': updateRemindLaterUntil?.toIso8601String(),
       'connectionProfiles':
           connectionProfiles.map((profile) => profile.toJson()).toList(),
     };
@@ -1579,6 +1600,30 @@ class SecuritySettingsRepository {
       SecuritySettings settings) async {
     final next = settings.copyWith(
         clearSavedFilePassword: true, rememberFilePasswords: false);
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> remindUpdateLater(
+    SecuritySettings settings,
+    DateTime until,
+  ) async {
+    final next = settings.copyWith(
+      updateRemindLaterUntil: until.toUtc(),
+      clearUpdateDismissedTag: true,
+    );
+    await save(next);
+    return next;
+  }
+
+  Future<SecuritySettings> dismissUpdate(
+    SecuritySettings settings,
+    String tag,
+  ) async {
+    final next = settings.copyWith(
+      updateDismissedTag: tag,
+      clearUpdateRemindLaterUntil: true,
+    );
     await save(next);
     return next;
   }

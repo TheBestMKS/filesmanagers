@@ -28,10 +28,11 @@ import 'src/plugins/media_plugin_runtime.dart';
 import 'src/security/security_settings.dart';
 import 'src/security/vault_crypto.dart';
 import 'src/storage/app_paths.dart';
+import 'src/update/github_update_service.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.19';
+const _appVersion = '0.12.20';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -297,6 +298,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   late final CloudPluginRegistry _plugins;
   late final WebMusicPluginService _webMusicPlugins;
   late final SecuritySettingsRepository _settingsRepo;
+  late final GitHubUpdateService _updates;
 
   var _loading = true;
   var _locked = false;
@@ -352,6 +354,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _plugins = CloudPluginRegistry();
     _webMusicPlugins = const WebMusicPluginService();
     _settingsRepo = SecuritySettingsRepository();
+    _updates = const GitHubUpdateService();
+    _sharedMediaSession.addListener(_syncMediaNotification);
+    PlatformServices.setMediaControlHandler(_handlePlatformMediaControl);
     _boot();
   }
 
@@ -362,6 +367,9 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _locationsRefreshTimer?.cancel();
     _backgroundJobsOverlayEntry?.remove();
     _backgroundJobsOverlayEntry = null;
+    _sharedMediaSession.removeListener(_syncMediaNotification);
+    PlatformServices.setMediaControlHandler(null);
+    unawaited(PlatformServices.clearMediaNotification());
     unawaited(PlatformServices.stopSpeaking());
     super.dispose();
   }
@@ -470,6 +478,8 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_maybeRequestAndroidStorageAccess());
+      unawaited(_maybeCheckForUpdates());
+      _syncMediaNotification();
     });
     _startLocationsAutoRefresh();
   }
@@ -530,6 +540,118 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       .map((item) =>
           '${item.id}\u001f${item.name}\u001f${item.path}\u001f${item.enabled}')
       .join('\u001e');
+
+  Future<void> _maybeCheckForUpdates() async {
+    if (_locked) return;
+    final remindLater = _settings.updateRemindLaterUntil;
+    if (remindLater != null && remindLater.isAfter(DateTime.now().toUtc())) {
+      return;
+    }
+    try {
+      final update = await _updates.check(currentVersion: _appVersion);
+      if (!mounted || update == null) return;
+      if (_settings.updateDismissedTag == update.tag) return;
+      await _showUpdateAvailableDialog(update);
+    } catch (error, stack) {
+      // Update checks are opportunistic: no internet must not disturb startup.
+      unawaited(AppLog.write('GitHub update check skipped', '$error\n$stack'));
+    }
+  }
+
+  Future<void> _showUpdateAvailableDialog(GitHubUpdateInfo update) async {
+    if (!mounted) return;
+    final body = update.body.trim();
+    final assetInfo = update.assetName.isEmpty
+        ? ''
+        : '\n\n${_language.t('update.asset')}: ${update.assetName}'
+            '${update.assetSize <= 0 ? '' : ' (${_formatBytes(update.assetSize)})'}';
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(_language.t('update.available.title')),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: SingleChildScrollView(
+            child: SelectableText(
+              '${_language.t('update.available.body')} ${update.version}.'
+              '$assetInfo'
+              '${body.isEmpty ? '' : '\n\n$body'}',
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              final next = await _settingsRepo.remindUpdateLater(
+                _settings,
+                DateTime.now().toUtc().add(const Duration(days: 1)),
+              );
+              if (mounted) setState(() => _settings = next);
+              if (context.mounted) Navigator.pop(context);
+            },
+            child: Text(_language.t('update.remind_later')),
+          ),
+          TextButton(
+            onPressed: () async {
+              final next = await _settingsRepo.dismissUpdate(
+                _settings,
+                update.tag,
+              );
+              if (mounted) setState(() => _settings = next);
+              if (context.mounted) Navigator.pop(context);
+            },
+            child: Text(_language.t('update.dont_remind')),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.pop(context);
+              unawaited(_downloadAndInstallUpdate(update));
+            },
+            icon: const Icon(Icons.system_update_alt_outlined),
+            label: Text(_language.t('update.download_install')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _downloadAndInstallUpdate(GitHubUpdateInfo update) async {
+    final job = _startBackgroundJob(
+      '${_language.t('update.downloading')} ${update.version}',
+      total: 100,
+    );
+    try {
+      final file = await _updates.download(
+        update,
+        onProgress: (received, total) {
+          final completed = total == null || total <= 0
+              ? 0
+              : ((received / total) * 100).clamp(0, 100).round();
+          _updateBackgroundJob(
+            job,
+            completed: completed,
+            status: _formatBytes(received),
+          );
+        },
+      );
+      _updateBackgroundJob(
+        job,
+        completed: 100,
+        status: _language.t('update.installing'),
+      );
+      await PlatformServices.installDownloadedUpdate(file.path);
+      _updateBackgroundJob(
+        job,
+        completed: 100,
+        done: true,
+        status: _language.t('jobs.done'),
+      );
+    } catch (error, stack) {
+      unawaited(AppLog.write('Update install failed', '$error\n$stack'));
+      _updateBackgroundJob(job, failed: true, status: '$error');
+      _snack('${_language.t('update.failed')} $error');
+    }
+  }
 
   Future<void> _maybeRequestAndroidStorageAccess() async {
     if (!Platform.isAndroid ||
@@ -607,6 +729,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_maybeRequestAndroidStorageAccess());
+      unawaited(_maybeCheckForUpdates());
     });
     if (!_settings.hasFilePassword) {
       final common = await _settingsRepo
@@ -918,6 +1041,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
         );
       }
     });
+    _syncMediaNotification();
   }
 
   void _togglePreviewVisibility() {
@@ -5361,31 +5485,87 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     }
   }
 
+  Future<void> _handlePlatformMediaControl(String command) async {
+    if (!_settings.headsetMediaControls) return;
+    final normalized = command.trim().toLowerCase();
+    switch (normalized) {
+      case 'next':
+      case 'tracknext':
+      case 'media_next':
+        if (_sharedMediaSession.active) await _sharedMediaSession.player.next();
+      case 'previous':
+      case 'prev':
+      case 'trackprevious':
+      case 'media_previous':
+        if (_sharedMediaSession.active) {
+          await _sharedMediaSession.player.previous();
+        }
+      case 'pause':
+        if (_sharedMediaSession.active) {
+          await _sharedMediaSession.player.pause();
+        }
+      case 'stop':
+        if (_sharedMediaSession.active) {
+          await _sharedMediaSession.player.stop();
+        }
+      case 'play':
+        if (!_sharedMediaSession.active) {
+          await _resumeLastPlayedMedia();
+        } else {
+          await _sharedMediaSession.player.play();
+        }
+      case 'playpause':
+      case 'toggle':
+      case 'media_play_pause':
+        if (!_sharedMediaSession.active) {
+          await _resumeLastPlayedMedia();
+        } else {
+          await _sharedMediaSession.player.playOrPause();
+        }
+    }
+    _syncMediaNotification();
+  }
+
+  void _syncMediaNotification() {
+    if (!mounted) return;
+    final active = _sharedMediaSession.active;
+    if (!active) {
+      unawaited(PlatformServices.clearMediaNotification().catchError((_) {}));
+      return;
+    }
+    final title = _sharedMediaSession.currentTitle.trim();
+    final subtitle = (_sharedMediaSession.currentPreview?.subtitle ??
+            _sharedMediaSession.currentPreview?.sourcePath ??
+            '')
+        .trim();
+    unawaited(PlatformServices.updateMediaNotification(
+      enabled: _settings.androidMediaNotificationControls && active,
+      playing: _sharedMediaSession.player.state.playing,
+      title: title,
+      subtitle: subtitle,
+    ).catchError((_) {}));
+  }
+
   KeyEventResult _handleHardwareMediaKey(FocusNode node, KeyEvent event) {
     if (!_settings.headsetMediaControls || event is! KeyDownEvent) {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
-    final player = _sharedMediaSession.player;
     if (key == LogicalKeyboardKey.mediaTrackNext) {
-      unawaited(player.next());
+      unawaited(_handlePlatformMediaControl('next'));
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.mediaTrackPrevious) {
-      unawaited(player.previous());
+      unawaited(_handlePlatformMediaControl('previous'));
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.mediaPause) {
-      unawaited(player.pause());
+      unawaited(_handlePlatformMediaControl('pause'));
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.mediaPlay ||
         key == LogicalKeyboardKey.mediaPlayPause) {
-      if (!_sharedMediaSession.active) {
-        unawaited(_resumeLastPlayedMedia());
-      } else {
-        unawaited(player.playOrPause());
-      }
+      unawaited(_handlePlatformMediaControl('playPause'));
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -12900,12 +13080,22 @@ class _MediaPreviewPlayerState extends State<_MediaPreviewPlayer> {
               onBeforeTrackChange: _rememberCurrentPosition,
             ),
             const SizedBox(height: 12),
-            _MediaPlaylistView(
-              player: _player,
-              items: widget.playlist,
-              language: widget.language,
-              onBeforeTrackChange: _rememberCurrentPosition,
-            ),
+            if (widget.fillAvailable)
+              Flexible(
+                child: _MediaPlaylistView(
+                  player: _player,
+                  items: widget.playlist,
+                  language: widget.language,
+                  onBeforeTrackChange: _rememberCurrentPosition,
+                ),
+              )
+            else
+              _MediaPlaylistView(
+                player: _player,
+                items: widget.playlist,
+                language: widget.language,
+                onBeforeTrackChange: _rememberCurrentPosition,
+              ),
           ],
         );
       },
@@ -12976,16 +13166,11 @@ class _AdaptiveVideoSurface extends StatelessWidget {
 }
 
 class _SharedMediaSession extends ChangeNotifier {
-  _SharedMediaSession() {
-    _playlistSubscription = player.stream.playlist.listen((_) {
-      notifyListeners();
-    });
-  }
-
-  late final Player player = Player();
-  late final VideoController controller = VideoController(player);
+  Player? _player;
+  VideoController? _controller;
   _InMemoryMediaServer? _memoryMediaServer;
-  late final StreamSubscription<Playlist> _playlistSubscription;
+  StreamSubscription<Playlist>? _playlistSubscription;
+  StreamSubscription<bool>? _playingSubscription;
   FilePreview? preview;
   List<MediaPreviewItem> playlist = const [];
   String _sessionKey = '';
@@ -12993,10 +13178,32 @@ class _SharedMediaSession extends ChangeNotifier {
   var collapsed = false;
   var dockSuppressed = false;
 
+  Player get player {
+    final existing = _player;
+    if (existing != null) return existing;
+    MediaKit.ensureInitialized();
+    final created = Player();
+    _player = created;
+    _controller = VideoController(created);
+    _playlistSubscription = created.stream.playlist.listen((_) {
+      notifyListeners();
+    });
+    _playingSubscription = created.stream.playing.listen((_) {
+      notifyListeners();
+    });
+    return created;
+  }
+
+  VideoController get controller {
+    player;
+    return _controller!;
+  }
+
   @override
   void dispose() {
-    unawaited(_playlistSubscription.cancel());
-    unawaited(player.dispose());
+    unawaited(_playlistSubscription?.cancel());
+    unawaited(_playingSubscription?.cancel());
+    unawaited(_player?.dispose());
     super.dispose();
   }
 
@@ -13125,7 +13332,7 @@ class _SharedMediaSession extends ChangeNotifier {
     _sessionKey = '';
     preview = null;
     playlist = const [];
-    await player.stop();
+    await _player?.stop();
     await _clearMemoryMedia();
     notifyListeners();
   }
@@ -14558,115 +14765,124 @@ class _MediaPlaylistView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(
-            language.t(items.firstOrNull?.kind == FileContentKind.video
-                ? 'media.video.playlist'
-                : 'media.audio.playlist'),
-            style: Theme.of(context).textTheme.titleSmall,
-          ),
-          const SizedBox(height: 8),
-          DefaultTabController(
-            length: 8,
-            child: SizedBox(
-              height: 330,
-              child: Column(children: [
-                TabBar(isScrollable: true, tabs: [
-                  Tab(text: language.t('media.tab.current')),
-                  Tab(text: language.t('media.tab.all')),
-                  Tab(text: language.t('media.tab.playlists')),
-                  Tab(text: language.t('media.tab.albums')),
-                  Tab(text: language.t('media.tab.artists')),
-                  Tab(text: language.t('media.tab.genres')),
-                  Tab(text: language.t('media.tab.folders')),
-                  Tab(text: language.t('media.tab.previous')),
-                ]),
-                Expanded(
-                  child: StreamBuilder<Playlist>(
-                    stream: player.stream.playlist,
-                    initialData: player.state.playlist,
-                    builder: (context, snapshot) {
-                      final current = snapshot.data?.index ?? 0;
-                      return TabBarView(children: [
-                        _MediaPlaylistItems(
-                          player: player,
-                          items: items,
-                          allItems: items,
-                          language: language,
-                          current: current,
-                          onBeforeTrackChange: onBeforeTrackChange,
-                        ),
-                        _MediaPlaylistItems(
-                          player: player,
-                          items: items,
-                          allItems: items,
-                          language: language,
-                          current: current,
-                          onBeforeTrackChange: onBeforeTrackChange,
-                        ),
-                        _MediaPlaylistGroups(
-                          groups: _groupItemsByFolder(items),
-                          allItems: items,
-                          player: player,
-                          language: language,
-                          current: current,
-                          onBeforeTrackChange: onBeforeTrackChange,
-                        ),
-                        _MediaPlaylistGroups(
-                          groups: _groupItemsByFolder(items),
-                          allItems: items,
-                          player: player,
-                          language: language,
-                          current: current,
-                          onBeforeTrackChange: onBeforeTrackChange,
-                        ),
-                        _MediaPlaylistGroups(
-                          groups: _groupItemsByArtist(items),
-                          allItems: items,
-                          player: player,
-                          language: language,
-                          current: current,
-                          onBeforeTrackChange: onBeforeTrackChange,
-                        ),
-                        _MediaPlaylistGroups(
-                          groups: {
-                            language.t('media.group.unknown'): items,
-                          },
-                          allItems: items,
-                          player: player,
-                          language: language,
-                          current: current,
-                          onBeforeTrackChange: onBeforeTrackChange,
-                        ),
-                        _MediaPlaylistGroups(
-                          groups: _groupItemsByFolder(items),
-                          allItems: items,
-                          player: player,
-                          language: language,
-                          current: current,
-                          onBeforeTrackChange: onBeforeTrackChange,
-                        ),
-                        _MediaPlaylistItems(
-                          player: player,
-                          items: items.reversed.take(25).toList(),
-                          allItems: items,
-                          language: language,
-                          current: current,
-                          onBeforeTrackChange: onBeforeTrackChange,
-                        ),
-                      ]);
-                    },
-                  ),
-                ),
-              ]),
+    Widget tabs() => DefaultTabController(
+          length: 8,
+          child: Column(children: [
+            TabBar(isScrollable: true, tabs: [
+              Tab(text: language.t('media.tab.current')),
+              Tab(text: language.t('media.tab.all')),
+              Tab(text: language.t('media.tab.playlists')),
+              Tab(text: language.t('media.tab.albums')),
+              Tab(text: language.t('media.tab.artists')),
+              Tab(text: language.t('media.tab.genres')),
+              Tab(text: language.t('media.tab.folders')),
+              Tab(text: language.t('media.tab.previous')),
+            ]),
+            Expanded(
+              child: StreamBuilder<Playlist>(
+                stream: player.stream.playlist,
+                initialData: player.state.playlist,
+                builder: (context, snapshot) {
+                  final current = snapshot.data?.index ?? 0;
+                  return TabBarView(children: [
+                    _MediaPlaylistItems(
+                      player: player,
+                      items: items,
+                      allItems: items,
+                      language: language,
+                      current: current,
+                      onBeforeTrackChange: onBeforeTrackChange,
+                    ),
+                    _MediaPlaylistItems(
+                      player: player,
+                      items: items,
+                      allItems: items,
+                      language: language,
+                      current: current,
+                      onBeforeTrackChange: onBeforeTrackChange,
+                    ),
+                    _MediaPlaylistGroups(
+                      groups: _groupItemsByFolder(items),
+                      allItems: items,
+                      player: player,
+                      language: language,
+                      current: current,
+                      onBeforeTrackChange: onBeforeTrackChange,
+                    ),
+                    _MediaPlaylistGroups(
+                      groups: _groupItemsByFolder(items),
+                      allItems: items,
+                      player: player,
+                      language: language,
+                      current: current,
+                      onBeforeTrackChange: onBeforeTrackChange,
+                    ),
+                    _MediaPlaylistGroups(
+                      groups: _groupItemsByArtist(items),
+                      allItems: items,
+                      player: player,
+                      language: language,
+                      current: current,
+                      onBeforeTrackChange: onBeforeTrackChange,
+                    ),
+                    _MediaPlaylistGroups(
+                      groups: {
+                        language.t('media.group.unknown'): items,
+                      },
+                      allItems: items,
+                      player: player,
+                      language: language,
+                      current: current,
+                      onBeforeTrackChange: onBeforeTrackChange,
+                    ),
+                    _MediaPlaylistGroups(
+                      groups: _groupItemsByFolder(items),
+                      allItems: items,
+                      player: player,
+                      language: language,
+                      current: current,
+                      onBeforeTrackChange: onBeforeTrackChange,
+                    ),
+                    _MediaPlaylistItems(
+                      player: player,
+                      items: items.reversed.take(25).toList(),
+                      allItems: items,
+                      language: language,
+                      current: current,
+                      onBeforeTrackChange: onBeforeTrackChange,
+                    ),
+                  ]);
+                },
+              ),
             ),
+          ]),
+        );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final bounded = constraints.hasBoundedHeight &&
+            constraints.maxHeight.isFinite &&
+            constraints.maxHeight > 220;
+        return Card(
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                language.t(items.firstOrNull?.kind == FileContentKind.video
+                    ? 'media.video.playlist'
+                    : 'media.audio.playlist'),
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 8),
+              if (bounded)
+                Expanded(child: tabs())
+              else
+                SizedBox(height: 330, child: tabs()),
+            ]),
           ),
-        ]),
-      ),
+        );
+      },
     );
   }
 
@@ -18014,14 +18230,6 @@ class _SettingsViewState extends State<_SettingsView> {
           label: Text(language.t('settings.plugin.install')),
         ),
       ]),
-      const SizedBox(height: 16),
-      FilledButton.icon(
-        onPressed: _busy ? null : () => _save(),
-        icon: const Icon(Icons.save_outlined),
-        label: Text(
-          _busy ? language.t('common.saving') : language.t('common.save'),
-        ),
-      ),
     ]);
   }
 

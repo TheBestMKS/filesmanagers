@@ -29,6 +29,7 @@ class FlutterWindow : public Win32Window {
   void RemoveTrayIcon();
   void RestoreFromTray();
   void ShowTrayMenu();
+  void SendMediaCommand(const std::string& command);
 
   // The project to run.
   flutter::DartProject project_;

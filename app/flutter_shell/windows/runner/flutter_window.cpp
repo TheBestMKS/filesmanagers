@@ -164,7 +164,7 @@ void FlutterWindow::AddTrayIcon() {
   nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
   nid.uCallbackMessage = kTrayMessage;
   nid.hIcon = LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(IDI_APP_ICON));
-  wcscpy_s(nid.szTip, L"filesmanagers");
+  wcscpy_s(nid.szTip, L"Files Managers");
   if (Shell_NotifyIconW(NIM_ADD, &nid)) {
     tray_icon_added_ = true;
   }
@@ -208,6 +208,14 @@ void FlutterWindow::ShowTrayMenu() {
   }
 }
 
+void FlutterWindow::SendMediaCommand(const std::string& command) {
+  if (!window_channel_) {
+    return;
+  }
+  window_channel_->InvokeMethod(
+      "mediaControl", std::make_unique<flutter::EncodableValue>(command));
+}
+
 LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
@@ -223,6 +231,32 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   switch (message) {
+    case WM_APPCOMMAND: {
+      const int command = GET_APPCOMMAND_LPARAM(lparam);
+      switch (command) {
+        case APPCOMMAND_MEDIA_NEXTTRACK:
+          SendMediaCommand("next");
+          return 1;
+        case APPCOMMAND_MEDIA_PREVIOUSTRACK:
+          SendMediaCommand("previous");
+          return 1;
+        case APPCOMMAND_MEDIA_PLAY_PAUSE:
+          SendMediaCommand("playPause");
+          return 1;
+        case APPCOMMAND_MEDIA_PLAY:
+          SendMediaCommand("play");
+          return 1;
+        case APPCOMMAND_MEDIA_PAUSE:
+          SendMediaCommand("pause");
+          return 1;
+        case APPCOMMAND_MEDIA_STOP:
+          SendMediaCommand("stop");
+          return 1;
+        default:
+          break;
+      }
+      break;
+    }
     case WM_CLOSE:
       if (minimize_to_tray_on_close_ && !exiting_from_tray_) {
         SaveWindowPlacement(hwnd);

@@ -23,18 +23,27 @@ class AppLanguage {
 
   String t(String key) => strings[key] ?? _englishStrings[key] ?? key;
 
-  static const russianTitle = 'filesmanagers';
-  static const englishTitle = 'filesmanagers';
+  static const russianTitle = 'Файловый менеджер';
+  static const englishTitle = 'Files Managers';
 
   static const _englishStrings = <String, String>{
     'app.title': englishTitle,
     'app.runtime.offline': 'Native core offline',
+    'update.available.title': 'Update available',
+    'update.available.body': 'A new application version is available:',
+    'update.asset': 'Package',
+    'update.remind_later': 'Remind later',
+    'update.dont_remind': "Don't remind",
+    'update.download_install': 'Download and install',
+    'update.downloading': 'Downloading update',
+    'update.installing': 'Installing update...',
+    'update.failed': 'Update failed:',
     'about.title': 'About',
     'about.version': 'Version',
     'about.description':
         'Protected explorer, encrypted previews, language packs, and native vault core details.',
     'about.contacts':
-        'Contacts: filesmanagers local build. Add maintainer contacts in the project settings when publishing.',
+        'Developer: Redin Maksim Yuryevich\nContact: info@thebestmks.ru',
     'about.crypto.test': 'Cryptography speed test',
     'about.crypto.test.result': 'Result',
     'about.memory.info': 'Memory usage information',
@@ -719,12 +728,21 @@ class AppLanguage {
   static const _russianStrings = <String, String>{
     'app.title': russianTitle,
     'app.runtime.offline': 'Нативное ядро недоступно',
+    'update.available.title': 'Доступно обновление',
+    'update.available.body': 'Доступна новая версия приложения:',
+    'update.asset': 'Пакет',
+    'update.remind_later': 'Напомнить позже',
+    'update.dont_remind': 'Не напоминать',
+    'update.download_install': 'Скачать и установить',
+    'update.downloading': 'Загрузка обновления',
+    'update.installing': 'Установка обновления...',
+    'update.failed': 'Ошибка обновления:',
     'about.title': 'О программе',
     'about.version': 'Версия',
     'about.description':
         'Защищенный проводник, просмотр зашифрованных файлов, языковые пакеты и сведения о нативном ядре хранилища.',
     'about.contacts':
-        'Контакты: локальная сборка filesmanagers. При публикации укажите контакты сопровождающего в настройках проекта.',
+        'Разработчик: Редин Максим Юрьевич\nКонтактные данные: info@thebestmks.ru',
     'about.crypto.test': 'Тест скорости криптографии',
     'about.crypto.test.result': 'Результат',
     'about.memory.info': 'Информация об используемой памяти',
