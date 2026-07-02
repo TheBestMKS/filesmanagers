@@ -32,7 +32,7 @@ import 'src/update/github_update_service.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.21';
+const _appVersion = '0.12.22';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -344,6 +344,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
   _ReadingSession? _readingSession;
   Timer? _readingTimer;
   Timer? _locationsRefreshTimer;
+  int _miniPlayerSyncSerial = 0;
 
   @override
   void initState() {
@@ -369,6 +370,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     _backgroundJobsOverlayEntry = null;
     _sharedMediaSession.removeListener(_syncMediaNotification);
     PlatformServices.setMediaControlHandler(null);
+    unawaited(PlatformServices.clearMiniPlayer());
     unawaited(PlatformServices.clearMediaNotification());
     unawaited(PlatformServices.stopSpeaking());
     super.dispose();
@@ -5531,6 +5533,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
 
   void _syncMediaNotification() {
     if (!mounted) return;
+    final serial = ++_miniPlayerSyncSerial;
     final active = _sharedMediaSession.active;
     if (!active) {
       unawaited(PlatformServices.clearMiniPlayer().catchError((_) {}));
@@ -5542,18 +5545,70 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
             _sharedMediaSession.currentPreview?.sourcePath ??
             '')
         .trim();
-    unawaited(PlatformServices.updateMiniPlayer(
+    final preview = _sharedMediaSession.currentPreview;
+    final playing = _sharedMediaSession.player.state.playing;
+    unawaited(_syncWindowsMiniPlayer(
+      serial: serial,
       active: active,
-      playing: _sharedMediaSession.player.state.playing,
+      playing: playing,
       title: title,
+      subtitle: subtitle,
+      preview: preview,
     ).catchError((_) {}));
     unawaited(PlatformServices.updateMediaNotification(
       enabled: _settings.androidMediaNotificationControls && active,
-      playing: _sharedMediaSession.player.state.playing,
+      playing: playing,
       title: title,
       subtitle: subtitle,
-      artworkPath: _sharedMediaSession.currentPreview?.sourcePath,
+      artworkPath: preview?.sourcePath,
     ).catchError((_) {}));
+  }
+
+  Future<void> _syncWindowsMiniPlayer({
+    required int serial,
+    required bool active,
+    required bool playing,
+    required String title,
+    required String subtitle,
+    required FilePreview? preview,
+  }) async {
+    if (!Platform.isWindows) return;
+    final artworkBytes = await _miniPlayerArtwork(preview);
+    if (!mounted || serial != _miniPlayerSyncSerial) return;
+    await PlatformServices.updateMiniPlayer(
+      active: active,
+      playing: playing,
+      title: title,
+      subtitle: subtitle,
+      kind: preview?.contentKind.name ?? '',
+      artworkBytes: artworkBytes,
+    );
+  }
+
+  Future<Uint8List?> _miniPlayerArtwork(FilePreview? preview) async {
+    if (preview == null) return null;
+    final sourcePath = preview.sourcePath;
+    final bytes =
+        preview.bytes == null ? null : Uint8List.fromList(preview.bytes!);
+    if (preview.contentKind == FileContentKind.audio) {
+      return MediaArtworkService.audioArtwork(
+        path: preview.decrypted ? null : sourcePath,
+        bytes: bytes,
+      );
+    }
+    if (preview.contentKind != FileContentKind.video) return null;
+    if (sourcePath == null ||
+        sourcePath.isEmpty ||
+        sourcePath.startsWith('remote://') ||
+        sourcePath.startsWith('torrent://') ||
+        sourcePath.startsWith('zip://') ||
+        sourcePath.startsWith('rar://') ||
+        sourcePath.startsWith('http://') ||
+        sourcePath.startsWith('https://') ||
+        preview.decrypted) {
+      return null;
+    }
+    return MediaArtworkService.videoThumbnail(sourcePath);
   }
 
   KeyEventResult _handleHardwareMediaKey(FocusNode node, KeyEvent event) {

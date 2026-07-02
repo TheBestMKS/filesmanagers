@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "win32_window.h"
 
@@ -32,12 +33,16 @@ class FlutterWindow : public Win32Window {
   void ShowTrayMenu();
   void SendMediaCommand(const std::string& command);
   void UpdateMiniPlayerState(bool active, bool playing,
-                             const std::string& title);
+                             const std::string& title,
+                             const std::string& subtitle,
+                             const std::string& kind,
+                             std::vector<uint8_t> artwork_bytes);
   void UpdateMiniPlayerVisibility();
   void EnsureMiniPlayerWindow();
   void ShowMiniPlayer();
   void HideMiniPlayer();
   void UpdateMiniPlayerControls();
+  void PaintMiniPlayer(HWND window);
   static LRESULT CALLBACK MiniPlayerWndProc(HWND window, UINT message,
                                             WPARAM wparam, LPARAM lparam);
 
@@ -52,11 +57,13 @@ class FlutterWindow : public Win32Window {
   bool tray_icon_added_ = false;
   bool exiting_from_tray_ = false;
   HWND mini_player_window_ = nullptr;
-  HWND mini_title_label_ = nullptr;
-  HWND mini_play_button_ = nullptr;
   bool media_active_ = false;
   bool media_playing_ = false;
   std::wstring media_title_;
+  std::wstring media_subtitle_;
+  std::wstring media_kind_;
+  std::vector<uint8_t> media_artwork_bytes_;
+  ULONG_PTR gdiplus_token_ = 0;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

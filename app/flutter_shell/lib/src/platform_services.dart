@@ -139,12 +139,18 @@ class PlatformServices {
     required bool active,
     required bool playing,
     required String title,
+    String subtitle = '',
+    String kind = '',
+    Uint8List? artworkBytes,
   }) async {
     if (Platform.isWindows) {
       await _windowChannel.invokeMethod<void>('updateMiniPlayer', {
         'active': active,
         'playing': playing,
         'title': title,
+        'subtitle': subtitle,
+        'kind': kind,
+        'artworkBytes': artworkBytes,
       }).catchError((_) {});
     }
   }
