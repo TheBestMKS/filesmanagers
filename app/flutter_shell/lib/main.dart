@@ -32,7 +32,7 @@ import 'src/update/github_update_service.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.20';
+const _appVersion = '0.12.21';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -5515,8 +5515,11 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
           await _sharedMediaSession.player.play();
         }
       case 'playpause':
+      case 'play_pause':
+      case 'play-pause':
       case 'toggle':
       case 'media_play_pause':
+      case 'media-play-pause':
         if (!_sharedMediaSession.active) {
           await _resumeLastPlayedMedia();
         } else {
@@ -5530,6 +5533,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     if (!mounted) return;
     final active = _sharedMediaSession.active;
     if (!active) {
+      unawaited(PlatformServices.clearMiniPlayer().catchError((_) {}));
       unawaited(PlatformServices.clearMediaNotification().catchError((_) {}));
       return;
     }
@@ -5538,11 +5542,17 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
             _sharedMediaSession.currentPreview?.sourcePath ??
             '')
         .trim();
+    unawaited(PlatformServices.updateMiniPlayer(
+      active: active,
+      playing: _sharedMediaSession.player.state.playing,
+      title: title,
+    ).catchError((_) {}));
     unawaited(PlatformServices.updateMediaNotification(
       enabled: _settings.androidMediaNotificationControls && active,
       playing: _sharedMediaSession.player.state.playing,
       title: title,
       subtitle: subtitle,
+      artworkPath: _sharedMediaSession.currentPreview?.sourcePath,
     ).catchError((_) {}));
   }
 

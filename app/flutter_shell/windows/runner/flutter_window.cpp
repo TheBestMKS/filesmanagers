@@ -16,6 +16,12 @@ constexpr wchar_t kWindowRegistryPath[] =
 constexpr UINT kTrayMessage = WM_APP + 42;
 constexpr UINT_PTR kTrayIconId = 1001;
 constexpr UINT kTrayExitCommand = 40001;
+constexpr UINT kMiniPreviousCommand = 40101;
+constexpr UINT kMiniPlayPauseCommand = 40102;
+constexpr UINT kMiniNextCommand = 40103;
+constexpr UINT kMiniStopCommand = 40104;
+constexpr UINT kMiniRestoreCommand = 40105;
+constexpr wchar_t kMiniPlayerClass[] = L"FilesManagersMiniPlayerWindow";
 
 std::wstring Utf8ToWide(const std::string& value) {
   if (value.empty()) {
@@ -61,6 +67,25 @@ void SaveWindowPlacement(HWND hwnd) {
   RegSetValueExW(key, L"height", 0, REG_DWORD,
                  reinterpret_cast<const BYTE*>(&height), sizeof(height));
   RegCloseKey(key);
+}
+
+bool ReadBool(const flutter::EncodableMap& map, const char* key,
+              bool default_value = false) {
+  auto it = map.find(flutter::EncodableValue(std::string(key)));
+  if (it == map.end()) {
+    return default_value;
+  }
+  const auto* value = std::get_if<bool>(&it->second);
+  return value == nullptr ? default_value : *value;
+}
+
+std::string ReadString(const flutter::EncodableMap& map, const char* key) {
+  auto it = map.find(flutter::EncodableValue(std::string(key)));
+  if (it == map.end()) {
+    return std::string();
+  }
+  const auto* value = std::get_if<std::string>(&it->second);
+  return value == nullptr ? std::string() : *value;
 }
 
 }  // namespace
@@ -116,6 +141,19 @@ bool FlutterWindow::OnCreate() {
           result->Success();
           return;
         }
+        if (call.method_name() == "updateMiniPlayer") {
+          const auto* map =
+              std::get_if<flutter::EncodableMap>(call.arguments());
+          if (map == nullptr) {
+            result->Error("bad_args", "Expected mini-player state map.");
+            return;
+          }
+          UpdateMiniPlayerState(ReadBool(*map, "active"),
+                                ReadBool(*map, "playing"),
+                                ReadString(*map, "title"));
+          result->Success();
+          return;
+        }
         if (call.method_name() != "setTitle") {
           result->NotImplemented();
           return;
@@ -144,6 +182,13 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   SaveWindowPlacement(GetHandle());
+  HideMiniPlayer();
+  if (mini_player_window_ != nullptr) {
+    DestroyWindow(mini_player_window_);
+    mini_player_window_ = nullptr;
+    mini_title_label_ = nullptr;
+    mini_play_button_ = nullptr;
+  }
   RemoveTrayIcon();
   if (flutter_controller_) {
     window_channel_ = nullptr;
@@ -183,6 +228,7 @@ void FlutterWindow::RemoveTrayIcon() {
 }
 
 void FlutterWindow::RestoreFromTray() {
+  HideMiniPlayer();
   RemoveTrayIcon();
   ShowWindow(GetHandle(), SW_SHOWNORMAL);
   SetForegroundWindow(GetHandle());
@@ -216,10 +262,215 @@ void FlutterWindow::SendMediaCommand(const std::string& command) {
       "mediaControl", std::make_unique<flutter::EncodableValue>(command));
 }
 
+void FlutterWindow::UpdateMiniPlayerState(bool active, bool playing,
+                                          const std::string& title) {
+  media_active_ = active;
+  media_playing_ = playing;
+  media_title_ = Utf8ToWide(title.empty() ? "Files Managers media" : title);
+  UpdateMiniPlayerControls();
+  UpdateMiniPlayerVisibility();
+}
+
+void FlutterWindow::UpdateMiniPlayerVisibility() {
+  if (tray_icon_added_ && media_active_ && !IsWindowVisible(GetHandle())) {
+    ShowMiniPlayer();
+  } else {
+    HideMiniPlayer();
+  }
+}
+
+void FlutterWindow::EnsureMiniPlayerWindow() {
+  if (mini_player_window_ != nullptr) {
+    return;
+  }
+
+  static bool registered = false;
+  if (!registered) {
+    WNDCLASSW window_class{};
+    window_class.lpfnWndProc = FlutterWindow::MiniPlayerWndProc;
+    window_class.hInstance = GetModuleHandle(nullptr);
+    window_class.lpszClassName = kMiniPlayerClass;
+    window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    RegisterClassW(&window_class);
+    registered = true;
+  }
+
+  RECT work_area{};
+  SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
+  const int width = 340;
+  const int height = 116;
+  const int x = work_area.right - width - 18;
+  const int y = work_area.bottom - height - 18;
+
+  mini_player_window_ = CreateWindowExW(
+      WS_EX_TOOLWINDOW | WS_EX_TOPMOST, kMiniPlayerClass, L"Files Managers",
+      WS_POPUP | WS_BORDER, x, y, width, height, GetHandle(), nullptr,
+      GetModuleHandle(nullptr), this);
+  if (mini_player_window_ == nullptr) {
+    return;
+  }
+
+  mini_title_label_ = CreateWindowExW(
+      0, L"STATIC", L"Files Managers media", WS_CHILD | WS_VISIBLE | SS_LEFT,
+      12, 10, width - 24, 28, mini_player_window_, nullptr,
+      GetModuleHandle(nullptr), nullptr);
+  CreateWindowExW(0, L"BUTTON", L"Prev", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                  12, 58, 58, 34, mini_player_window_,
+                  reinterpret_cast<HMENU>(
+                      static_cast<UINT_PTR>(kMiniPreviousCommand)),
+                  GetModuleHandle(nullptr), nullptr);
+  mini_play_button_ = CreateWindowExW(
+      0, L"BUTTON", L"Play", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 78, 58, 66,
+      34, mini_player_window_,
+      reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kMiniPlayPauseCommand)),
+      GetModuleHandle(nullptr), nullptr);
+  CreateWindowExW(0, L"BUTTON", L"Next", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                  152, 58, 58, 34, mini_player_window_,
+                  reinterpret_cast<HMENU>(
+                      static_cast<UINT_PTR>(kMiniNextCommand)),
+                  GetModuleHandle(nullptr), nullptr);
+  CreateWindowExW(0, L"BUTTON", L"Stop", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                  218, 58, 54, 34, mini_player_window_,
+                  reinterpret_cast<HMENU>(
+                      static_cast<UINT_PTR>(kMiniStopCommand)),
+                  GetModuleHandle(nullptr), nullptr);
+  CreateWindowExW(0, L"BUTTON", L"Open", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                  280, 58, 48, 34, mini_player_window_,
+                  reinterpret_cast<HMENU>(
+                      static_cast<UINT_PTR>(kMiniRestoreCommand)),
+                  GetModuleHandle(nullptr), nullptr);
+  UpdateMiniPlayerControls();
+}
+
+void FlutterWindow::ShowMiniPlayer() {
+  EnsureMiniPlayerWindow();
+  if (mini_player_window_ == nullptr) {
+    return;
+  }
+  UpdateMiniPlayerControls();
+  ShowWindow(mini_player_window_, SW_SHOWNOACTIVATE);
+  SetWindowPos(mini_player_window_, HWND_TOPMOST, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void FlutterWindow::HideMiniPlayer() {
+  if (mini_player_window_ != nullptr) {
+    ShowWindow(mini_player_window_, SW_HIDE);
+  }
+}
+
+void FlutterWindow::UpdateMiniPlayerControls() {
+  if (mini_title_label_ != nullptr) {
+    SetWindowTextW(mini_title_label_,
+                   media_title_.empty() ? L"Files Managers media"
+                                        : media_title_.c_str());
+  }
+  if (mini_play_button_ != nullptr) {
+    SetWindowTextW(mini_play_button_, media_playing_ ? L"Pause" : L"Play");
+  }
+}
+
+LRESULT CALLBACK FlutterWindow::MiniPlayerWndProc(HWND window, UINT message,
+                                                  WPARAM wparam,
+                                                  LPARAM lparam) {
+  auto* self =
+      reinterpret_cast<FlutterWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+  if (message == WM_NCCREATE) {
+    const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+    self = reinterpret_cast<FlutterWindow*>(create->lpCreateParams);
+    SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+  }
+  if (self == nullptr) {
+    return DefWindowProcW(window, message, wparam, lparam);
+  }
+
+  switch (message) {
+    case WM_COMMAND:
+      switch (LOWORD(wparam)) {
+        case kMiniPreviousCommand:
+          self->SendMediaCommand("previous");
+          return 0;
+        case kMiniPlayPauseCommand:
+          self->SendMediaCommand("playPause");
+          return 0;
+        case kMiniNextCommand:
+          self->SendMediaCommand("next");
+          return 0;
+        case kMiniStopCommand:
+          self->SendMediaCommand("stop");
+          return 0;
+        case kMiniRestoreCommand:
+          self->RestoreFromTray();
+          return 0;
+        default:
+          break;
+      }
+      break;
+    case WM_APPCOMMAND: {
+      const int command = GET_APPCOMMAND_LPARAM(lparam);
+      switch (command) {
+        case APPCOMMAND_MEDIA_NEXTTRACK:
+          self->SendMediaCommand("next");
+          return 1;
+        case APPCOMMAND_MEDIA_PREVIOUSTRACK:
+          self->SendMediaCommand("previous");
+          return 1;
+        case APPCOMMAND_MEDIA_PLAY_PAUSE:
+          self->SendMediaCommand("playPause");
+          return 1;
+        case APPCOMMAND_MEDIA_PLAY:
+          self->SendMediaCommand("play");
+          return 1;
+        case APPCOMMAND_MEDIA_PAUSE:
+          self->SendMediaCommand("pause");
+          return 1;
+        case APPCOMMAND_MEDIA_STOP:
+          self->SendMediaCommand("stop");
+          return 1;
+        default:
+          break;
+      }
+      break;
+    }
+    case WM_LBUTTONDOWN:
+      ReleaseCapture();
+      SendMessageW(window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+      return 0;
+  }
+  return DefWindowProcW(window, message, wparam, lparam);
+}
+
 LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == WM_APPCOMMAND) {
+    const int command = GET_APPCOMMAND_LPARAM(lparam);
+    switch (command) {
+      case APPCOMMAND_MEDIA_NEXTTRACK:
+        SendMediaCommand("next");
+        return 1;
+      case APPCOMMAND_MEDIA_PREVIOUSTRACK:
+        SendMediaCommand("previous");
+        return 1;
+      case APPCOMMAND_MEDIA_PLAY_PAUSE:
+        SendMediaCommand("playPause");
+        return 1;
+      case APPCOMMAND_MEDIA_PLAY:
+        SendMediaCommand("play");
+        return 1;
+      case APPCOMMAND_MEDIA_PAUSE:
+        SendMediaCommand("pause");
+        return 1;
+      case APPCOMMAND_MEDIA_STOP:
+        SendMediaCommand("stop");
+        return 1;
+      default:
+        break;
+    }
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =
@@ -231,37 +482,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   switch (message) {
-    case WM_APPCOMMAND: {
-      const int command = GET_APPCOMMAND_LPARAM(lparam);
-      switch (command) {
-        case APPCOMMAND_MEDIA_NEXTTRACK:
-          SendMediaCommand("next");
-          return 1;
-        case APPCOMMAND_MEDIA_PREVIOUSTRACK:
-          SendMediaCommand("previous");
-          return 1;
-        case APPCOMMAND_MEDIA_PLAY_PAUSE:
-          SendMediaCommand("playPause");
-          return 1;
-        case APPCOMMAND_MEDIA_PLAY:
-          SendMediaCommand("play");
-          return 1;
-        case APPCOMMAND_MEDIA_PAUSE:
-          SendMediaCommand("pause");
-          return 1;
-        case APPCOMMAND_MEDIA_STOP:
-          SendMediaCommand("stop");
-          return 1;
-        default:
-          break;
-      }
-      break;
-    }
     case WM_CLOSE:
       if (minimize_to_tray_on_close_ && !exiting_from_tray_) {
         SaveWindowPlacement(hwnd);
         AddTrayIcon();
         ShowWindow(hwnd, SW_HIDE);
+        UpdateMiniPlayerVisibility();
         return 0;
       }
       break;

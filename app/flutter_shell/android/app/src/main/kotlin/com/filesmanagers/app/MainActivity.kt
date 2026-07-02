@@ -1,6 +1,7 @@
 package com.filesmanagers.app
 
 import android.Manifest
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -10,7 +11,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
+import android.media.MediaMetadata
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -21,9 +26,8 @@ import android.provider.OpenableColumns
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import android.view.KeyEvent
 import android.view.WindowManager
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -65,11 +69,34 @@ class MainActivity : FlutterActivity() {
             }
             context.startActivity(intent)
         }
+
+        fun commandForMediaKey(keyCode: Int): String? =
+            when (keyCode) {
+                KeyEvent.KEYCODE_MEDIA_NEXT -> "next"
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> "previous"
+                KeyEvent.KEYCODE_MEDIA_PLAY -> "play"
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> "pause"
+                KeyEvent.KEYCODE_MEDIA_STOP -> "stop"
+                KeyEvent.KEYCODE_HEADSETHOOK,
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> "playPause"
+                else -> null
+            }
+
+        fun dispatchMediaButtonIntent(context: Context, intent: Intent?): Boolean {
+            if (intent?.action != Intent.ACTION_MEDIA_BUTTON) return false
+            @Suppress("DEPRECATION")
+            val event = intent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT) ?: return false
+            if (event.action != KeyEvent.ACTION_DOWN) return true
+            val command = commandForMediaKey(event.keyCode) ?: return false
+            dispatchMediaCommand(context, command)
+            return true
+        }
     }
 
     private var textToSpeech: TextToSpeech? = null
     private var pendingPickFileResult: Result? = null
     private var pendingPickDirectoryResult: Result? = null
+    private var mediaSession: MediaSession? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -138,11 +165,12 @@ class MainActivity : FlutterActivity() {
                     val title = args?.get("title") as? String ?: ""
                     val subtitle = args?.get("subtitle") as? String ?: ""
                     val playing = args?.get("playing") as? Boolean ?: false
-                    showMediaNotification(title, subtitle, playing)
+                    val artworkPath = args?.get("artworkPath") as? String
+                    showMediaNotification(title, subtitle, playing, artworkPath)
                     result.success(null)
                 }
                 "clearMediaNotification" -> {
-                    NotificationManagerCompat.from(this).cancel(MEDIA_NOTIFICATION_ID)
+                    clearMediaNotification()
                     result.success(null)
                 }
                 "installApk" -> {
@@ -201,9 +229,20 @@ class MainActivity : FlutterActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (dispatchMediaButtonIntent(this, intent)) return
         intent.getStringExtra("mediaCommand")?.let {
             mediaMethodChannel?.invokeMethod("mediaControl", it)
         }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            commandForMediaKey(event.keyCode)?.let {
+                dispatchMediaCommand(this, it)
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     @Deprecated("Deprecated in Android API, still used for ACTION_OPEN_DOCUMENT compatibility.")
@@ -250,6 +289,8 @@ class MainActivity : FlutterActivity() {
         } catch (_: Exception) {
         }
         textToSpeech = null
+        mediaSession?.release()
+        mediaSession = null
         super.onDestroy()
     }
 
@@ -266,9 +307,138 @@ class MainActivity : FlutterActivity() {
         )
     }
 
-    private fun showMediaNotification(title: String, subtitle: String, playing: Boolean) {
+    private fun ensureMediaSession(): MediaSession {
+        mediaSession?.let { return it }
+        val session = MediaSession(this, "FilesManagersMediaSession")
+        @Suppress("DEPRECATION")
+        session.setFlags(
+            MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
+                MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+        )
+        session.setCallback(object : MediaSession.Callback() {
+            override fun onPlay() {
+                dispatchMediaCommand(this@MainActivity, "play")
+            }
+
+            override fun onPause() {
+                dispatchMediaCommand(this@MainActivity, "pause")
+            }
+
+            override fun onSkipToNext() {
+                dispatchMediaCommand(this@MainActivity, "next")
+            }
+
+            override fun onSkipToPrevious() {
+                dispatchMediaCommand(this@MainActivity, "previous")
+            }
+
+            override fun onStop() {
+                dispatchMediaCommand(this@MainActivity, "stop")
+            }
+
+            override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                return dispatchMediaButtonIntent(this@MainActivity, mediaButtonIntent) ||
+                    super.onMediaButtonEvent(mediaButtonIntent)
+            }
+        })
+        mediaSession = session
+        return session
+    }
+
+    private fun updateMediaSessionState(
+        session: MediaSession,
+        title: String,
+        subtitle: String,
+        playing: Boolean,
+        artwork: Bitmap?
+    ) {
+        val playbackState = if (playing) {
+            PlaybackState.STATE_PLAYING
+        } else {
+            PlaybackState.STATE_PAUSED
+        }
+        val actions = PlaybackState.ACTION_PLAY or
+            PlaybackState.ACTION_PAUSE or
+            PlaybackState.ACTION_PLAY_PAUSE or
+            PlaybackState.ACTION_SKIP_TO_NEXT or
+            PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+            PlaybackState.ACTION_STOP or
+            PlaybackState.ACTION_SEEK_TO
+        session.setPlaybackState(
+            PlaybackState.Builder()
+                .setActions(actions)
+                .setState(
+                    playbackState,
+                    PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                    if (playing) 1.0f else 0.0f
+                )
+                .build()
+        )
+        val metadata = MediaMetadata.Builder()
+            .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, subtitle)
+            .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, subtitle)
+        if (artwork != null) {
+            metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork)
+            metadata.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, artwork)
+        }
+        session.setMetadata(metadata.build())
+        session.isActive = true
+    }
+
+    private fun mediaAction(icon: Int, title: String, command: String): Notification.Action =
+        Notification.Action.Builder(icon, title, mediaPendingIntent(command)).build()
+
+    private fun mediaNotificationBuilder(): Notification.Builder =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, MEDIA_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+
+    private fun loadNotificationArtwork(path: String?): Bitmap? {
+        if (path.isNullOrBlank() ||
+            path.startsWith("remote://") ||
+            path.startsWith("torrent://") ||
+            path.startsWith("zip://") ||
+            path.startsWith("rar://") ||
+            path.startsWith("http://") ||
+            path.startsWith("https://")
+        ) {
+            return null
+        }
+        val file = File(path)
+        if (!file.exists()) return null
+        val bytes = readMediaArtwork(path) ?: readVideoThumbnail(path) ?: return null
+        return try {
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun clearMediaNotification() {
+        getSystemService(NotificationManager::class.java).cancel(MEDIA_NOTIFICATION_ID)
+        mediaSession?.let {
+            it.setPlaybackState(
+                PlaybackState.Builder()
+                    .setState(PlaybackState.STATE_STOPPED, 0L, 0.0f)
+                    .build()
+            )
+            it.isActive = false
+        }
+    }
+
+    private fun showMediaNotification(
+        title: String,
+        subtitle: String,
+        playing: Boolean,
+        artworkPath: String?
+    ) {
         if (title.isBlank()) {
-            NotificationManagerCompat.from(this).cancel(MEDIA_NOTIFICATION_ID)
+            clearMediaNotification()
             return
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -293,6 +463,9 @@ class MainActivity : FlutterActivity() {
             }
             manager.createNotificationChannel(channel)
         }
+        val session = ensureMediaSession()
+        val artwork = loadNotificationArtwork(artworkPath)
+        updateMediaSessionState(session, title, subtitle, playing, artwork)
         val openIntent = PendingIntent.getActivity(
             this,
             0,
@@ -302,20 +475,33 @@ class MainActivity : FlutterActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val playPauseIcon = if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
-        val notification = NotificationCompat.Builder(this, MEDIA_CHANNEL_ID)
+        val builder = mediaNotificationBuilder()
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(title)
             .setContentText(subtitle)
             .setContentIntent(openIntent)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
-            .setOngoing(false)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .addAction(android.R.drawable.ic_media_previous, "Previous", mediaPendingIntent("previous"))
-            .addAction(playPauseIcon, if (playing) "Pause" else "Play", mediaPendingIntent("playPause"))
-            .addAction(android.R.drawable.ic_media_next, "Next", mediaPendingIntent("next"))
-            .build()
-        NotificationManagerCompat.from(this).notify(MEDIA_NOTIFICATION_ID, notification)
+            .setOngoing(playing)
+            .setCategory(Notification.CATEGORY_TRANSPORT)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setPriority(Notification.PRIORITY_LOW)
+            .setLargeIcon(artwork)
+            .addAction(mediaAction(android.R.drawable.ic_media_previous, "Previous", "previous"))
+            .addAction(mediaAction(playPauseIcon, if (playing) "Pause" else "Play", "playPause"))
+            .addAction(mediaAction(android.R.drawable.ic_media_next, "Next", "next"))
+            .addAction(mediaAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", "stop"))
+            .setStyle(
+                Notification.MediaStyle()
+                    .setMediaSession(session.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2)
+            )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            builder.setColorized(artwork != null)
+            builder.setColor(0xFF2563EB.toInt())
+        }
+        getSystemService(NotificationManager::class.java)
+            .notify(MEDIA_NOTIFICATION_ID, builder.build())
     }
 
     private fun installApk(path: String) {
@@ -593,6 +779,7 @@ class MainActivity : FlutterActivity() {
 
 class MediaActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (MainActivity.dispatchMediaButtonIntent(context, intent)) return
         if (intent.action != "com.filesmanagers.app.MEDIA_ACTION") return
         val command = intent.getStringExtra("command") ?: return
         MainActivity.dispatchMediaCommand(context, command)

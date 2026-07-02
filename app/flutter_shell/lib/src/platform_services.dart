@@ -111,6 +111,7 @@ class PlatformServices {
     required bool playing,
     required String title,
     required String subtitle,
+    String? artworkPath,
   }) async {
     if (!enabled || title.trim().isEmpty) {
       await clearMediaNotification();
@@ -121,6 +122,7 @@ class PlatformServices {
         'playing': playing,
         'title': title,
         'subtitle': subtitle,
+        'artworkPath': artworkPath,
       }).catchError((_) {});
     }
   }
@@ -130,6 +132,26 @@ class PlatformServices {
       await _channel
           .invokeMethod<void>('clearMediaNotification')
           .catchError((_) {});
+    }
+  }
+
+  static Future<void> updateMiniPlayer({
+    required bool active,
+    required bool playing,
+    required String title,
+  }) async {
+    if (Platform.isWindows) {
+      await _windowChannel.invokeMethod<void>('updateMiniPlayer', {
+        'active': active,
+        'playing': playing,
+        'title': title,
+      }).catchError((_) {});
+    }
+  }
+
+  static Future<void> clearMiniPlayer() async {
+    if (Platform.isWindows) {
+      await updateMiniPlayer(active: false, playing: false, title: '');
     }
   }
 

@@ -28,7 +28,11 @@
 
         <receiver
             android:name="com.filesmanagers.app.MediaActionReceiver"
-            android:exported="false" />
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
 
         <activity
             android:name="com.filesmanagers.app.MainActivity"

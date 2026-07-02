@@ -7,6 +7,7 @@
 #include <flutter/method_channel.h>
 
 #include <memory>
+#include <string>
 
 #include "win32_window.h"
 
@@ -30,6 +31,15 @@ class FlutterWindow : public Win32Window {
   void RestoreFromTray();
   void ShowTrayMenu();
   void SendMediaCommand(const std::string& command);
+  void UpdateMiniPlayerState(bool active, bool playing,
+                             const std::string& title);
+  void UpdateMiniPlayerVisibility();
+  void EnsureMiniPlayerWindow();
+  void ShowMiniPlayer();
+  void HideMiniPlayer();
+  void UpdateMiniPlayerControls();
+  static LRESULT CALLBACK MiniPlayerWndProc(HWND window, UINT message,
+                                            WPARAM wparam, LPARAM lparam);
 
   // The project to run.
   flutter::DartProject project_;
@@ -41,6 +51,12 @@ class FlutterWindow : public Win32Window {
   bool minimize_to_tray_on_close_ = true;
   bool tray_icon_added_ = false;
   bool exiting_from_tray_ = false;
+  HWND mini_player_window_ = nullptr;
+  HWND mini_title_label_ = nullptr;
+  HWND mini_play_button_ = nullptr;
+  bool media_active_ = false;
+  bool media_playing_ = false;
+  std::wstring media_title_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_
