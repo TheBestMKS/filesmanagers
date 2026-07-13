@@ -93,6 +93,18 @@ class PlatformServices {
     _mediaControlHandler = handler;
     _channel.setMethodCallHandler(_handlePlatformMethodCall);
     _windowChannel.setMethodCallHandler(_handlePlatformMethodCall);
+    if (handler != null && Platform.isAndroid) {
+      unawaited(_deliverPendingMediaCommand());
+    }
+  }
+
+  static Future<void> _deliverPendingMediaCommand() async {
+    final command = await _channel
+        .invokeMethod<String>('takePendingMediaCommand')
+        .catchError((_) => null);
+    if (command != null && command.trim().isNotEmpty) {
+      await _mediaControlHandler?.call(command);
+    }
   }
 
   static Future<void> _handlePlatformMethodCall(MethodCall call) async {
@@ -127,11 +139,35 @@ class PlatformServices {
     }
   }
 
+  static Future<void> updateMediaSession({
+    required bool enabled,
+    required bool playing,
+    required String title,
+    required String subtitle,
+    String? artworkPath,
+  }) async {
+    if (Platform.isAndroid) {
+      await _channel.invokeMethod<void>('updateMediaSession', {
+        'enabled': enabled,
+        'playing': playing,
+        'title': title,
+        'subtitle': subtitle,
+        'artworkPath': artworkPath,
+      }).catchError((_) {});
+    }
+  }
+
   static Future<void> clearMediaNotification() async {
     if (Platform.isAndroid) {
       await _channel
           .invokeMethod<void>('clearMediaNotification')
           .catchError((_) {});
+    }
+  }
+
+  static Future<void> clearMediaSession() async {
+    if (Platform.isAndroid) {
+      await _channel.invokeMethod<void>('clearMediaSession').catchError((_) {});
     }
   }
 

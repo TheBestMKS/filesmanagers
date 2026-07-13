@@ -32,7 +32,7 @@ import 'src/update/github_update_service.dart';
 import 'src/viewer/file_viewer_service.dart';
 import 'src/viewer/media_artwork_service.dart';
 
-const _appVersion = '0.12.22';
+const _appVersion = '0.12.23';
 final _sharedMediaSession = _SharedMediaSession();
 
 Future<void> main(List<String> args) async {
@@ -372,6 +372,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     PlatformServices.setMediaControlHandler(null);
     unawaited(PlatformServices.clearMiniPlayer());
     unawaited(PlatformServices.clearMediaNotification());
+    unawaited(PlatformServices.clearMediaSession());
     unawaited(PlatformServices.stopSpeaking());
     super.dispose();
   }
@@ -5538,6 +5539,7 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
     if (!active) {
       unawaited(PlatformServices.clearMiniPlayer().catchError((_) {}));
       unawaited(PlatformServices.clearMediaNotification().catchError((_) {}));
+      unawaited(PlatformServices.clearMediaSession().catchError((_) {}));
       return;
     }
     final title = _sharedMediaSession.currentTitle.trim();
@@ -5554,6 +5556,13 @@ class _VaultHomeScreenState extends State<VaultHomeScreen>
       title: title,
       subtitle: subtitle,
       preview: preview,
+    ).catchError((_) {}));
+    unawaited(PlatformServices.updateMediaSession(
+      enabled: _settings.headsetMediaControls && active,
+      playing: playing,
+      title: title,
+      subtitle: subtitle,
+      artworkPath: preview?.sourcePath,
     ).catchError((_) {}));
     unawaited(PlatformServices.updateMediaNotification(
       enabled: _settings.androidMediaNotificationControls && active,

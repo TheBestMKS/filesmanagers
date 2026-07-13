@@ -7,11 +7,13 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Activity
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.AudioAttributes
 import android.media.MediaMetadataRetriever
 import android.media.MediaMetadata
 import android.media.session.MediaSession
@@ -52,6 +54,7 @@ class MainActivity : FlutterActivity() {
         private const val MEDIA_CHANNEL_ID = "filesmanagers_media"
         private const val MEDIA_ACTION = "com.filesmanagers.app.MEDIA_ACTION"
         private var mediaMethodChannel: MethodChannel? = null
+        private var pendingMediaCommand: String? = null
 
         init {
             System.loadLibrary("crypt_core")
@@ -63,6 +66,7 @@ class MainActivity : FlutterActivity() {
                 channel.invokeMethod("mediaControl", command)
                 return
             }
+            pendingMediaCommand = command
             val intent = Intent(context, MainActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 putExtra("mediaCommand", command)
@@ -91,6 +95,12 @@ class MainActivity : FlutterActivity() {
             dispatchMediaCommand(context, command)
             return true
         }
+
+        fun takePendingMediaCommand(): String? {
+            val command = pendingMediaCommand
+            pendingMediaCommand = null
+            return command
+        }
     }
 
     private var textToSpeech: TextToSpeech? = null
@@ -101,6 +111,9 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        intent?.getStringExtra("mediaCommand")?.let {
+            pendingMediaCommand = it
+        }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -169,9 +182,37 @@ class MainActivity : FlutterActivity() {
                     showMediaNotification(title, subtitle, playing, artworkPath)
                     result.success(null)
                 }
+                "updateMediaSession" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val enabled = args?.get("enabled") as? Boolean ?: false
+                    val title = args?.get("title") as? String ?: ""
+                    val subtitle = args?.get("subtitle") as? String ?: ""
+                    val playing = args?.get("playing") as? Boolean ?: false
+                    val artworkPath = args?.get("artworkPath") as? String
+                    if (enabled && title.isNotBlank()) {
+                        val artwork = loadNotificationArtwork(artworkPath)
+                        updateMediaSessionState(
+                            ensureMediaSession(),
+                            title,
+                            subtitle,
+                            playing,
+                            artwork
+                        )
+                    } else {
+                        clearMediaSession()
+                    }
+                    result.success(null)
+                }
                 "clearMediaNotification" -> {
                     clearMediaNotification()
                     result.success(null)
+                }
+                "clearMediaSession" -> {
+                    clearMediaSession()
+                    result.success(null)
+                }
+                "takePendingMediaCommand" -> {
+                    result.success(takePendingMediaCommand())
                 }
                 "installApk" -> {
                     val path = call.arguments as? String
@@ -231,7 +272,12 @@ class MainActivity : FlutterActivity() {
         setIntent(intent)
         if (dispatchMediaButtonIntent(this, intent)) return
         intent.getStringExtra("mediaCommand")?.let {
-            mediaMethodChannel?.invokeMethod("mediaControl", it)
+            val channel = mediaMethodChannel
+            if (channel != null) {
+                channel.invokeMethod("mediaControl", it)
+            } else {
+                pendingMediaCommand = it
+            }
         }
     }
 
@@ -307,6 +353,18 @@ class MainActivity : FlutterActivity() {
         )
     }
 
+    private fun mediaButtonPendingIntent(): PendingIntent {
+        val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            setClass(this@MainActivity, MediaActionReceiver::class.java)
+        }
+        return PendingIntent.getBroadcast(
+            this,
+            0x4D454449,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
     private fun ensureMediaSession(): MediaSession {
         mediaSession?.let { return it }
         val session = MediaSession(this, "FilesManagersMediaSession")
@@ -341,6 +399,24 @@ class MainActivity : FlutterActivity() {
                     super.onMediaButtonEvent(mediaButtonIntent)
             }
         })
+        session.setPlaybackToLocal(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+        )
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                session.setMediaButtonBroadcastReceiver(
+                    ComponentName(this, MediaActionReceiver::class.java)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                session.setMediaButtonReceiver(mediaButtonPendingIntent())
+            }
+        } catch (_: Exception) {
+        }
+        session.isActive = true
         mediaSession = session
         return session
     }
@@ -421,6 +497,9 @@ class MainActivity : FlutterActivity() {
 
     private fun clearMediaNotification() {
         getSystemService(NotificationManager::class.java).cancel(MEDIA_NOTIFICATION_ID)
+    }
+
+    private fun clearMediaSession() {
         mediaSession?.let {
             it.setPlaybackState(
                 PlaybackState.Builder()

@@ -1,7 +1,7 @@
 # filesmanagers
 
 
-Версия приложения: `0.12.22`.
+Версия приложения: `0.12.23`.
 
 
 filesmanagers - кроссплатформенный защищенный файловый менеджер для Windows, Android и Linux. Проект ведется как проводник с просмотром обычных и зашифрованных файлов, медиа-плеером, редакторами, сетевыми/облачными расположениями, плагинами и переносимыми настройками.
@@ -36,6 +36,15 @@ filesmanagers - кроссплатформенный защищенный фай
 - Локализация: русский и английский по умолчанию, установка языковых файлов, экспорт английского образца.
 - Android: запрос прав на файлы/медиа с запоминанием отказа, повторный запрос из настроек, компактная верхняя панель без дублирования названия программы.
 
+
+## Реализовано в 0.12.23
+
+- Версия повышена до `0.12.23` в `pubspec.yaml`, коде приложения и README.
+- Android MediaSession отделена от показа уведомления: гарнитуры, Bluetooth-наушники и автомобильные кнопки теперь получают активную системную медиасессию даже если media-уведомления отключены или разрешение `POST_NOTIFICATIONS` еще не выдано.
+- Для Android добавлен отдельный platform-channel `updateMediaSession`/`clearMediaSession`; уведомление больше не выключает медиасессию, а только скрывает notification.
+- MediaSession теперь регистрирует media-button receiver: на Android 12+ через `setMediaButtonBroadcastReceiver`, на Android 11 и ниже через `setMediaButtonReceiver`, что нужно для команд гарнитуры и повторного запуска управления, когда UI не на экране.
+- Добавлена доставка отложенной media-команды `takePendingMediaCommand`, если гарнитура/машина разбудила приложение до готовности Dart MethodChannel.
+- Для Android MediaSession явно настроены локальные audio attributes `USAGE_MEDIA`/`CONTENT_TYPE_MUSIC`, а `PlaybackState` продолжает публиковать действия `PLAY`, `PAUSE`, `PLAY_PAUSE`, `NEXT`, `PREVIOUS`, `STOP`.
 
 ## Реализовано в 0.12.22
 
@@ -353,9 +362,9 @@ cd app/flutter_shell
 
 После сборки файлы выкладываются в `dist/`:
 
-- `filesmanagers-windows-x64-0.12.22.zip`
-- `filesmanagers-android-0.12.22-release.apk`
-- `SHA256SUMS-0.12.22.txt`
+- `filesmanagers-windows-x64-0.12.23.zip`
+- `filesmanagers-android-0.12.23-release.apk`
+- `SHA256SUMS-0.12.23.txt`
 
 ## Структура проекта
 
